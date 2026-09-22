@@ -1,0 +1,33 @@
+name: Core CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: core-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+env:
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+jobs:
+  core:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: cargo test --locked --workspace
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --lib -- -D warnings -D clippy::disallowed_methods -D clippy::disallowed_types
+      - run: cargo build --locked --workspace --target wasm32-unknown-unknown
+      - run: cargo doc --locked --workspace --no-deps
+      - run: cargo run --locked -p oc-format --example verify-header -- tests/golden/basic.cc
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: cargo install cargo-deny --locked --version 0.20.2
+      - run: cargo deny --locked check licenses bans advisories sources

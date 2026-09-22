@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.cc -text
+*.header -text
+*.kat -text whitespace=cr-at-eol

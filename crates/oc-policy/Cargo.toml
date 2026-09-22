@@ -1,0 +1,13 @@
+[package]
+name = "oc-policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# Source-available core; see the complete grant and earlier-version rights.
+license-file = "../../LICENSE-OPENCRATE"
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

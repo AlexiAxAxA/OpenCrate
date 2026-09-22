@@ -1,0 +1,20 @@
+[package]
+name = "oc-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# Source-available core; see the complete grant and earlier-version rights.
+license-file = "../../LICENSE-OPENCRATE"
+publish.workspace = true
+
+[dependencies]
+# Протокол стоит НА формате, а не рядом: общий тип ошибки, разборщик TLV,
+# кодек политики и таблица версий живут в `oc-format`. Обратной стрелки нет и
+# быть не может — ни один разборщик контейнера не зовёт ни один документ
+# протокола, и это проверено до переноса.
+oc-format = { version = "0.0.1", path = "../oc-format" }
+oc-crypto = { version = "0.0.1", path = "../oc-crypto" }
+oc-policy = { version = "0.0.1", path = "../oc-policy" }
+
+[lints]
+workspace = true

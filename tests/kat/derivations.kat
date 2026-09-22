@@ -1,0 +1,46 @@
+# Производные ключевой схемы — docs/format.md §3.5.
+#
+# ЗАМОРОЖЕНО. Эти значения меняются ТОЛЬКО вместе с решением, записанным в
+# docs/format.md, и подъёмом версии формата. «Тест упал → поправил вектор»
+# запрещено: вектор, подогнанный под код, перестаёт быть доказательством.
+#
+# Входные данные (фиксированы навсегда):
+#   file_id     = 11 × 16
+#   org_id      = "acme"
+#   secret_A    = a1 × 32
+#   secret_B    = b2 × 32
+#   header_salt = 21 × 32
+#   CEK         = c3 × 32
+#   claim       = 44 × 32
+#   claim_code  = "7K3QM9XBTZ4HVND2PRWC6JSFG8YKM0"  (канонический вид, §3.4)
+#   core_hash   = 0c × 32
+#   chunk_size  = 65536, aead_id = 1 (XChaCha20-Poly1305)
+
+# K14: BLAKE3("CC/v1/claim-code" ‖ 0x00 ‖ канонические символы кода)
+# Вход — ТЕКСТ кода без разделителей и в верхнем регистре, а не собранные из него
+# биты: сборка битов была бы вторым кодированием того же самого, и разойдись оно с
+# первым, код автора перестал бы совпадать с кодом получателя.
+k14_claim_secret_from_code = cb16efbb4b89872e171c0fe147991eb76e5134ceef664d75f2f271b9ed32da2f
+
+# K1: HKDF(salt=file_id, ikm=secret_A‖secret_B, info="CC/v1/kek"‖org_id‖file_id)
+k1_kek = ebc35597b05361cf80ee60702d2552aaaeaa8d25a9d696452db094e54762a2f8
+
+# K3: HKDF(salt=header_salt, ikm=CEK, info="CC/v1/payload"‖file_id‖u32be(chunk_size)‖u8(aead_id))
+k3_payload = e3f66002049de50887322ff1652306be4fa0447a5daba4897a517a867fa0c892
+
+# K5: HKDF(salt=header_salt, ikm=CEK, info="CC/v1/private-meta"‖file_id)
+k5_private_meta = 4e7fc3793ba7a465f04e6a11d428a3dca6d1fe818b5ab284fb9b5f32ab55c426
+
+# K6: HKDF(salt=header_salt, ikm=CEK, info="CC/v1/content-mac"‖file_id)
+k6_content_mac = 97ab4376f40a354a091f620f4c466c8ff918216f0e107382bcf23682503f935a
+
+# K7: HKDF(salt=file_id, ikm=claim, info="CC/v1/slot-b-claim")
+k7_secret_b_from_claim = 1ae5a74d580a1fae486504adfd7de582d32ef5ea382cdc3537e4d0bf770508e5
+
+# K8: HKDF(salt=file_id, ikm=claim, info="CC/v1/slot-b-commit")
+# Обязательство и доля выводятся из одного ikm разными метками: знающий одно не
+# получает проверки для другого.
+k8_claim_commitment = 31338b57c457ad4b2c300521ca154a324d63422f05a600b4d802eda0c3042cf3
+
+# K9: HMAC-SHA256(KEK, "CC/v1/slot-commit"‖core_hash)
+k9_slot_commitment = 4b8a4bfabf97b98e41cf091226596b0d1596a2eaefe21ebb293cc44b10863a71

@@ -1,0 +1,61 @@
+[graph]
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
+[licenses]
+version = 2
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "Unicode-3.0", "CC0-1.0"]
+confidence-threshold = 0.9
+[bans]
+multiple-versions = "deny"
+[advisories]
+version = 2
+yanked = "deny"
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+# First-party custom license, tied to its reviewed text hash.
+
+[[licenses.exceptions]]
+crate = "oc-crypto"
+allow = ["LicenseRef-OpenCrate-Community-1.0"]
+
+[[licenses.clarify]]
+crate = "oc-crypto"
+expression = "LicenseRef-OpenCrate-Community-1.0"
+license-files = [{ path = "../../LICENSE-OPENCRATE", hash = 0xd44aae0f }]
+
+[[licenses.exceptions]]
+crate = "oc-format"
+allow = ["LicenseRef-OpenCrate-Community-1.0"]
+
+[[licenses.clarify]]
+crate = "oc-format"
+expression = "LicenseRef-OpenCrate-Community-1.0"
+license-files = [{ path = "../../LICENSE-OPENCRATE", hash = 0xd44aae0f }]
+
+[[licenses.exceptions]]
+crate = "oc-protocol"
+allow = ["LicenseRef-OpenCrate-Community-1.0"]
+
+[[licenses.clarify]]
+crate = "oc-protocol"
+expression = "LicenseRef-OpenCrate-Community-1.0"
+license-files = [{ path = "../../LICENSE-OPENCRATE", hash = 0xd44aae0f }]
+
+[[licenses.exceptions]]
+crate = "oc-policy"
+allow = ["LicenseRef-OpenCrate-Community-1.0"]
+
+[[licenses.clarify]]
+crate = "oc-policy"
+expression = "LicenseRef-OpenCrate-Community-1.0"
+license-files = [{ path = "../../LICENSE-OPENCRATE", hash = 0xd44aae0f }]
+
+[[licenses.exceptions]]
+crate = "oc-engine"
+allow = ["LicenseRef-OpenCrate-Community-1.0"]
+
+[[licenses.clarify]]
+crate = "oc-engine"
+expression = "LicenseRef-OpenCrate-Community-1.0"
+license-files = [{ path = "../../LICENSE-OPENCRATE", hash = 0xd44aae0f }]

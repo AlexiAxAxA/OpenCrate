@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/oc-crypto", "crates/oc-format", "crates/oc-protocol", "crates/oc-policy", "crates/oc-engine"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.90"
+license-file = "LICENSE-OPENCRATE"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+[workspace.lints.clippy]
+indexing_slicing = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+arithmetic_side_effects = "deny"
+
+[profile.release]
+overflow-checks = true

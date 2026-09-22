@@ -1,0 +1,12 @@
+# Засевы nonce — docs/format.md, решение версии 3, пункт 13; K17–K20.
+# ПЕРЕВЫПУЩЕНО 2026-09-08 печатающим инструментом crates/oc-crypto/tests/kat.rs.
+# HKDF(salt=seed, ikm=u32be(len(pt))‖pt‖u32be(len(aad))‖aad, info=метка).
+# Nonce хранится готовым; ключ не входит в засев, это не SIV (И-1).
+# Фиксированные входы:
+#   seed = 5d × 24
+#   plaintext = 7e × 33
+#   aad = 4a × 17
+k17_seal_nonce = aa4060a2bfcd90f05fe28c501c59816b4d9f6b93c2a08427
+k18_wrap_nonce = d9d7b448673f38bdfbc7460f5bd79d78c8757e477aa5e017
+k19_frame_nonce = d8c3fd8f1b51fb2c3a8affbac3d92ddcc9021f4ac4c65c02
+k20_meta_nonce = 6c3e3cd68cb66ca75758cd02b2170665d63aaf6cd543a39c

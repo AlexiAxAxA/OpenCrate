@@ -1,0 +1,23 @@
+# Цепочка журнала сервера — docs/format.md §3.5, K13; docs/protocol.md §4.
+#
+# ЗАМОРОЖЕНО 2026-09-06, см. правило изменения в derivations.kat. Документ
+# журнала — серверный, версии контейнера не касается; перевыпуск законен только
+# вместе с решением о версии ЖУРНАЛА, как у lease.kat — о версии лизинга.
+# Проверяется тестом crates/cc-authority/tests/kat_journal.rs.
+#
+# K13: HMAC-SHA256(ключ = предыдущий MAC, сообщение = канонические байты записи),
+# голова пустого журнала — метка "CC/v1/audit-entry", дополненная нулями до 32.
+# Канонические байты записи — транскрипт с меткой, разделителем и префиксами длин
+# (crates/cc-authority/src/journal.rs, Entry::transcript): seq u64be ‖ event u8 ‖
+# file_id ‖ (0 | 1 ‖ device_fpr) ‖ epoch u64be ‖ at u64be.
+#
+# Входные данные (фиксированы навсегда):
+#   запись 1: seq 0, event LeaseIssued (3), file_id 11 × 16, device_fpr 77 × 32,
+#             epoch 0, at 1756000000
+#   запись 2: seq 1, event Revoked (4),     file_id 11 × 16, без отпечатка,
+#             epoch 1, at 1756000060
+
+k13_genesis_head = 43432f76312f61756469742d656e747279000000000000000000000000000000
+k13_entry_1_mac = 4e7f538c3b80998eb2b4f5a550f08d9b8b255b8a313194f15f99c8d6a58a99d0
+k13_entry_2_mac = ad9d0cb36d3a938459e60cb799966bdd72a8fffe22e741749c99cc733a5061da
+k13_head_after_2 = ad9d0cb36d3a938459e60cb799966bdd72a8fffe22e741749c99cc733a5061da

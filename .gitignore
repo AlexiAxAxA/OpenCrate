@@ -1,0 +1,38 @@
+# Build products
+/target/
+**/*.rs.bk
+*.pdb
+*.exe
+*.zip
+
+# Credentials and runtime state
+**/.env
+**/.env.*
+!**/.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_ed25519
+**/.ssh/
+**/.aws/
+*.cc
+!/tests/golden/**/*.cc
+/.closecrate/
+authority-state*
+
+# Local tools and agent instructions
+**/.agents/
+**/.claude/
+**/.codex/
+**/.codegraph/
+**/.openai/
+**/AGENTS.md
+**/CLAUDE.md
+**/node_modules/
+**/__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

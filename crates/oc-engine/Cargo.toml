@@ -1,0 +1,34 @@
+[package]
+name = "oc-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# Source-available core; see the complete grant and earlier-version rights.
+license-file = "../../LICENSE-OPENCRATE"
+publish.workspace = true
+
+[dependencies]
+oc-format = { path = "../oc-format" }
+oc-crypto = { path = "../oc-crypto" }
+oc-policy = { path = "../oc-policy" }
+# Те же версии, что у `oc-crypto` и `cc-cli`: новых крейтов в дереве ноль.
+rand_core = { version = "0.10.1", default-features = false }
+zeroize = { version = "1.9.0", features = ["derive"] }
+
+# Программный подписант RSA-PSS — только пробам писателя правки.
+[dev-dependencies]
+oc-crypto = { path = "../oc-crypto", features = ["test-signer"] }
+
+# Лит-таблица наследуется от workspace целиком, и это часть задачи, а не
+# формальность: движок обязан оставаться под `forbid(unsafe_code)` и без
+# ввода-вывода, часов и собственного генератора. Проверяется это тем же гейтом
+# чистоты, что у `oc-format`, `oc-protocol`, `oc-crypto` и `oc-policy`, — сборкой под
+# `wasm32-unknown-unknown` и запретом `SystemTime`/`Instant` в `clippy.toml`.
+#
+# Смысл гейта здесь другой, чем у четырёх остальных. Там он держит тесты
+# детерминированными; здесь — держит ГРАНИЦУ, ради которой крейт и заведён:
+# компонент, которому предстоит переехать в анклав, не должен обзавестись
+# зависимостью от машины, на которой он сегодня работает. Границу проверяет
+# сборка, а не ревьюер, — иначе она размоется первым же удобным вызовом.
+[lints]
+workspace = true
