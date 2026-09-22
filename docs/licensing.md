@@ -26,11 +26,37 @@ qualify. Creating a document does not license that document under these terms.
 
 ## Commercial agreements
 
-Open a licensing inquiry in this repository or use the contact route on
-[closecrate.com](https://closecrate.com/). Keep business-sensitive information
-out of public issues. Price, term, covered group, redistribution, support and
-payment method are agreed in writing; no price or automatic billing is implied.
-Close Crate hosting and application services are separate purchases.
+Write to **god@closecrate.com** (the contact route on
+[closecrate.com](https://closecrate.com/) named in section 5 of the license),
+or open the **Licensing enquiry** issue template in this repository, which is
+the licensing issue category named in the same section. E-mail is private;
+issues are public, so in an issue state only the kind of use and a private
+contact, and keep revenue figures, headcount, contracts and customer names out
+of it.
+
+An enquiry proceeds in writing, in this order:
+
+1. The maintainer confirms which use is being licensed and which group is
+   covered, and moves the conversation to the private contact you gave.
+2. You receive a written offer that states the price, the covered group, the
+   term, what is and is not included, the payment method and the payee.
+   Nothing is owed and nothing is granted before that offer is accepted.
+3. Both sides sign a commercial license agreement; the free-grant conditions
+   of sections 3 and 4 of the Community License stop applying to the covered
+   group for the agreed term.
+4. Payment is made as the agreement says. A payment made without a signed
+   agreement does not create a license.
+
+What the agreement covers is fixed by the license itself: fee, scope, term,
+payment method, support and any warranty are agreed separately in writing.
+Expect an annual company license for production use of the five core crates,
+with integration help and support priced separately. No per-document or
+per-user metering is planned for the core. Close Crate hosting and application
+services are separate purchases.
+
+Until the first agreement is signed, there is no published price list. Do not
+infer a price from any third-party licensing model mentioned in this
+repository's history or documentation.
 
 ## Third-party code
 

@@ -77,8 +77,24 @@ the requested English-only public launch**.
 
 The [Open Crate Community License 1.0](LICENSE) is free for personal
 non-commercial use and businesses with both less than **$1M annual group revenue**
-and **fewer than 25 people**. Larger businesses need a commercial agreement.
+and **fewer than 25 people**. Larger businesses need a commercial agreement:
+write to god@closecrate.com or see [Licensing](docs/licensing.md).
 There is a 90-day transition for existing qualifying businesses.
 
 This is source-available software, not OSI-approved open source. See
 [licensing](docs/licensing.md) for scope and third-party terms.
+
+## Support the project
+
+Open Crate is built by one independent developer. If the core is useful to you,
+a tip helps keep it going. Tips are voluntary: they are not a license fee, do
+not buy a commercial license and do not create any support obligation.
+
+| Asset | Network | Address |
+| --- | --- | --- |
+| USDT | **TRON (TRC20) only** | `TR8Tj4kJ8v75hKrtHgFBg9eodt8CriFhpk` |
+
+Send only USDT on the TRON (TRC20) network to this address. Other tokens or
+other networks (Ethereum, BNB Chain and so on) will be lost. No memo or tag is
+needed. Commercial licensing goes through god@closecrate.com, not through this
+address.

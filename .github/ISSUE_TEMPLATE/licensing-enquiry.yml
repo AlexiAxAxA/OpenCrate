@@ -1,0 +1,62 @@
+name: Licensing enquiry
+description: Ask about the Open Crate Community License or start a commercial licensing conversation.
+title: "[Licensing] "
+labels: ["licensing"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the licensing issue category named in section 5 of the
+        [Open Crate Community License 1.0](https://github.com/AlexiAxAxA/OpenCrate/blob/main/LICENSE-OPENCRATE).
+        **Issues are public.** Do not post revenue figures, headcount, contracts,
+        customer names or anything else you consider business-sensitive. For a
+        private conversation write to god@closecrate.com instead, or leave a way
+        to reach you here and the maintainer will continue by e-mail.
+        The [licensing guide](https://github.com/AlexiAxAxA/OpenCrate/blob/main/docs/licensing.md) answers the common
+        questions about the free thresholds.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is this about?
+      options:
+        - Question about whether my use is covered by the free grant
+        - Commercial license for a business at or above a threshold
+        - Redistribution, OEM or embedding in a product for third parties
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: eligibility
+    attributes:
+      label: Group size (self-assessed, no figures needed)
+      description: Both thresholds apply to the whole corporate group. Pick the bracket only.
+      options:
+        - Below both thresholds (under USD 1M revenue and under 25 people)
+        - At or above at least one threshold
+        - Not sure how to assess it
+        - Personal or academic non-commercial use
+    validations:
+      required: true
+  - type: textarea
+    id: use
+    attributes:
+      label: Intended use
+      description: What you are building with the core, which crates you need and roughly when you plan to ship. Keep it at the level you would put on a public website.
+    validations:
+      required: true
+  - type: input
+    id: contact
+    attributes:
+      label: Private contact
+      description: An e-mail address or a note such as "reach me through the profile on this account". Required for commercial conversations.
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have not included business-sensitive figures or documents in this public issue.
+          required: true
+        - label: I understand that no price, discount or right is granted by opening this issue; terms are agreed in writing.
+          required: true

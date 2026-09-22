@@ -1,0 +1,44 @@
+name: Bug report
+description: Wrong behaviour, a failing build or a documentation defect that is NOT a security vulnerability.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the problem lets someone read, forge or alter protected data, or
+        bypass a policy decision, **stop here** and use
+        [private vulnerability reporting](https://github.com/AlexiAxAxA/OpenCrate/security/advisories/new) instead.
+        Public issues are read by everyone, including people who would exploit
+        the defect before a fix exists.
+  - type: checkboxes
+    id: not_security
+    attributes:
+      label: Not a vulnerability
+      options:
+        - label: This report does not describe a way to break confidentiality, integrity or access control. If it might, I will report it privately instead.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: Crate and version or commit
+      placeholder: oc-format 0.0.1 at commit abcdef0
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Commands, minimal code or a test. Attach only synthetic inputs; never real documents or keys.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behaviour
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: rustc 1.xx, Windows 11 / Ubuntu 24.04 / wasm32-unknown-unknown
