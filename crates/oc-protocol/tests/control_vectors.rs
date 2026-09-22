@@ -1,17 +1,17 @@
-//! Замороженные векторы документов управления и реплики (E2, B2/B4/B7).
+//! Frozen control and replica document vectors (E2, B2/B4/B7).
 //!
-//! Документы эти приходят ЦЕЛИКОМ С ПРОВОДА и меняться молча не вправе:
-//! изменение байтов на проводе требует решения, записанного в спеку, — тот же
-//! закон, что у контейнера. Вектор здесь и есть то, что делает молчаливое
-//! изменение невозможным.
+//! These documents arrive ENTIRELY FROM THE WIRE and must not change silently:
+//! a wire-byte change requires a decision recorded in the specification, the same
+//! rule as for the container. The vector is what makes a silent
+//! change impossible.
 //!
-//! Подпись заморожена вместе с телом, и по той же причине, что у лизинга:
-//! тело без подписи — лист бумаги, а расхождение в транскрипте молчаливо
-//! (подпись просто не сойдётся, и выглядеть это будет как «сервер сломался»).
+//! The signature is frozen together with the body, for the same reason as leases:
+//! a body without a signature is a sheet of paper, while transcript divergence is silent
+//! (the signature simply fails to verify, making it look as though "the server broke").
 //!
-//! Генератор — `print_vectors` под `#[ignore]`: он печатает то, что потом
-//! лежит в `tests/kat/control.kat`. Заново запускается ТОЛЬКО вместе с
-//! записанным решением о смене байтов.
+//! The generator is `print_vectors`, marked `#[ignore]`: it prints what later
+//! resides in `tests/kat/control.kat`. Rerun ONLY together with
+//! a recorded decision to change the bytes.
 
 #![allow(
     clippy::unwrap_used,
@@ -36,7 +36,7 @@ use oc_protocol::control::Transfer;
 use oc_protocol::replica::Ack;
 use oc_protocol::replica::Push;
 
-/// Ключи вектора. Семена, а не случайность: вектор обязан воспроизводиться.
+/// Vector keys. Seeds, not randomness: the vector must be reproducible.
 const SERVER_SEED: [u8; 32] = [0x51; 32];
 const CONTROLLER_SEED: [u8; 32] = [0x52; 32];
 const REPLICA_SEED: [u8; 32] = [0x53; 32];

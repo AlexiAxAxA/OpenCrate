@@ -23,12 +23,12 @@ fn sample_header() -> Header {
     sample_header_at(CONTAINER_VERSION)
 }
 
-/// Заголовок с ЯВНО заданной версией контейнера.
+/// Header with an EXPLICIT container version.
 ///
-/// Нужен потому, что форма полей слота — функция пары (версия, механизм), и
-/// проверки про «форму этой версии» обязаны называть версию сами, а не наследовать
-/// её от константы записи. Константа поднимется на последнем этапе перехода и
-/// утащила бы за собой смысл тестов, которые про версию 1.
+/// Needed because slot field shape depends on the pair (version, mechanism), and
+/// tests of "this version's shape" must specify their version rather than inherit
+/// the writer constant. That constant rises at the final migration stage and
+/// would carry along the meaning of tests about version 1.
 fn sample_header_at(container_version: u16) -> Header {
     Header {
         container_version,
@@ -119,49 +119,49 @@ fn an_unknown_critical_tag_inside_a_key_slot_is_not_dropped_in_silence() {
     }
 }
 
-/// Слот на механизме, форму которого версия 1 не задаёт, обязан пропускаться — а не
-/// отвергать весь контейнер.
+/// A slot using a mechanism whose shape version 1 does not define must be skipped,
+/// not reject the entire container.
 ///
-/// Это пункт Р-3, и он про обещание §3.3: «слот со знакомым видом, но незнакомым
-/// `kem_id`, пропускается, а не отвергает файл». Выполнить его было нельзя в
-/// принципе, и причина тонкая. Ветка-спасатель «незнакомый механизм → `Unknown`»
-/// стояла ПОСЛЕ цикла разбора полей, а длина `enc` проверялась ВНУТРИ цикла и
-/// безусловно требовала 32 байта — то есть до спасателя дело не доходило. Хуже
-/// того, ветка была недостижима и вторым способом: `KemAlg::from_u8` считает 2 и 3
-/// знакомыми, так что для P-256 «незнакомый механизм» не наступал вовсе.
+/// This is item R-3, concerning the §3.3 promise: "a slot with a known kind but unknown
+/// `kem_id` is skipped rather than rejecting the file". It was impossible to satisfy
+/// for a subtle reason. The fallback "unknown mechanism → `Unknown`"
+/// came AFTER the field parsing loop, while `enc` length was checked INSIDE it,
+/// unconditionally requiring 32 bytes; the fallback was never reached. Worse,
+/// a second issue made it unreachable: `KemAlg::from_u8` recognizes 2 and 3,
+/// so P-256 never counted as an "unknown mechanism" at all.
 ///
-/// Публичный ключ P-256 занимает 33 или 65 байт, и ни одна из этих форм в 32 байта
-/// не влезает. Значит слот на P-256 был не «незнакомым», а **невозможным**: любой
-/// такой контейнер отвергался целиком, даже когда рядом лежал наш собственный,
-/// полностью открываемый слот. Ф-6 планировал именно P-256 через TPM.
+/// A P-256 public key takes 33 or 65 bytes, neither fitting in 32.
+/// A P-256 slot was therefore not "unknown" but **impossible**: any such
+/// container was entirely rejected even beside our own,
+/// fully openable slot. F-6 planned precisely P-256 through a TPM.
 ///
-/// ## Этот тест обязан сломаться, и чинить его надо не так, как хочется
+/// ## This test must break, and its tempting fix is wrong
 ///
-/// Он держится на том, что форма P-256 версии 1 НЕ ЗАДАНА. Ф-6 её задаёт: спайк
-/// `spikes/tpm-ecdh` показал, что PCP отдаёт публичный ключ только несжатым, то есть
-/// на провод пойдёт `0x04 ‖ X ‖ Y` — ровно те 65 байт, что построены ниже. С этого
-/// момента слот перестанет быть `Unknown` и станет разбираемым, и тест упадёт.
+/// It depends on version 1's P-256 shape being UNDEFINED. F-6 defines it: the
+/// `spikes/tpm-ecdh` spike showed PCP exports only uncompressed public keys, so
+/// the wire will carry `0x04 ‖ X ‖ Y`, precisely the 65 bytes constructed below. From then on
+/// the slot will stop being `Unknown`, become parseable, and fail this test.
 ///
-/// Падение будет ПРАВИЛЬНЫМ, а очевидная починка — нет. Поменять ожидание на
-/// `Known` значит превратить проверку Р-3 в проверку того, что P-256 работает;
-/// ветка «незнакомый механизм пропускается, а не рушит файл» перестанет проверяться
-/// вовсе, и следующая регрессия того же рода пройдёт молча.
+/// The failure will be CORRECT; the obvious fix will not. Changing the expectation to
+/// `Known` turns a R-3 test into a test that P-256 works;
+/// the "unknown mechanism is skipped rather than breaking the file" branch loses all
+/// coverage, and the next regression of the same kind passes silently.
 ///
-/// ## Как это разрешилось на самом деле
+/// ## How this was actually resolved
 ///
-/// Предписание выше — «перенести на `kem_id = 3`» — было верным для мира, где форма
-/// зависит только от механизма. Версия 2 сделала её функцией ПАРЫ (версия,
-/// механизм), и это открыло вариант лучше: проверить оба утверждения, а не одно
-/// вместо другого.
+/// The prescription above, "move to `kem_id = 3`", was correct when shape
+/// depended only on mechanism. Version 2 made it a function of the PAIR (version,
+/// mechanism), opening a better option: test both claims rather than
+/// replace one with the other.
 ///
-/// Этот тест остаётся про P-256 и прибивается к **версии 1**, где его форма не
-/// задана и задана не будет никогда: заморожено не только то, что версия умеет, но
-/// и то, чего она не умеет. Утверждение Р-3 сохраняется дословно и получает вторым
-/// смыслом защиту от того, чтобы версия 1 задним числом обрела семантику.
+/// This test stays about P-256 and is pinned to **version 1**, where its shape is
+/// undefined and will remain so forever: what a version cannot do is frozen
+/// as well as what it can. The R-3 claim remains verbatim, gaining the additional
+/// role of preventing retroactive semantics in version 1.
 ///
-/// Ветку же «механизм, форму которого не задаёт НИ ОДНА версия» стережёт соседний
-/// тест на `kem_id = 3` в контейнере версии 2 — там, где P-256 уже разбирается.
-/// Вместе они покрывают то, что поодиночке покрывалось бы через раз.
+/// The "mechanism whose shape NO version defines" branch is guarded by the neighboring
+/// `kem_id = 3` test in a version 2 container, where P-256 already parses.
+/// Together they cover what either alone would cover only intermittently.
 #[test]
 fn a_slot_whose_kem_shape_this_version_does_not_define_is_skipped_not_fatal() {
     // Два слота: чужой (P-256 с 65-байтным `enc`) и наш. Контейнер версии 1.
@@ -239,17 +239,17 @@ fn a_slot_whose_kem_shape_this_version_does_not_define_is_skipped_not_fatal() {
     );
 }
 
-/// Слот кода-претензии не может нести байты, за которые никто не отвечает.
+/// A claim-code slot cannot carry bytes for which nobody is accountable.
 ///
-/// Пункт Р-4. §2.0 объявляет таблицу состава слота исполняемой **целиком**, а
-/// исполнялись две трети: проверялись `ct` и `claim_commit`, но не `key_fpr` по виду
-/// и не нулевые `enc`/`nonce`. Значит слот кода-претензии мог нести 32 байта
-/// `key_fpr` и произвольные 56 байт в `enc` и `nonce`, пройти проверку и жить внутри
-/// **подписанного автором** заголовка, не будучи прочитанным никем.
+/// Item R-4. §2.0 declares the slot composition table enforceable **in full**, but
+/// only two thirds were enforced: `ct` and `claim_commit` were checked, not kind-specific `key_fpr`
+/// or zeroed `enc`/`nonce`. A claim-code slot could thus carry 32 bytes of
+/// `key_fpr` and 56 arbitrary bytes in `enc` and `nonce`, pass verification, and live inside
+/// an **author-signed** header without anyone reading them.
 ///
-/// Это дословно тот аргумент, которым спека запрещает непустой `ct` в этом же слоте:
-/// «байты, за которые никто не отвечает… место для скрытого канала внутри
-/// подписанного автором заголовка». Запрет был выписан для одного поля из трёх.
+/// This is exactly the specification's argument against nonempty `ct` in this same slot:
+/// "bytes nobody is accountable for... room for a covert channel within
+/// an author-signed header". The ban had been stated for one of three fields.
 #[test]
 fn a_claim_slot_cannot_smuggle_bytes_in_fields_it_does_not_use() {
     let base = |enc: &[u8], nonce: &[u8], with_fpr: bool| {
@@ -292,21 +292,21 @@ fn a_claim_slot_cannot_smuggle_bytes_in_fields_it_does_not_use() {
     }
 }
 
-/// Слот кода-претензии объявляет `kem_id = 1` — всегда, и это про БАЙТЫ.
+/// A claim-code slot declares `kem_id = 1`, always; this concerns BYTES.
 ///
-/// §2 п.5 записан дословно: «Слот кода-претензии (`kind = 3`) объявляет
-/// `kem_id = 1` **всегда**, а его нулевые `enc` и `nonce` имеют длину 32 и 24.
-/// Без этой строки длина нулевого `enc` начала бы зависеть от несвязанного выбора
-/// механизма по умолчанию, и байты `claim.cc` поехали бы молча».
+/// §2 item 5 says verbatim: "A claim-code slot (`kind = 3`) declares
+/// `kem_id = 1` **always**, with zeroed `enc` and `nonce` of length 32 and 24.
+/// Without this statement, zeroed `enc` length would depend on an unrelated default
+/// mechanism choice, silently changing `claim.cc` bytes."
 ///
-/// Проверка этой строки отсутствовала, и отсутствие было НЕВИДИМЫМ: слот с
-/// `kem_id = 2` несёт 65 нулей вместо 32, оба числа проходят проверку «все нули»,
-/// обе длины законны каждая для своего механизма. То есть один и тот же
-/// `claim.cc` мог быть выпущен в двух разных байтовых видах, и оба принимались.
-/// Для формата, объявленного замороженным, это ровно то, чем §2 п.5 и пугает.
+/// This statement had no check, and the omission was INVISIBLE: a slot with
+/// `kem_id = 2` carries 65 zeros instead of 32; both pass the "all zero" check,
+/// and each length is valid for its own mechanism. Thus the same
+/// `claim.cc` could be issued in two byte forms, both accepted.
+/// For a format declared frozen, this is precisely the danger §2 item 5 warns about.
 ///
-/// Хуже того, принимали обе стороны: писатель производил то, что читатель обязан
-/// был отвергнуть. Нашла это опытная проба, а не разбор кода.
+/// Worse, both sides accepted it: the writer produced what the reader should
+/// reject. An empirical probe found this, not code inspection.
 #[test]
 fn a_claim_slot_must_declare_the_first_mechanism() {
     let claim_with = |kem: KemAlg, enc_len: usize| {
@@ -358,21 +358,21 @@ fn a_claim_slot_must_declare_the_first_mechanism() {
     );
 }
 
-/// Механизм, форму которого не задаёт НИ ОДНА версия, пропускается — в контейнере
-/// версии 2, где P-256 уже разбирается.
+/// A mechanism whose shape NO version defines is skipped in a version 2
+/// container, where P-256 already parses.
 ///
-/// Пара к тесту выше, и без неё покрытие было бы половинчатым. Тот прибит к версии
-/// 1 и стережёт, чтобы версия 1 не обрела семантику задним числом; этот стережёт
-/// саму ветку пропуска — что она жива в текущей версии, а не осталась в прошлой.
+/// Companion to the test above; without it coverage would be partial. That test is pinned to
+/// version 1 and prevents retroactive semantics there; this one guards
+/// the skip branch itself, ensuring it still works in the current version rather than only the past.
 ///
-/// `kem_id = 3` (RSA-OAEP) выбран потому, что его номер в реестре занят, а форма не
-/// задана и не планируется: `KemAlg::from_u8` считает его знакомым, то есть ветка
-/// «незнакомый номер» для него не наступает, и слот обязан пропускаться именно по
-/// неопределённости формы. Ровно тот случай, который однажды рушил весь контейнер.
+/// `kem_id = 3` (RSA-OAEP) is chosen because its registry number is assigned but its shape
+/// is undefined and unplanned: `KemAlg::from_u8` recognizes it, so the
+/// "unknown number" branch cannot apply. The slot must be skipped specifically because
+/// its shape is undefined: exactly the case that once broke an entire container.
 ///
-/// Длина `enc` здесь намеренно не похожа ни на 32, ни на 65: у RSA-OAEP инкапсуляция
-/// занимает сотни байт, и проверять чужую форму своей мерой — то самое, чего делать
-/// нельзя.
+/// The `enc` length is deliberately unlike 32 or 65: RSA-OAEP encapsulation
+/// occupies hundreds of bytes; checking another mechanism's shape with our own measure
+/// is precisely what must not happen.
 #[test]
 fn a_mechanism_no_version_defines_is_still_skipped_in_version_two() {
     let mut foreign = TlvWriter::new();
@@ -400,22 +400,22 @@ fn a_mechanism_no_version_defines_is_still_skipped_in_version_two() {
     );
 }
 
-/// Сжатая точка P-256 отвергается ФОРМАТОМ, и заявление об этом стоит здесь.
+/// A compressed P-256 point is rejected by the FORMAT; that claim belongs here.
 ///
-/// Проверка была заявлена не там. В `oc-crypto` жила проба «P-256 не принимает
-/// сжатую форму», кормившая `agree` тридцатью тремя байтами `0x04`; отказ приходил
-/// от разбора SEC1 (`0x04` — префикс НЕсжатой точки, так не выглядит ни одна из
-/// двух форм), а не от формы, и свойства, о котором она говорила, у слоя
-/// согласования нет: `from_sec1_bytes` разбирает обе формы и обе дают один секрет.
+/// The check was claimed in the wrong place. An `oc-crypto` probe said "P-256 rejects
+/// compressed form" while feeding `agree` thirty-three `0x04` bytes. Rejection came
+/// from SEC1 parsing (`0x04` prefixes an UNcompressed point; neither form looks like that),
+/// not from its form. The agreement layer does not have the claimed property:
+/// `from_sec1_bytes` parses both forms, and both yield the same secret.
 ///
-/// Запрет живёт в таблице точных длин (§3.3: `enc` при `kem_id = 2` — ровно 65
-/// байт, несжатая точка SEC1 `0x04 ‖ X ‖ Y`), и держит его И-8. Причина в спеке
-/// названа и она про БАЙТЫ: две допустимые формы одного ключа дали бы для одного
-/// получателя две разные записи слота, а значит разошедшиеся `core_hash` и подпись
-/// у двух добросовестных реализаций.
+/// The ban lives in the exact-length table (§3.3: `enc` for `kem_id = 2` is exactly 65
+/// bytes, uncompressed SEC1 point `0x04 ‖ X ‖ Y`), upheld by I-8. The specification's
+/// reason concerns BYTES: two valid forms of one key would yield two different
+/// slot records for one recipient, hence divergent `core_hash` and signatures
+/// between two conforming implementations.
 ///
-/// Требуется ИМЕННО `BadFieldLength { tag: ENC }`: «любая ошибка» — та самая
-/// формулировка, из-за которой прежняя проба зеленела не по своей причине.
+/// EXACTLY `BadFieldLength { tag: ENC }` is required: "any error" is precisely
+/// the wording that let the previous probe pass for the wrong reason.
 #[test]
 fn a_compressed_p256_point_is_refused_by_the_exact_length_table() {
     // Слот P-256 версии 2, отличающийся от корректного ровно длиной `enc`.

@@ -1,16 +1,16 @@
-//! Запечатывание секретов на публичный ключ получателя слота.
+//! Seal secrets to a slot recipient's public key.
 //!
-//! Конструкция — Base-режим DHKEM(X25519, HKDF-SHA256) с AEAD
-//! XChaCha20-Poly1305, по образцу RFC 9180. Готовый крейт HPKE не используется
-//! сознательно: он потянул бы вторую версию curve25519-dalek и несовместимый по
-//! трейтам генератор, а путь через TPM в фазе 1 всё равно требует собственной
-//! абстракции согласования ключей — Microsoft Platform Crypto Provider не даёт
-//! X25519, и приватный ключ оттуда невозможно передать в чужой код.
+//! The construction is Base-mode DHKEM(X25519, HKDF-SHA256) with
+//! XChaCha20-Poly1305 AEAD, following RFC 9180. An off-the-shelf HPKE crate is deliberately
+//! not used: it would pull in a second curve25519-dalek version and an RNG with
+//! incompatible traits, while the TPM path in phase 1 already requires our own
+//! key-agreement abstraction: Microsoft Platform Crypto Provider does not offer
+//! X25519, and its private key cannot be passed to external code.
 //!
-//! **Это рукописная конструкция, и она первый кандидат на внешнюю проверку.**
+//! **This is a hand-written construction and the first candidate for external review.**
 //!
-//! В вывод ключа входят оба публичных ключа — эфемерный и получателя. Без этого
-//! возможна привязка одного и того же шифротекста к чужой личности.
+//! Key derivation includes both public keys, ephemeral and recipient. Otherwise
+//! the same ciphertext could be bound to someone else's identity.
 
 use crate::{CryptoError, KemAlg};
 use crate::label::Label;
@@ -24,45 +24,45 @@ use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
-/// Длина публичного ключа X25519.
+/// X25519 public-key length.
 pub const PUBLIC_KEY_LEN: usize = 32;
 
-/// KEM, которым эта сборка запечатывает по умолчанию.
+/// KEM this build uses for sealing by default.
 ///
-/// Раньше константа звалась `DEFAULT_SEALING_KEM` и это было верно: исполнялся ровно
-/// один механизм. С версией 2 формата исполняются два, и прежнее имя стало
-/// утверждать неправду — а на вопрос «умеем ли» отвечает [`supports_kem`], а не
-/// константа. Переименование здесь не косметическое: имя, переросшее свой смысл,
-/// опаснее отсутствующего.
+/// Previously named `DEFAULT_SEALING_KEM`, correctly when exactly one
+/// mechanism was implemented. Format version 2 implements two, making the old name
+/// untrue; [`supports_kem`] answers "can we execute it", not a
+/// constant. This rename is not cosmetic: a name that outlives its meaning
+/// is more dangerous than no name.
 ///
-/// Умолчание — X25519, и оно остаётся им сознательно. P-256 нужен там, где ключ
-/// живёт в TPM: провайдер не даёт X25519. Выбирать P-256 без этой причины значило
-/// бы платить 65 байтами на слот и более медленной кривой ни за что.
+/// The default deliberately remains X25519. P-256 is needed when a key
+/// lives in a TPM: the provider lacks X25519. Choosing P-256 without that reason
+/// would pay for 65 bytes per slot and a slower curve for nothing.
 pub const DEFAULT_SEALING_KEM: KemAlg = KemAlg::X25519HkdfSha256;
 
-/// Умеет ли эта сборка открыть слот объявленным механизмом.
+/// Whether this build can open a slot using the declared mechanism.
 ///
-/// Без этой проверки идентификатор KEM в слоте не управляет ничем: слот,
-/// переразмеченный с X25519 на P-256, открывался бы всё тем же X25519 — то есть
-/// объявление алгоритма было бы украшением. Тот же класс дефекта, из-за которого
-/// в JWS появилось `alg: none`.
+/// Without this check, a slot's KEM identifier controls nothing: a slot
+/// relabeled from X25519 to P-256 would still open using X25519,
+/// making algorithm declaration decorative. The same defect class that
+/// produced `alg: none` in JWS.
 ///
-/// Спецификация (§3.3) обещает сосуществование слотов с разными KEM в одном
-/// файле, поэтому неизвестный KEM — не отказ читать файл целиком, а повод
-/// пропустить конкретный слот: другой слот того же файла может быть открываем.
-/// Решение «пропустить или отвергнуть» принимает вызывающий, здесь только ответ
-/// «умеем или нет».
+/// The specification (§3.3) promises slots with different KEMs can coexist in one
+/// file, so an unknown KEM should not reject the entire file but
+/// skip that particular slot: another slot in the same file may be usable.
+/// The caller decides "skip or reject"; this only answers
+/// "supported or not".
 ///
-/// `match` намеренно без `_`: добавление члена в [`KemAlg`] обязано ломать
-/// сборку здесь, рядом с реализацией, а не проходить молча. Ровно поэтому
-/// таблица живёт тут, а не на самом типе: реализации запечатывания и открытия —
-/// соседние функции этого файла.
+/// The `match` deliberately lacks `_`: adding a [`KemAlg`] member must break
+/// the build here, beside implementation, rather than pass silently. Precisely why
+/// the table belongs here rather than on the type itself: sealing and opening implementations
+/// are neighboring functions in this file.
 ///
-/// Это ЕДИНСТВЕННЫЙ ответ на вопрос «исполним ли механизм» во всём
-/// репозитории; [`KemAlg::ensure_supported`] — та же таблица в форме `Result`,
-/// а не второе мнение. Таблицы длин (`oc_format::header`, [`crate::kdf`])
-/// отвечают на ДРУГОЙ вопрос — «какой формы поля», — и согласованность их
-/// пробелов с этой таблицей держится пробой, а не памятью.
+/// This is the SOLE answer to "is the mechanism executable" across the
+/// repository; [`KemAlg::ensure_supported`] is the same table expressed as `Result`,
+/// not a second opinion. Length tables (`oc_format::header`, [`crate::kdf`])
+/// answer a DIFFERENT question, "what shape are the fields"; agreement of their
+/// gaps with this table is tested rather than remembered.
 pub fn supports_kem(kem: KemAlg) -> bool {
     match kem {
         KemAlg::X25519HkdfSha256 => true,
@@ -90,23 +90,23 @@ pub fn supports_kem(kem: KemAlg) -> bool {
     }
 }
 
-/// Собрать `info` запечатывания слота.
+/// Construct slot-sealing `info`.
 ///
-/// Одна функция на обе стороны, а не две одинаковые: писательская и
-/// читательская сборки, разойдясь хоть на байт, дали бы файл, который наш же
-/// упаковщик запечатал, а наш распаковщик не открыл, — и причину пришлось бы
-/// искать сравнением байтов.
+/// One function for both parties rather than two identical ones: writer and
+/// reader constructions diverging by even one byte would yield a file our own
+/// packer sealed but our own unpacker could not open, with the cause found
+/// only by comparing bytes.
 ///
-/// Идентификатор KEM входит в `info` и потому в вывод ключа. Без этого §3.3
-/// обещает сосуществование слотов с разными механизмами, а криптография этого
-/// обещания не подкрепляет: переразметив слот другим `kem_id`, противник получал
-/// бы ровно тот же ключ. RFC 9180 закрывает то же самое своим `suite_id`, и по
-/// той же причине — как только механизмов становится больше одного, их
-/// смешение обязано быть невозможным, а не просто нежелательным.
+/// The KEM identifier enters `info` and therefore key derivation. Otherwise §3.3
+/// would promise coexistence of different mechanisms without cryptographic
+/// support: an adversary relabeling a slot with another `kem_id` would get
+/// exactly the same key. RFC 9180 addresses this with its `suite_id`, for
+/// the same reason: once multiple mechanisms exist, mixing them must be
+/// impossible rather than merely undesirable.
 ///
-/// Назначение приходит типом [`Label`], а не байтами: слоты различаются именно
-/// им, и строка, сочинённая мимо реестра, завела бы четвёртый вид слота, о
-/// котором не знает ни спека §3.6, ни одна проба И-12.
+/// Purpose has type [`Label`], not bytes: it distinguishes slots,
+/// and a string invented outside the registry would introduce a fourth slot kind
+/// unknown to specification §3.6 and every I-12 probe.
 pub fn slot_info(purpose: Label, kem: KemAlg, file_id: &[u8; 16]) -> Vec<u8> {
     let purpose = purpose.as_bytes();
     let mut info = Vec::with_capacity(purpose.len().saturating_add(17));
@@ -118,27 +118,27 @@ pub fn slot_info(purpose: Label, kem: KemAlg, file_id: &[u8; 16]) -> Vec<u8> {
     info
 }
 
-/// `info` производной K11: сервер → устройство (`docs/format.md` §3.5).
+/// K11 derivation `info`: server → device (`docs/format.md` §3.5).
 ///
 /// ```text
 /// info = "CC/v1/a-to-device" ‖ u8(kem_id) ‖ file_id(16) ‖ device_fpr(32) ‖ u64be(seq)
 /// ```
 ///
-/// # Почему в ядре, хотя это сообщение сервера
+/// # Why in the core although this is a server message
 ///
-/// По той же причине, что и [`slot_info`]: байты собирают ДВОЕ — сервер, который
-/// печатает долю, и устройство, которое её разворачивает. До переноса функция
-/// стояла дословной копией в `cc-authority` и `cc-cli`, и каждая копия
-/// объясняла, почему копия допустима: клиент не вправе зависеть от сервера.
-/// Довод верен и остаётся в силе, неверен был вывод из него — общая зависимость
-/// снимается ЯДРОМ, от которого зависят обе стороны, а не вторым экземпляром
-/// нормативных байтов.
+/// For the same reason as [`slot_info`]: TWO parties assemble the bytes, the server
+/// sealing the share and the device unwrapping it. Before the move, this function
+/// was copied verbatim in `cc-authority` and `cc-cli`; each copy
+/// explained why duplication was acceptable: the client cannot depend on the server.
+/// The argument remains valid; the conclusion was wrong: a shared dependency
+/// belongs in the CORE both parties depend on, not in a second copy
+/// of normative bytes.
 ///
-/// Цена расхождения копий названа точно: другой `info` даёт другой ключ, и
-/// выглядит это как «доля не разворачивается» — то есть как поломка крипты там,
-/// где поломки нет.
+/// The cost of diverging copies is precise: different `info` yields a different key,
+/// appearing as "share does not unwrap", a cryptographic failure where
+/// there is none.
 ///
-/// Номер лизинга идёт `u64be`, а не `u64le`: порядок заморожен вектором K11.
+/// The lease sequence uses `u64be`, not `u64le`: K11's vector freezes the order.
 #[must_use]
 pub fn a_to_device_info(
     kem: KemAlg,
@@ -155,19 +155,19 @@ pub fn a_to_device_info(
     info
 }
 
-/// `info` производной K21: автор → устройство просителя (`docs/format.md`,
-/// «Запрос доступа»).
+/// K21 derivation `info`: author → requesting device (`docs/format.md`,
+/// "Access request").
 ///
 /// ```text
 /// info = "CC/v1/b-to-device" ‖ u8(kem_id) ‖ file_id(16) ‖ device_fpr(32)
 /// ```
 ///
-/// Номера лизинга здесь НЕТ, и это не забывчивость: доля A выдаётся под правила
-/// и живёт от выдачи до выдачи, доля B выдаётся человеку раз и переживает любое
-/// продление. Номер в `info` привязал бы её к одному лизингу.
+/// There is NO lease sequence here, deliberately: share A is issued under rules
+/// and lives between issuances; share B is issued to a person once and survives any
+/// renewal. A sequence in `info` would bind it to a single lease.
 ///
-/// В ядре по тому же доводу, что [`a_to_device_info`]: собирают эти байты
-/// ДВОЕ — автор, который печатает долю, и устройство, которое открывает.
+/// In the core for the same reason as [`a_to_device_info`]: TWO parties assemble
+/// these bytes, the author sealing the share and the device opening it.
 #[must_use]
 pub fn b_to_device_info(kem: KemAlg, file_id: &[u8; 16], device_fpr: &[u8; 32]) -> Vec<u8> {
     let mut info =
@@ -179,22 +179,22 @@ pub fn b_to_device_info(kem: KemAlg, file_id: &[u8; 16], device_fpr: &[u8; 32]) 
     info
 }
 
-/// `info` вызова аттестации: метка домена и отпечаток устройства.
+/// Attestation-challenge `info`: domain label and device fingerprint.
 ///
 /// ```text
 /// info = "CC/v1/attest-nonce" ‖ device_fpr(32)
 /// ```
 ///
-/// Отпечаток входит в `info`, а не только в AAD, чтобы вызов, выданный одному
-/// устройству, не открывался ключом другого при совпавшем ключе согласования.
+/// The fingerprint enters `info`, not only AAD, preventing a challenge issued to one
+/// device from opening with another device's key when agreement keys match.
 ///
-/// Механизма в `info` НЕТ, в отличие от долей A и B. Это не пропуск, а
-/// замороженная форма рукопожатия: вызов открывается обеими половинами
-/// гибридного ключа подряд, и обе используют один `info`. Добавить сюда
-/// `kem_id` значило бы сменить байты на проводе.
+/// Unlike shares A and B, `info` contains NO mechanism. This is not an omission but
+/// the frozen handshake form: both halves of a hybrid key open
+/// the challenge consecutively, using identical `info`. Adding
+/// `kem_id` here would change wire bytes.
 ///
-/// В ядре потому же: собирают их ДВОЕ — сервер, который печатает вызов, и
-/// устройство, которое его открывает. Руками эта строка складывалась трижды.
+/// In the core for the same reason: TWO parties assemble it, the server sealing the challenge
+/// and the device opening it. This string previously had three manual constructions.
 #[must_use]
 pub fn challenge_info(device_fpr: &[u8; 32]) -> Vec<u8> {
     let mut info = Vec::with_capacity(crate::label::ATTEST_NONCE.len().saturating_add(32));
@@ -203,47 +203,47 @@ pub fn challenge_info(device_fpr: &[u8; 32]) -> Vec<u8> {
     info
 }
 
-/// Длина nonce XChaCha20-Poly1305.
+/// XChaCha20-Poly1305 nonce length.
 const NONCE_LEN: usize = 24;
 
-/// Длина тега Poly1305. Шифротекст короче тега структурно невозможен.
+/// Poly1305 tag length. Ciphertext shorter than the tag is structurally impossible.
 const TAG_LEN: usize = 16;
 
-/// Длина общего секрета X25519 и выводимого ключа AEAD.
+/// X25519 shared-secret and derived AEAD-key length.
 const SHARED_LEN: usize = 32;
 
-/// Запечатанный секрет: эфемерный публичный ключ, nonce и шифротекст с тегом.
+/// Sealed secret: ephemeral public key, nonce, and ciphertext with tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealedBlob {
-    /// Эфемерный публичный ключ отправителя.
+    /// Sender's ephemeral public key.
     ///
-    /// Переменной длины: у X25519 это 32 байта, у P-256 — 65. Массив
-    /// фиксированной длины стоял здесь до версии 2 формата и делал слот на
-    /// P-256 невыразимым. Функция [`open`] проверяет длину точно и до всякой
-    /// крипты — переменная длина в типе не означает, что длина не проверяется.
+    /// Variable length: X25519 uses 32 bytes, P-256 uses 65. A fixed-length
+    /// array occupied this field before format version 2, making a P-256 slot
+    /// inexpressible. [`open`] checks length exactly before any
+    /// cryptography: variable length in the type does not mean unchecked length.
     pub enc: Vec<u8>,
-    /// Nonce AEAD.
+    /// AEAD nonce.
     ///
-    /// **Хранится, а не выводится** — то же правило, что и для чанков полезной
-    /// нагрузки (§6.1 спецификации), и по той же причине, только последствия
-    /// здесь тяжелее.
+    /// **Stored, not derived**: the same rule as for payload
+    /// chunks (§6.1 of the specification), for the same reason, with worse
+    /// consequences here.
     ///
-    /// Выведенный из общего PRK nonce целиком определялся бы эфемерной парой, а
-    /// значит совпадал бы вместе с ней. Повтор состояния генератора — откат
-    /// снапшота виртуальной машины, клон образа диска, восстановление из
-    /// резервной копии — давал бы два блоба с одинаковыми ключом и nonce, то
-    /// есть с одним потоком ключей. Тогда `ct₁ ⊕ ct₂ = pt₁ ⊕ pt₂`, а открытые
-    /// тексты здесь — это доли секрета: из `secret_A` и `secret_A‖secret_B`
-    /// восстанавливается `secret_B`, из них обоих KEK, из KEK ключ содержимого.
-    /// Полный обход защиты без единого приватного ключа. Двадцать четыре байта
-    /// рядом с уже хранимыми тридцатью двумя закрывают это целиком: ключ при
-    /// повторе совпадёт, поток ключей — нет.
+    /// A nonce derived from the shared PRK would be entirely determined by the ephemeral pair
+    /// and would repeat with it. Repeated RNG state after virtual-machine
+    /// snapshot rollback, disk-image cloning, or backup
+    /// restoration would produce two blobs with the same key and nonce,
+    /// hence one keystream. Then `ct₁ ⊕ ct₂ = pt₁ ⊕ pt₂`, and the plaintexts
+    /// here are secret shares: `secret_A` and `secret_A‖secret_B`
+    /// reveal `secret_B`, together they reveal KEK, and KEK reveals the content key.
+    /// A full bypass without any private key. Twenty-four bytes
+    /// alongside the already stored thirty-two close this completely: the key may
+    /// repeat, but the keystream will not.
     pub nonce: [u8; NONCE_LEN],
-    /// Шифротекст с приписанным тегом.
+    /// Ciphertext with appended tag.
     pub ct: Vec<u8>,
 }
 
-/// Публичный ключ из приватного.
+/// Public key from a private key.
 pub fn x25519_public(secret: &X25519Secret) -> [u8; PUBLIC_KEY_LEN] {
     // `StaticSecret` сам зажимает скаляр при использовании, поэтому произвольные
     // 32 байта из генератора — корректный приватный ключ, и отдельная проверка
@@ -252,11 +252,11 @@ pub fn x25519_public(secret: &X25519Secret) -> [u8; PUBLIC_KEY_LEN] {
     PublicKey::from(&sk).to_bytes()
 }
 
-/// Запечатать на публичный ключ.
+/// Seal to a public key.
 ///
-/// `info` разделяет назначение слота, `aad` привязывает к контексту файла —
-/// обычно к хешу политики, чтобы шифротекст нельзя было перенести в контейнер с
-/// другими правилами.
+/// `info` separates slot purposes; `aad` binds the file context,
+/// usually the policy hash, preventing ciphertext from moving to a container with
+/// different rules.
 pub fn seal<R: CryptoRng + ?Sized>(
     recipient_public: &[u8; PUBLIC_KEY_LEN],
     info: &[u8],
@@ -298,14 +298,14 @@ pub fn seal<R: CryptoRng + ?Sized>(
     seal_core(&shared, &eph_pk, recipient_public, info, aad, plaintext, nonce)
 }
 
-/// Запечатать на ключ P-256 — для получателя, чей ключ живёт в TPM.
+/// Seal to a P-256 key, for a recipient whose key resides in a TPM.
 ///
-/// Отдельная функция, а не параметр у [`seal`], и причина в порядке расхода
-/// генератора. У X25519 он **заморожен**: golden-контейнеры собираются на
-/// засеянном RNG, и сдвинь порядок обращений к нему хоть на один вызов — байты
-/// эталонов поедут, хотя ни один алгоритм не изменится. Поэтому объединяется всё,
-/// что после согласования (`seal_core`), а генерация эфемерной пары остаётся у
-/// каждого механизма своя.
+/// A separate function rather than a [`seal`] parameter, because of RNG
+/// consumption order. For X25519 it is **frozen**: golden containers are built with
+/// a seeded RNG; shifting its call order by even one call changes
+/// artifact bytes although no algorithm changed. Everything after
+/// agreement (`seal_core`) is therefore shared, while each mechanism retains
+/// its own ephemeral-pair generation.
 pub fn seal_p256<R: CryptoRng + ?Sized>(
     recipient_public: &[u8],
     info: &[u8],
@@ -335,11 +335,11 @@ pub fn seal_p256<R: CryptoRng + ?Sized>(
     seal_core(&shared, &eph_pk, recipient_public, info, aad, plaintext, nonce)
 }
 
-/// Общая часть запечатывания: вывод ключа и AEAD.
+/// Shared sealing body: key derivation and AEAD.
 ///
-/// Вынесена затем, чтобы у двух механизмов не оказалось двух похожих, но
-/// разошедшихся реализаций одного и того же. Расходятся такие копии не сразу и не
-/// заметно — и обнаруживается это как «слот не открывается».
+/// Extracted to avoid two similar but diverging implementations of the same
+/// operation for two mechanisms. Such copies diverge neither immediately nor
+/// visibly; the symptom is "slot does not open".
 fn seal_core(
     shared: &crate::agreement::SharedSecret,
     eph_public: &[u8],
@@ -361,21 +361,21 @@ fn seal_core(
     Ok(SealedBlob { enc: eph_public.to_vec(), nonce, ct })
 }
 
-/// Запечатать слот ГИБРИДОМ X-Wing — `kem_id = 4`.
+/// Seal a slot using the X-Wing HYBRID, `kem_id = 4`.
 ///
-/// Отдельная функция рядом с [`seal`] и [`seal_p256`] по той же причине, что и
-/// они друг рядом с другом: у механизма свой порядок расхода генератора, а у
-/// X25519 он заморожен эталонами. Здесь расход — шестьдесят четыре байта одним
-/// обращением на инкапсуляцию, потом двадцать четыре на засев nonce.
+/// A separate function beside [`seal`] and [`seal_p256`] for the same reason
+/// those are separate: each mechanism has its own RNG consumption order,
+/// while X25519's is frozen by golden artifacts. Here consumption is sixty-four bytes in one
+/// call for encapsulation, then twenty-four for the nonce seed.
 ///
-/// Общий секрет X-Wing входит в ту же схему вывода ключа, что и общий секрет DH,
-/// и это не подгонка: `derive_key` связывает с ним ОБА публичных значения —
-/// шифротекст и ключ получателя. X-Wing связывает свою половину сам (§5.3
-/// черновика), но вторая привязка бесплатна, а разные схемы для разных
-/// механизмов означали бы две ключевые схемы вместо одной.
+/// The X-Wing shared secret enters the same key schedule as a DH shared secret,
+/// not as an adaptation: `derive_key` binds BOTH public values to it,
+/// the ciphertext and recipient key. X-Wing binds its own half itself (§5.3
+/// of the draft), but a second binding is free, while distinct schedules for different
+/// mechanisms would mean two key schedules instead of one.
 ///
 /// # Errors
-/// Открытая половина не той длины либо не разбирается как ключ ML-KEM.
+/// Incorrect public-half length or unparseable ML-KEM key.
 pub fn seal_xwing<R: CryptoRng + ?Sized>(
     recipient_public: &[u8],
     info: &[u8],
@@ -398,18 +398,18 @@ pub fn seal_xwing<R: CryptoRng + ?Sized>(
     seal_core(&shared, &ciphertext, recipient_public, info, aad, plaintext, nonce)
 }
 
-/// Открыть слот, запечатанный гибридом.
+/// Open a hybrid-sealed slot.
 ///
-/// Своя открытая половина ПЕРЕСЧИТЫВАЕТСЯ из семени, а не принимается снаружи:
-/// она входит в `ikm`, и принятая аргументом сделала бы вывод ключа управляемым
-/// извне. Тот же довод, что у [`open`].
+/// Our public half is RECOMPUTED from the seed, not accepted externally:
+/// it enters `ikm`, so an argument would make key derivation externally
+/// controllable. The same reasoning as [`open`].
 ///
-/// Испорченный шифротекст отказом здесь не оборачивается — ML-KEM отвечает на
-/// него неявным отказом, и ложность секрета ловится тегом AEAD ниже, константным
-/// временем. Разбор — в докстроке [`crate::xwing::decapsulate`].
+/// Corrupted ciphertext does not directly cause rejection here: ML-KEM performs
+/// implicit rejection, with the false secret caught by the AEAD tag below in constant
+/// time. See [`crate::xwing::decapsulate`] documentation.
 ///
 /// # Errors
-/// Длины не сошлись либо тег AEAD не проверился.
+/// Lengths mismatch or AEAD tag verification fails.
 pub fn open_xwing(
     recipient_secret: &[u8; crate::xwing::SECRET_LEN],
     blob: &SealedBlob,
@@ -426,15 +426,15 @@ pub fn open_xwing(
     open_core(&key, blob, aad)
 }
 
-/// Запечатать слот АППАРАТНЫМ ГИБРИДОМ MLKEM768-P256 — `kem_id = 5`.
+/// Seal a slot using the MLKEM768-P256 HARDWARE HYBRID, `kem_id = 5`.
 ///
-/// Отдельная функция рядом с [`seal_xwing`] по той же причине, что и все
-/// соседи: у механизма свой порядок расхода генератора, а у X25519 он заморожен
-/// эталонами. Здесь расход — сто шестьдесят байт одним обращением на
-/// инкапсуляцию, потом двадцать четыре на засев nonce.
+/// A separate function beside [`seal_xwing`] for the same reason as all
+/// neighbors: each mechanism has its own RNG consumption order, while X25519's is frozen
+/// by golden artifacts. Here consumption is one hundred sixty bytes in one call
+/// for encapsulation, then twenty-four for the nonce seed.
 ///
 /// # Errors
-/// Открытая половина не той длины либо не разбирается как ключ ML-KEM.
+/// Incorrect public-half length or unparseable ML-KEM key.
 pub fn seal_mlkem_p256<R: CryptoRng + ?Sized>(
     recipient_public: &[u8],
     info: &[u8],
@@ -457,18 +457,18 @@ pub fn seal_mlkem_p256<R: CryptoRng + ?Sized>(
     seal_core(&shared, &ciphertext, recipient_public, info, aad, plaintext, nonce)
 }
 
-/// Открыть слот аппаратного гибрида.
+/// Open a hardware-hybrid slot.
 ///
-/// Классическая половина приходит ЗА ТРЕЙТОМ, и в этом весь смысл механизма:
-/// приватный ключ P-256 может лежать в TPM и не покидать его. Постквантовая
-/// половина — семя рядом, в защищённом хранилище.
+/// The classical half arrives BEHIND A TRAIT, the mechanism's whole purpose:
+/// the P-256 private key may reside in a TPM without leaving it. The post-quantum
+/// half is a seed alongside it in protected storage.
 ///
-/// Своя открытая половина ПЕРЕСЧИТЫВАЕТСЯ из обеих половин, а не принимается
-/// аргументом: она входит в `ikm`, и принятая снаружи сделала бы вывод ключа
-/// управляемым извне. Тот же довод, что у [`open`].
+/// Our public half is RECOMPUTED from both halves, not accepted as
+/// an argument: it enters `ikm`, so external input would make key derivation
+/// externally controllable. The same reasoning as [`open`].
 ///
 /// # Errors
-/// Длины не сошлись, точка вне кривой либо тег AEAD не проверился.
+/// Lengths mismatch, an off-curve point, or AEAD tag verification failure.
 pub fn open_mlkem_p256(
     ml_kem_seed: &[u8; crate::mlkem_p256::ML_KEM_SEED_LEN],
     classical: &dyn crate::agreement::KeyAgreement,
@@ -487,7 +487,7 @@ pub fn open_mlkem_p256(
     open_core(&key, blob, aad)
 }
 
-/// Открыть запечатанный секрет.
+/// Open a sealed secret.
 pub fn open(
     recipient_secret: &X25519Secret,
     blob: &SealedBlob,
@@ -520,15 +520,15 @@ pub fn open(
     open_core(&key, blob, aad)
 }
 
-/// Открыть блоб СТОРОНОЙ СОГЛАСОВАНИЯ, какой бы она ни была.
+/// Open a blob using an AGREEMENT PARTY, whatever its implementation.
 ///
-/// Это и есть та точка, ради которой заведён трейт: приватный ключ может лежать в
-/// TPM и не покидать его. Аппаратная реализация подставляется здесь вместо
-/// программной, и вывод ключа от этого не меняется ни на байт — он считается по
-/// общему секрету, а не по ключу.
+/// This is the extension point for which the trait exists: the private key may reside
+/// in a TPM without leaving it. A hardware implementation replaces
+/// the software implementation here without changing one byte of key derivation,
+/// which uses the shared secret rather than the key.
 ///
-/// Свой публичный ключ берётся у самой стороны, а не из аргумента: он входит в
-/// `ikm`, и принять его снаружи значило бы сделать вывод ключа управляемым извне.
+/// Our public key comes from the party itself, not an argument: it enters
+/// `ikm`, so accepting it externally would make key derivation externally controllable.
 pub fn open_with(
     agreement: &dyn crate::agreement::KeyAgreement,
     blob: &SealedBlob,
@@ -547,7 +547,7 @@ pub fn open_with(
     open_core(&key, blob, aad)
 }
 
-/// Общая часть открытия: AEAD и порядок проверки тега.
+/// Shared opening body: AEAD and tag-verification order.
 fn open_core(
     key: &[u8; SHARED_LEN],
     blob: &SealedBlob,
@@ -565,20 +565,20 @@ fn open_core(
     Ok(Zeroizing::new(plaintext))
 }
 
-/// Общая ключевая схема seal и open: из общего секрета DH и обоих публичных
-/// ключей выводится ключ AEAD.
+/// Shared seal/open key schedule: derive the AEAD key from the DH shared secret
+/// and both public keys.
 ///
-/// Nonce здесь **не** выводится — он хранится в блобе, см. [`SealedBlob::nonce`].
+/// The nonce is **not** derived here: stored in the blob, see [`SealedBlob::nonce`].
 ///
-/// В `ikm` входят **оба** публичных ключа. Без эфемерного ключа получателя и без
-/// ключа получателя в отдельности схема допускает привязку одного и того же
-/// шифротекста к чужой личности: противник, знающий свой приватный ключ,
-/// подбирает публичный ключ, дающий тот же общий секрет, и выдаёт чужой блоб за
-/// адресованный ему. Все три поля фиксированной длины по 32 байта, поэтому
-/// конкатенация кодируется однозначно и разделители не нужны.
+/// `ikm` contains **both** public keys. Omitting either the ephemeral key or
+/// the recipient key individually allows binding the same
+/// ciphertext to another identity: an adversary who knows their own private key
+/// chooses a public key yielding the same shared secret, then presents someone else's blob as
+/// addressed to them. All three fields have fixed 32-byte lengths, making
+/// concatenation unambiguous without delimiters.
 ///
-/// Соль HKDF пуста намеренно: у сторон нет общего случайного значения на этом
-/// шаге, а разделение доменов целиком лежит на `info`.
+/// HKDF salt is deliberately empty: the parties have no shared random value at this
+/// step, and domain separation relies entirely on `info`.
 fn derive_key(
     shared: &crate::agreement::SharedSecret,
     eph_public: &[u8],
@@ -617,7 +617,7 @@ fn derive_key(
     Ok(key)
 }
 
-/// `info` для HKDF: метка домена и аргумент вызывающего.
+/// HKDF `info`: domain label and caller's argument.
 fn expand_info(label: &[u8], info: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(label.len().saturating_add(info.len()));
     out.extend_from_slice(label);
@@ -630,10 +630,10 @@ fn expand_info(label: &[u8], info: &[u8]) -> Vec<u8> {
 mod moved_info_tests {
     use super::*;
 
-    /// Вход, на котором заморожены байты трёх сборок `info`.
+    /// Input freezing bytes of the three `info` constructions.
     ///
-    /// Значения не «красивые» и не повторяющиеся: `[0x11; 16]` не поймал бы
-    /// перестановку `file_id` с его же куском, а возрастающий ряд поймает.
+    /// Values are neither "pretty" nor repetitive: `[0x11; 16]` would miss
+    /// swapping `file_id` with part of itself; an ascending sequence catches it.
     const FILE_ID: [u8; 16] = [
         0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
         0x1f,
@@ -643,24 +643,24 @@ mod moved_info_tests {
         0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d,
         0x3e, 0x3f,
     ];
-    /// Номер лизинга. Не ноль и не палиндром: различает `u64be` и `u64le`.
+    /// Lease sequence. Neither zero nor a palindrome: distinguishes `u64be` from `u64le`.
     const SEQ: u64 = 0x0102_0304_0506_0708;
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// БАЙТЫ ТРЁХ ПЕРЕЕХАВШИХ СБОРОК — ТЕ ЖЕ, ЧТО ДО ПЕРЕЕЗДА.
+    /// THE THREE MOVED CONSTRUCTIONS HAVE THE SAME BYTES AS BEFORE THE MOVE.
     ///
-    /// Эталоны напечатаны СТАРЫМ кодом до переноса: `a_to_device_info` — обеими
-    /// копиями сразу (`cc-authority` и `cc-cli` давали совпадающую строку),
-    /// `challenge_info` — сборкой сервера, `b_to_device_info` — сборкой клиента.
-    /// Сверять новое с новым было бы тавтологией: переезд нормативных байтов
-    /// проверяется только против значения, снятого ДО него.
+    /// Golden values were printed by the OLD code before moving: `a_to_device_info` by both
+    /// copies (`cc-authority` and `cc-cli` produced identical strings),
+    /// `challenge_info` by the server implementation, `b_to_device_info` by the client.
+    /// Comparing new with new would be tautological: moving normative bytes is
+    /// verified only against values captured BEFORE the move.
     ///
-    /// Эти строки входят в `info` вывода ключа, то есть в БАЙТЫ НА ПРОВОДЕ.
-    /// Расхождение на байт даёт другой ключ, а выглядит как «доля не
-    /// разворачивается» — поломка крипты там, где поломки нет.
+    /// These strings enter key-derivation `info`, hence WIRE BYTES.
+    /// One differing byte yields a different key, appearing as "share does not
+    /// unwrap", a cryptographic failure where there is none.
     #[test]
     fn the_moved_derivation_inputs_are_byte_for_byte_what_they_were() {
         assert_eq!(
@@ -681,12 +681,12 @@ mod moved_info_tests {
         );
     }
 
-    /// МЕХАНИЗМ ВХОДИТ В ОБЕ ДОЛИ, А В ВЫЗОВ — НЕТ.
+    /// THE MECHANISM ENTERS BOTH SHARES, BUT NOT THE CHALLENGE.
     ///
-    /// Первое — свойство: слот, переразмеченный чужим `kem_id`, обязан давать
-    /// другой ключ. Второе — замороженная форма рукопожатия: вызов открывается
-    /// половинами разных механизмов подряд, и `info` у них один. Проба стоит
-    /// затем, чтобы «единообразие» не дописали сюда четвёртым байтом.
+    /// The former is a property: a slot relabeled with another `kem_id` must yield
+    /// a different key. The latter is the frozen handshake form: halves using different mechanisms
+    /// open a challenge consecutively with the same `info`. This probe prevents
+    /// adding "uniformity" here as a fourth byte.
     #[test]
     fn the_mechanism_binds_both_shares_and_deliberately_not_the_challenge() {
         assert_ne!(
@@ -704,8 +704,8 @@ mod moved_info_tests {
         );
     }
 
-    /// Доля B НЕ несёт номера лизинга, доля A несёт. Разница нормативна:
-    /// одобрение автора не должно требоваться заново на каждое продление.
+    /// Share B does NOT contain the lease sequence; share A does. The difference is normative:
+    /// author approval must not be required anew on every renewal.
     #[test]
     fn only_the_a_share_is_tied_to_a_lease_number() {
         let b = b_to_device_info(KemAlg::X25519HkdfSha256, &FILE_ID, &DEVICE_FPR);
@@ -770,19 +770,19 @@ mod kem_binding_tests {
         );
     }
 
-    /// Умеет ли сборка исполнить объявленный механизм — вопрос отдельный от того,
-    /// разбирает ли она его форму.
+    /// Whether this build can execute the declared mechanism is a different question from
+    /// whether it can parse the mechanism's shape.
     ///
-    /// Утверждение про P-256 здесь поменялось, и поменялось **по решению**,
-    /// записанному в `docs/format.md` («ВЕРСИЯ 2 ОТКРЫТА»), а не вслед за кодом.
-    /// До версии 2 механизм был объявлен в реестре, но не исполнялся, и слот с
-    /// ним полагалось пропускать. Теперь исполняется — потому что ключ в TPM
-    /// иначе не адресовать: Platform Crypto Provider не даёт X25519.
+    /// The P-256 assertion changed here **by decision**,
+    /// recorded in `docs/format.md` ("VERSION 2 OPENED"), not simply following the code.
+    /// Before version 2, the registry declared the mechanism without implementing it,
+    /// and slots using it had to be skipped. It is now implemented because there is no other way
+    /// to address a TPM key: Platform Crypto Provider lacks X25519.
     ///
-    /// RSA-OAEP остаётся неисполнимым, и это не «руки не дошли», а проверяемое
-    /// свойство: в формате обязан оставаться механизм, объявленный номером и не
-    /// исполняемый, иначе ветка «пропустить слот, а не отвергнуть файл» перестаёт
-    /// проверяться вовсе.
+    /// RSA-OAEP remains unimplemented, a tested property rather than unfinished work:
+    /// the format must retain a numbered but unimplemented mechanism,
+    /// or the "skip the slot rather than reject the file" branch ceases
+    /// to be tested at all.
     #[test]
     fn the_build_executes_exactly_the_mechanisms_it_claims() {
         assert!(supports_kem(DEFAULT_SEALING_KEM));
@@ -791,12 +791,12 @@ mod kem_binding_tests {
         assert!(!supports_kem(KemAlg::RsaOaepSha256), "неисполнимый механизм обязан остаться");
     }
 
-    /// Запечатывание на P-256 и открытие его же стороной согласования сходятся.
+    /// Sealing to P-256 and opening through its agreement party agree.
     ///
-    /// Проверяется весь путь целиком: эфемерная пара, согласование за трейтом,
-    /// вывод ключа с 65-байтовыми ключами в `ikm`, AEAD. Программной стороной, а
-    /// не TPM, — именно ради этого программная реализация и заведена: иначе путь
-    /// проверялся бы только на машине с подходящим железом.
+    /// Checks the whole path: ephemeral pair, agreement behind the trait,
+    /// key derivation with 65-byte keys in `ikm`, AEAD. Using a software party rather
+    /// than a TPM is exactly why the software implementation exists: otherwise this path
+    /// would be tested only on suitably equipped hardware.
     #[test]
     fn a_p256_slot_seals_and_opens_through_the_agreement_trait() {
         use crate::agreement::{KeyAgreement as _, P256Agreement};
@@ -846,11 +846,11 @@ mod kem_binding_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
-    /// АППАРАТНЫЙ ГИБРИД: ЗАПЕЧАТАНО ПРОГРАММНО — ОТКРЫТО ОБЕИМИ ПОЛОВИНАМИ.
+    /// HARDWARE HYBRID: SEALED IN SOFTWARE, OPENED WITH BOTH HALVES.
     ///
-    /// Классическая половина подставляется ЗА ТРЕЙТОМ, и в пробе это
-    /// программный P-256; в поставке на его место встаёт ключ из TPM, не меняя
-    /// ни байта в выводе. Ради этой подстановки трейт и существует.
+    /// The classical half is substituted BEHIND THE TRAIT; this probe uses
+    /// software P-256, replaced in production by a TPM key without changing
+    /// a byte of derivation. The trait exists for this substitution.
     #[test]
     fn a_hardware_hybrid_slot_opens_with_both_halves() {
         let pair = crate::mlkem_p256::keypair_from_seed(&[0x2f; 32]).unwrap();
@@ -866,11 +866,11 @@ mod tests {
         assert_eq!(opened.as_slice(), b"secret share");
     }
 
-    /// ОДНОЙ ПОЛОВИНЫ НЕ ХВАТАЕТ — НИ ТОЙ, НИ ДРУГОЙ.
+    /// ONE HALF IS INSUFFICIENT, WHICHEVER HALF.
     ///
-    /// Это и есть обещание гибрида, и проба проверяет обе стороны: чужая
-    /// постквантовая половина и чужая классическая по отдельности не открывают
-    /// слот. Без этой пробы «гибрид» держался бы на честном слове.
+    /// This is the hybrid's promise, tested on both sides: a wrong
+    /// post-quantum half and a wrong classical half each prevent opening
+    /// the slot. Without this probe, "hybrid" would be merely an assertion.
     #[test]
     fn neither_half_alone_opens_a_hardware_hybrid_slot() {
         let pair = crate::mlkem_p256::keypair_from_seed(&[0x2f; 32]).unwrap();
@@ -892,7 +892,7 @@ mod tests {
         );
     }
 
-    /// ГИБРИДНЫЙ СЛОТ ЗАПЕЧАТЫВАЕТСЯ И ОТКРЫВАЕТСЯ ТЕМ ЖЕ СЕМЕНЕМ.
+    /// A HYBRID SLOT IS SEALED AND OPENED WITH THE SAME SEED.
     #[test]
     fn a_hybrid_slot_seals_and_opens_with_the_same_seed() {
         let secret = [0x2f_u8; crate::xwing::SECRET_LEN];
@@ -908,11 +908,11 @@ mod tests {
         assert_eq!(opened.as_slice(), b"secret share");
     }
 
-    /// ЧУЖОЙ `info` ГИБРИД НЕ ОТКРЫВАЕТ.
+    /// WRONG `info` DOES NOT OPEN THE HYBRID.
     ///
-    /// В `info` входит `u8(kem_id)`, поэтому слот, переразмеченный чужим
-    /// механизмом, не откроется даже тем же ключом. Ровно то свойство, ради
-    /// которого механизм вообще попал в вывод ключа.
+    /// `info` contains `u8(kem_id)`, so a slot relabeled with another
+    /// mechanism will not open even with the same key. Exactly the property for
+    /// which the mechanism entered key derivation.
     #[test]
     fn a_hybrid_slot_relabelled_with_another_mechanism_does_not_open() {
         let secret = [0x2f_u8; crate::xwing::SECRET_LEN];
@@ -925,11 +925,11 @@ mod tests {
         assert!(open_xwing(&secret, &blob, &forged, &[0u8; 32]).is_err());
     }
 
-    /// ИСПОРЧЕННЫЙ ШИФРОТЕКСТ ГИБРИДА — ОТКАЗ AEAD, А НЕ ОТКРЫТЫЙ ТЕКСТ.
+    /// CORRUPTED HYBRID CIPHERTEXT PRODUCES AEAD REJECTION, NOT PLAINTEXT.
     ///
-    /// Неявный отказ ML-KEM даёт другой общий секрет, и поймать его обязан тег
-    /// AEAD. Эта проба стережёт стык двух механизмов: молчаливый отказ снизу
-    /// обязан стать громким наверху.
+    /// ML-KEM implicit rejection yields another shared secret, which the AEAD tag
+    /// must detect. This probe guards the junction of two mechanisms: a silent failure below
+    /// must become an explicit failure above.
     #[test]
     fn a_corrupted_hybrid_ciphertext_is_caught_by_the_aead_tag() {
         let secret = [0x2f_u8; crate::xwing::SECRET_LEN];
@@ -949,8 +949,8 @@ mod tests {
 
     use super::*;
 
-    /// Детерминированный генератор: воспроизводимость теста важнее стойкости, а
-    /// настоящая случайность сделала бы падение неповторяемым.
+    /// Deterministic RNG: reproducibility matters more than strength for this test;
+    /// real randomness would make failures irreproducible.
     struct TestRng([u8; 32]);
 
     impl TestRng {
@@ -995,7 +995,7 @@ mod tests {
         X25519Secret::from_bytes([seed; 32])
     }
 
-    /// Ошибка открытия без требования `Debug`/`PartialEq` от открытого текста.
+    /// Opening error without requiring plaintext to implement `Debug`/`PartialEq`.
     fn open_err(r: Result<Zeroizing<Vec<u8>>, CryptoError>) -> CryptoError {
         match r {
             Ok(_) => panic!("открытие должно было провалиться, но вернуло открытый текст"),

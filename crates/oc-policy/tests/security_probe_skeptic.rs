@@ -11,9 +11,9 @@
     clippy::disallowed_methods,
     clippy::disallowed_types
 )]
-//! Зонд скептика: перепроверка направления «policy».
+//! Skeptic's probe: rechecking the policy area.
 //!
-//! Файл создан аудитом. Рабочий код не менялся.
+//! Created during an audit. Production code was not changed.
 
 
 use oc_policy::{
@@ -56,9 +56,9 @@ fn lease() -> LeaseFacts {
     }
 }
 
-/// Автор дал час с первого открытия. Клиент, у которого нет записи о первом
-/// открытии, не применяет срок ВООБЩЕ: ветка `None` в
-/// `Validity::FromFirstOpen` не делает ничего.
+/// The author allowed one hour from first open. A client with no first-open
+/// record does not apply the expiry AT ALL: the `None` branch in
+/// `Validity::FromFirstOpen` does nothing.
 #[test]
 fn missed_a_forgotten_first_open_cancels_the_authors_deadline() {
     let policy = Policy {
@@ -79,8 +79,8 @@ fn missed_a_forgotten_first_open_cancels_the_authors_deadline() {
     );
 }
 
-/// Тот же срок при ЗАПОЛНЕННОМ состоянии работает — значит дело именно в
-/// трактовке отсутствующего значения, а не в самой ветке.
+/// The same expiry works with POPULATED state, so the issue is specifically
+/// interpretation of the missing value, not the branch itself.
 #[test]
 fn control_the_same_deadline_works_when_the_state_is_present() {
     let policy = Policy {
@@ -95,8 +95,8 @@ fn control_the_same_deadline_works_when_the_state_is_present() {
     assert!(!evaluate(&policy, Some(&lease()), Action::View, &remembered).is_allowed());
 }
 
-/// Лизинг, который сервер ещё не выдал: `issued_at` в будущем, `expires_at`
-/// раньше `issued_at`. `evaluate` не смотрит на `issued_at` ни разу.
+/// A lease the server has not yet issued: `issued_at` is in the future and `expires_at`
+/// precedes `issued_at`. `evaluate` never looks at `issued_at`.
 #[test]
 fn missed_a_lease_issued_in_the_future_is_accepted() {
     let policy = Policy {

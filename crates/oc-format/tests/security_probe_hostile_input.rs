@@ -11,23 +11,23 @@
     clippy::disallowed_methods,
     clippy::disallowed_types,    clippy::assertions_on_constants
 )]
-//! Направление 3: разбор враждебного ввода.
+//! Area 3: parsing hostile input.
 //!
-//! `parser_robustness.rs` покрывает `TlvReader`, `Prologue` и `Layout`, но не
-//! доходит до `Header::decode`, `policy_codec::decode` и
-//! `ContentDesc::decode_verified`. Этот файл закрывает пробел и заодно сверяет
-//! разбор с текстом спецификации там, где расхождение уже случалось.
+//! `parser_robustness.rs` covers `TlvReader`, `Prologue`, and `Layout`, but does not
+//! reach `Header::decode`, `policy_codec::decode`, or
+//! `ContentDesc::decode_verified`. This file closes that gap and also compares
+//! parsing with the specification where divergence has already occurred.
 //!
-//! Три пробы этого файла (обёртка CEK, транскрипт MAC изменяемой области, состав
-//! `suite`) были написаны по РАННЕЙ редакции `docs/format.md` и утверждали
-//! обратное тому, что спецификация говорит сейчас. Они пересмотрены явно: у
-//! каждой в комментарии записано, чего требовала прежняя редакция и почему
-//! исполнить это требование было нельзя. Молчаливой подгонки под код нет ни в
-//! одной — каждое утверждение сверено с нынешним текстом §1.2, §2 и §3.3.
+//! Three probes here (CEK wrapper, mutable region MAC transcript, and
+//! `suite` members) were written against an EARLIER `docs/format.md` revision and asserted
+//! the opposite of the current specification. They were explicitly revised:
+//! each comment records what the earlier revision required and why
+//! it could not be implemented. None was silently adjusted to the code:
+//! every claim was checked against the current §1.2, §2, and §3.3 text.
 //!
-//! Харнесс держит СВОЙ ключ подписи и СВОЙ ключ MAC — иначе глубокие ветви
-//! (`verify_and_parse` после подписи, `ContentDesc::decode_body` после MAC)
-//! недостижимы. Ровно это и требует `docs/format.md` §5.2.
+//! The harness holds ITS OWN signing key and MAC key; otherwise deep branches
+//! (`verify_and_parse` after the signature, `ContentDesc::decode_body` after the MAC)
+//! are unreachable. This is exactly what `docs/format.md` §5.2 requires.
 
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -49,7 +49,7 @@ use oc_policy::{Action, Binding, Network, Policy, Timestamp, Validity};
 // Инструментарий
 // ---------------------------------------------------------------------------
 
-/// SplitMix64: детерминированный, падение воспроизводится по номеру итерации.
+/// SplitMix64: deterministic; failures reproduce from the iteration number.
 struct Rng(u64);
 
 impl Rng {
@@ -136,16 +136,16 @@ fn sample_header(author_key: [u8; 32]) -> Header {
     }
 }
 
-/// Сырая запись TLV: тег, объявленная длина и байты значения — независимо друг
-/// от друга. Именно так строится «почти корректный» ввод: правильные теги,
-/// испорченные длины.
+/// Raw TLV record: tag, declared length, and value bytes are independent
+/// of each other. This produces "almost valid" input: correct tags,
+/// corrupted lengths.
 fn raw_record(tag: u16, declared_len: u32, value: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(&tag.to_le_bytes());
     out.extend_from_slice(&declared_len.to_le_bytes());
     out.extend_from_slice(value);
 }
 
-/// Собрать контейнер вокруг готовых байт заголовка и подписать их своим ключом.
+/// Assemble a container around prepared header bytes and sign with our own key.
 fn signed_container(header_bytes: &[u8], signer: &Ed25519Signer, suite: &Suite) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&MAGIC);
@@ -166,7 +166,7 @@ fn signed_container(header_bytes: &[u8], signer: &Ed25519Signer, suite: &Suite) 
 // 1. Фаззинг Header::decode
 // ---------------------------------------------------------------------------
 
-/// Все известные теги заголовка плюс соседние неизвестные из обоих диапазонов.
+/// All known header tags plus neighboring unknown tags from both ranges.
 const HEADER_TAGS: [u16; 24] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 500, 0x7FFF, 0x8000,
     0x9000, 0xFFFF,
@@ -234,11 +234,11 @@ fn header_decode_survives_bit_flips_and_truncation_of_a_valid_header() {
     }
 }
 
-/// Вложенность: слот, содержащий TLV, содержащий TLV, …
+/// Nesting: a slot containing TLV containing TLV, ...
 ///
-/// Рекурсии в разборе слота нет, поэтому глубина не обязана иметь предел — но
-/// это надо доказать, а не предположить: стековое переполнение от глубины
-/// вложенности вообще не ловится `catch_unwind`.
+/// Slot parsing is not recursive, so depth need not be bounded, but
+/// this must be proven, not assumed: stack overflow from nesting depth
+/// cannot be caught by `catch_unwind` at all.
 #[test]
 fn deeply_nested_tlv_inside_a_key_slot_does_not_blow_the_stack() {
     for depth in [1usize, 8, 64, 512, 4096, 32_768] {
@@ -265,7 +265,7 @@ fn deeply_nested_tlv_inside_a_key_slot_does_not_blow_the_stack() {
     }
 }
 
-/// Значение поля заголовка по тегу — как оно лежит в байтах.
+/// Header field value by tag, as stored in the bytes.
 fn field_value(header_bytes: &[u8], tag: u16) -> Option<Vec<u8>> {
     let mut reader = oc_format::tlv::TlvReader::new(header_bytes);
     while let Some(field) = reader.next_field().unwrap() {
@@ -289,20 +289,20 @@ fn replace_field(header_bytes: &[u8], tag: u16, new_value: &[u8]) -> Vec<u8> {
     w.finish().to_vec()
 }
 
-/// Тег `kind` внутри записи слота. Модуль `slot_tag` приватен, поэтому число
-/// повторено здесь: проба обязана собирать байты сама, а не через конструктор.
+/// The `kind` tag within a slot record. `slot_tag` is private, so the number
+/// is repeated here: the probe must assemble bytes itself, not through a constructor.
 const SLOT_TAG_KIND: u16 = 1;
 
-/// Вид слота, которого `SlotKind::from_u16` не знает. Такой слот `decode_slot`
-/// ПРИНИМАЕТ и возвращает как `KeySlot::Unknown` — правило чтения §3.3.
+/// A slot kind unknown to `SlotKind::from_u16`. `decode_slot` ACCEPTS this slot
+/// and returns `KeySlot::Unknown`, per the §3.3 reading rule.
 const UNKNOWN_SLOT_KIND: u16 = 0xBEEF;
 
-/// Заголовок, у которого запись `key_slots` заменена на `count` слотов,
-/// принимаемых `decode_slot`.
+/// Header with `key_slots` replaced by `count` slots
+/// accepted by `decode_slot`.
 ///
-/// Минимальный принимаемый слот — одно поле `kind` с незнакомым значением: 14
-/// байт на запись вместе с обоими заголовками TLV. Именно принимаемость здесь
-/// существенна, см. пробу ниже.
+/// The smallest accepted slot is a single `kind` field with an unknown value: 14
+/// bytes per record including both TLV headers. Acceptance is essential
+/// here; see the probe below.
 fn header_with_accepted_slots(count: usize) -> Vec<u8> {
     let mut slots = TlvWriter::new();
     for index in 0..count {
@@ -317,17 +317,17 @@ fn header_with_accepted_slots(count: usize) -> Vec<u8> {
     )
 }
 
-/// Предел числа слотов обязан срабатывать ДО накопления, а не после.
+/// The slot count limit must trigger BEFORE accumulation, not afterward.
 ///
-/// Записи здесь НЕ пустые, и это главное в пробе. Прежняя её редакция клала
-/// 20 000 пустых записей по 6 байт — а пустая запись отвергается на первой же
-/// итерации, `MissingField { tag: 1 }`, задолго до сравнения с `MAX_KEY_SLOTS`.
-/// Поэтому проба была зелена и с проверкой предела, и с удалённой: она сторожила
-/// обязательность поля `kind`, а не предел, при том что называлась пределом.
+/// The records are NOT empty, which is central to this probe. The previous version used
+/// 20,000 empty six-byte records, but an empty record is rejected on the first
+/// iteration with `MissingField { tag: 1 }`, long before comparison with `MAX_KEY_SLOTS`.
+/// Thus the probe passed both with and without the limit check: it guarded
+/// the required `kind` field, not the limit it claimed to test.
 ///
-/// Отсюда же требование ИМЕННО `BadFieldLength { tag: KEY_SLOTS }`: «любая
-/// ошибка» — это ровно та формулировка, которая позволила прежней редакции
-/// зеленеть не по своей причине.
+/// Hence the requirement for EXACTLY `BadFieldLength { tag: KEY_SLOTS }`: "any
+/// error" is precisely the wording that allowed the old probe
+/// to pass for the wrong reason.
 #[test]
 fn the_key_slot_limit_is_enforced_before_accumulation() {
     let over = header_with_accepted_slots(MAX_KEY_SLOTS.saturating_add(1));
@@ -345,10 +345,10 @@ fn the_key_slot_limit_is_enforced_before_accumulation() {
     }
 }
 
-/// Обратная половина предела: ровно `MAX_KEY_SLOTS` слотов обязаны приниматься.
+/// The limit's other half: exactly `MAX_KEY_SLOTS` slots must be accepted.
 ///
-/// Без неё «предел» проходил бы и при `MAX_KEY_SLOTS = 0`: отказ на 1025 записях
-/// сам по себе не отличает границу от запрета вообще.
+/// Without this, the "limit" test would also pass with `MAX_KEY_SLOTS = 0`: rejection at 1025 records
+/// alone cannot distinguish a boundary from a blanket ban.
 #[test]
 fn exactly_max_key_slots_are_accepted() {
     let at_limit = header_with_accepted_slots(MAX_KEY_SLOTS);
@@ -410,7 +410,7 @@ fn policy_decode_survives_structurally_plausible_garbage() {
 // 3. Фаззинг ContentDesc::decode_verified с ПРАВИЛЬНЫМ MAC
 // ---------------------------------------------------------------------------
 
-/// Транскрипт MAC так, как его считает код (`content.rs::mac_transcript`).
+/// MAC transcript as computed by the code (`content.rs::mac_transcript`).
 fn code_transcript(file_id: &[u8; 16], body: &[u8]) -> Transcript {
     let mut t = Transcript::new(label::CONTENT_MAC);
     t.fixed(file_id).field(body);
@@ -469,7 +469,7 @@ fn content_desc_body_decoder_survives_garbage_that_carries_a_valid_mac() {
     }
 }
 
-/// Экстремальные, но заверенные MAC значения: владелец CEK — тоже противник.
+/// Extreme but MAC-authenticated values: the CEK holder is also an adversary.
 #[test]
 fn extreme_but_authenticated_content_values_never_panic_downstream() {
     let key = mac_key();
@@ -554,18 +554,18 @@ fn verify_and_parse_survives_hostile_headers_signed_by_the_harness_key() {
 // 5. Транскрипт MAC изменяемой области против §1.2
 // ---------------------------------------------------------------------------
 
-/// Транскрипт §1.2, набранный по тексту спецификации независимо от `content.rs`:
-/// метка ‖ 0x00, затем `fixed(file_id)`, затем `field(тело)` — то есть
-/// u32le(длина тела) ‖ СЫРЫЕ байты тела.
+/// The §1.2 transcript assembled from specification text independently of `content.rs`:
+/// label ‖ 0x00, then `fixed(file_id)`, then `field(body)`, meaning
+/// u32le(body length) ‖ RAW body bytes.
 fn spec_transcript(file_id: &[u8; 16], body: &[u8]) -> Transcript {
     let mut t = Transcript::new(label::CONTENT_MAC);
     t.fixed(file_id).field(body);
     t
 }
 
-/// Транскрипт из прежней редакции спецификации: по РАЗОБРАННЫМ значениям полей.
-/// Оставлен намеренно — им доказывается, что нынешний читатель такую область
-/// отвергает, и объясняется, почему это правильно (см. тест ниже).
+/// Transcript from the previous specification revision: over PARSED field values.
+/// Deliberately retained to prove the current reader rejects such a region
+/// and explain why that is correct (see the test below).
 fn superseded_value_transcript(
     file_id: &[u8; 16],
     desc: &ContentDesc,
@@ -583,21 +583,21 @@ fn superseded_value_transcript(
     t
 }
 
-/// ПЕРЕСМОТРЕНО ОТКРЫТО, не молча. Прежняя редакция этой пробы называлась
-/// `the_content_mac_follows_the_transcript_named_by_the_specification` и
-/// требовала, чтобы читатель принял область, заверенную транскриптом по
-/// РАЗОБРАННЫМ значениям полей. Такой транскрипт стоял в прежней редакции §1.2;
-/// нынешняя редакция задаёт `fixed(file_id) ‖ field(тело)` над сырыми байтами и
-/// объясняет, почему иначе нельзя.
+/// REVISED OPENLY, not silently. The previous probe was named
+/// `the_content_mac_follows_the_transcript_named_by_the_specification` and
+/// required the reader to accept a region authenticated with a transcript over
+/// PARSED field values. That transcript appeared in the former §1.2 revision;
+/// the current one specifies `fixed(file_id) ‖ field(body)` over raw bytes and
+/// explains why no alternative works.
 ///
-/// Требование прежней пробы было не просто устаревшим, а несовместимым с двумя
-/// другими обещаниями формата. Транскрипт по значениям (1) заставил бы обе
-/// стороны знать ВСЕ поля тела — тогда необязательный тег версии 2 ломал бы MAC
-/// у клиента версии 1, то есть точка расширения §2.1 п.3 переставала бы работать
-/// ровно там, где обещана; (2) требовал бы отдельного байта-признака «футер
-/// есть», хотя §1.2 прямо говорит, что «футера нет» и «футер по смещению 0»
-/// различимы самими байтами тела; (3) воспроизводил бы канонизационную ошибку
-/// JWS/XML-DSig — разобрали одно, заверили другое.
+/// The previous probe's requirement was not merely obsolete; it contradicted two
+/// other format promises. A value-based transcript would (1) require both
+/// parties to know ALL body fields, so a version 2 optional tag would break the MAC
+/// for a version 1 client, disabling the extension point of §2.1 item 3
+/// precisely where promised; (2) require a separate "footer present"
+/// flag byte although §1.2 explicitly says "no footer" and "footer at offset 0"
+/// are distinguishable from body bytes alone; (3) reproduce the JWS/XML-DSig canonicalization bug:
+/// parse one thing, authenticate another.
 #[test]
 fn the_content_mac_covers_the_raw_body_bytes_so_unknown_optional_fields_still_verify() {
     let key = mac_key();
@@ -660,7 +660,7 @@ fn the_content_mac_covers_the_raw_body_bytes_so_unknown_optional_fields_still_ve
 // 6. НАХОДКА: отсутствующее поле политики трактуется как послабление
 // ---------------------------------------------------------------------------
 
-/// Тело политики без указанных тегов.
+/// Policy body without the specified tags.
 fn policy_body_without(skip: &[u16]) -> Vec<u8> {
     let mut actions = TlvWriter::new();
     actions.put(1, &[1]).unwrap(); // View = Allow
@@ -727,7 +727,7 @@ fn a_policy_field_that_is_absent_is_never_read_as_a_relaxation() {
 // 7. Состав полей заголовка против таблицы §2
 // ---------------------------------------------------------------------------
 
-/// Убрать запись с указанным тегом, сохранив остальные байт в байт.
+/// Remove the record with the specified tag, preserving all others byte for byte.
 fn header_without(header_bytes: &[u8], tag: u16) -> Vec<u8> {
     let mut reader = oc_format::tlv::TlvReader::new(header_bytes);
     let mut w = TlvWriter::new();
@@ -739,21 +739,21 @@ fn header_without(header_bytes: &[u8], tag: u16) -> Vec<u8> {
     w.finish().to_vec()
 }
 
-/// ПЕРЕСМОТРЕНО ОТКРЫТО, не молча. Прежняя редакция этой пробы называлась
-/// `a_header_containing_exactly_the_fields_of_the_specification_is_readable` и
-/// требовала обратного: чтобы заголовок БЕЗ тега 17 разбирался, а сам тег 17
-/// лежал в необязательном диапазоне (> 0x7FFF). Проба опиралась на редакцию
-/// `docs/format.md`, где таблица §2 обрывалась на теге 16. В нынешней редакции
-/// §2 строка 17 есть, и она гласит: `wrapped_cek`, bytes[72], **обязателен**;
-/// его отсутствие — отказ.
+/// REVISED OPENLY, not silently. The previous probe was named
+/// `a_header_containing_exactly_the_fields_of_the_specification_is_readable` and
+/// required the opposite: a header WITHOUT tag 17 should parse, and tag 17 itself
+/// should be optional (> 0x7FFF). The probe relied on a revision of
+/// `docs/format.md` whose §2 table ended at tag 16. The current
+/// §2 has row 17 stating `wrapped_cek`, bytes[72], **required**;
+/// absence means rejection.
 ///
-/// Требование прежней пробы нельзя было исполнить ни одной из двух правок.
-/// Перенос поля в необязательный диапазон означал бы, что читатель, который его
-/// не знает, ПРОПУСКАЕТ единственный завёрнутый ключ содержимого и затем не
-/// открывает ни байта, сообщая об этом как о повреждении файла, — то есть ровно
-/// молчаливое расхождение, ради предотвращения которого диапазоны и разделены.
-/// А приём заголовка без тега 17 означал бы контейнер, который нечем
-/// расшифровать, признанным корректным.
+/// Neither of the two edits could satisfy the former probe legitimately.
+/// Moving the field to the optional range would let an unaware reader
+/// SKIP the sole wrapped content key, then fail to open a single byte
+/// while reporting file corruption: precisely the silent
+/// divergence the tag ranges are separated to prevent.
+/// Accepting a header without tag 17 would validate a container
+/// for which no decryption key can be obtained.
 #[test]
 fn the_wrapped_cek_field_is_mandatory_and_stays_in_the_critical_tag_range() {
     let full = sample_header([0x01; 32]).encode().unwrap();
@@ -779,20 +779,20 @@ fn the_wrapped_cek_field_is_mandatory_and_stays_in_the_critical_tag_range() {
     );
 }
 
-/// ПЕРЕСМОТРЕНО ОТКРЫТО, не молча. Прежняя редакция этой пробы называлась
-/// `the_suite_map_accepts_the_members_the_specification_lists` и требовала,
-/// чтобы `suite` с членами `kdf_id`(4) и `kem_id`(5) разбирался: так `suite`
-/// был описан в прежней редакции §2. Нынешняя редакция §2 говорит «ровно три
-/// члена: sig_alg(1), aead_id(2), tree_hash_id(3). Ни kdf_id, ни kem_id» и
-/// отводит обоим отсутствующим членам по абзацу объяснения.
+/// REVISED OPENLY, not silently. The previous probe was named
+/// `the_suite_map_accepts_the_members_the_specification_lists` and required
+/// `suite` with `kdf_id`(4) and `kem_id`(5) members to parse: `suite` had this
+/// former §2 description. Current §2 says "exactly three
+/// members: sig_alg(1), aead_id(2), tree_hash_id(3). Neither kdf_id nor kem_id" and
+/// gives each omitted member a paragraph of explanation.
 ///
-/// Исполнить требование прежней пробы значило бы завести второй источник истины
-/// о KEM: по §3.3 `kem_id` задаётся НА КАЖДЫЙ СЛОТ, ради того слоты и заведены —
-/// слот сервера и слот устройства автора уже идут к разным KEM. Общефайловый
-/// `kem_id` либо запретил бы это сосуществование, либо разошёлся бы со слотом, и
-/// тогда файл читался бы по разным KEM у двух реализаций. `kdf_id` же имеет
-/// ровно одно допустимое значение: критичное поле, которое читатель может только
-/// молча проигнорировать, — это то, что формат запрещает прямо.
+/// Satisfying the former probe would create a second source of truth
+/// for KEM: §3.3 specifies `kem_id` PER SLOT, the reason slots exist;
+/// the server slot and author-device slot already use different KEMs. A file-wide
+/// `kem_id` would either forbid this coexistence or disagree with a slot,
+/// causing two implementations to read the file using different KEMs. `kdf_id`, meanwhile, has
+/// exactly one valid value: a critical field the reader can only
+/// silently ignore is explicitly forbidden by the format.
 #[test]
 fn the_suite_map_holds_exactly_the_three_members_of_the_specification() {
     let base = sample_header([0x01; 32]).encode().unwrap();
@@ -897,12 +897,12 @@ fn an_unknown_critical_field_inside_a_key_slot_is_not_silently_dropped() {
     );
 }
 
-/// Незнакомый тег из НЕОБЯЗАТЕЛЬНОГО диапазона внутри вложенных map пропускается.
+/// An unknown OPTIONAL-range tag inside nested maps is skipped.
 ///
-/// Правило §2 — свойство диапазона тега, а не свойство конкретного декодера.
-/// Раньше `decode_suite` и `decode_authority` отвергали любой незнакомый тег
-/// безусловно, то есть необязательного диапазона внутри них не существовало
-/// вовсе, и добавить туда поле в версии 2 стало бы днём отказа (пункт С-7).
+/// The §2 rule belongs to the tag range, not a particular decoder.
+/// Previously `decode_suite` and `decode_authority` unconditionally rejected every unknown
+/// tag, so there was no optional range inside them at all;
+/// adding a version 2 field would cause rejection (item S-7).
 #[test]
 fn an_optional_unknown_tag_inside_suite_and_authority_is_skipped() {
     let base = sample_header([0x01; 32]).encode().unwrap();
@@ -926,22 +926,22 @@ fn an_optional_unknown_tag_inside_suite_and_authority_is_skipped() {
     }
 }
 
-/// АДРЕС СЕРВЕРА — ПЕЧАТНЫЙ ASCII, И ЭТО ПРОВЕРЯЕТСЯ ОБЕИМИ СТОРОНАМИ.
+/// SERVER ADDRESSES ARE PRINTABLE ASCII, CHECKED BY BOTH SIDES.
 ///
-/// # Почему проверяется именно содержимое, а не только длина
+/// # Why content is checked, not merely length
 ///
-/// Единственное, что продукт делает с `authority.urls`, — печатает их человеку,
-/// чтобы тот сравнил названные автором адреса с тем, куда идёт сам. Согласие
-/// человека здесь и есть защитный механизм, а строку, которую печатают, выбирает
-/// автор файла — то есть в общем случае противник.
+/// The product only prints `authority.urls` for the user
+/// to compare the author's addresses with their intended destination. The person's
+/// consent is the protection mechanism, but the displayed string is chosen by
+/// the file's author, generally an adversary.
 ///
-/// Три образца ниже ломают ровно это сравнение, и все три — законный UTF-8,
-/// проходивший прежнюю проверку целиком:
+/// The three samples below break precisely that comparison. All are valid UTF-8
+/// and passed the entire previous check:
 ///
-/// * `ESC` открывает управляющую последовательность: напечатанный ниже адрес
-///   способен затереть строку, напечатанную выше;
-/// * U+202E переворачивает порядок и показывает `moc.dab` как `bad.com`;
-/// * кириллическая `а` неотличима от латинской `a` в любом шрифте.
+/// * `ESC` starts a control sequence: an address printed below
+///   can erase the line printed above;
+/// * U+202E reverses order, displaying `moc.dab` as `bad.com`;
+/// * Cyrillic `а` is indistinguishable from Latin `a` in any font.
 #[test]
 fn a_server_address_outside_printable_ascii_is_refused_on_both_sides() {
     let hostile = [
@@ -975,10 +975,10 @@ fn a_server_address_outside_printable_ascii_is_refused_on_both_sides() {
     }
 }
 
-/// Контроль: обычный адрес по-прежнему проходит.
+/// Control: an ordinary address still passes.
 ///
-/// Без него предыдущая проба зеленела бы и от проверки, отвергающей всё подряд, —
-/// а такая проверка сломала бы уже выпущенные эталоны.
+/// Without it, the previous probe would also pass with a check that rejects everything,
+/// which would break already-issued reference artifacts.
 #[test]
 fn an_ordinary_address_still_passes() {
     let mut header = sample_header([0x01; 32]);

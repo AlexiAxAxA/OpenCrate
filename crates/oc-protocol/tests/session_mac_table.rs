@@ -1,19 +1,19 @@
-//! MAC сессии: таблица заверяемых видов и отделение хвоста — в крейте-владельце.
+//! Session MAC: authenticated-kind table and trailer separation, in the owning crate.
 //!
-//! Зачем отдельный файл, если сервер и так отбивает подменённый кадр шестью
-//! пробами `cc-authority/tests/session_mac.rs`. Затем, что ОБЕ величины живут
-//! ЗДЕСЬ, а стерёг их до сих пор только сосед. Мутация «убрать `KIND_ACTIVATE`
-//! из [`is_session_sealed`]» не роняла ни одной из 104 проб `oc-protocol` —
-//! а это снятие MAC с активации целиком: клиент по той же таблице решает,
-//! ставить ли хвост, и обе стороны дружно перестают его требовать. Докстрока
-//! функции прямо называет её «одной таблицей на обе стороны провода»; у такой
-//! величины проба обязана быть там, где она объявлена, а не только там, где
-//! её однажды применили.
+//! Why a separate file when six tests in `cc-authority/tests/session_mac.rs`
+//! already make the server reject tampered frames? Because BOTH quantities live
+//! HERE, yet only the neighboring crate guarded them. Removing `KIND_ACTIVATE`
+//! from [`is_session_sealed`] broke none of the 104 `oc-protocol` tests,
+//! yet it removes activation's MAC entirely: the client uses the same table to decide
+//! whether to append the trailer, and both peers stop requiring it together. The function's doc comment
+//! explicitly calls it "one table for both ends of the wire"; such a
+//! quantity must have a test where it is defined, not only where
+//! it happened to be used.
 //!
-//! Проба идёт ПО ПУТИ: вид берётся не из константы, а из первого байта кадра,
-//! который собрал [`encode_request`] — ровно так его читают и `cc_cli::activate`
-//! (`seal_request`), и `cc_authority::serve` (`converse`). Сравнение с числом 3
-//! пережило бы переименование варианта; сборка кадра — нет.
+//! The test follows THE PATH: kind comes not from a constant but from the first byte of a frame
+//! built by [`encode_request`], exactly as read by `cc_cli::activate`
+//! (`seal_request`) and `cc_authority::serve` (`converse`). Comparing with the number 3
+//! would survive renaming a variant; frame construction would not.
 
 // Литы сняты по названным причинам: `unwrap`/`panic` — словарь проверки,
 // индексирование — чтение первого байта кадра заведомо непустой длины.
@@ -51,17 +51,17 @@ fn evidence() -> oc_protocol::attestation::Evidence {
     }
 }
 
-/// ВИД КАДРА РЕШАЕТ, ЗАВЕРЯЕТСЯ ЛИ ОН MAC СЕССИИ, И РЕШЕНИЕ ЗДЕСЬ ВЫПИСАНО ПОИМЁННО.
+/// FRAME KIND DETERMINES WHETHER A SESSION MAC IS REQUIRED; EACH DECISION IS LISTED HERE BY NAME.
 ///
-/// Заверяются те и только те виды, чьё тело МЕНЯЕТ ИСХОД разговора и при этом
-/// приходит ПОСЛЕ рукопожатия: активация и продление (показания часов в них
-/// двигают планку анти-отката навсегда — находка Н-2) и три шага аттестации,
-/// вердикт которых меняет, что выдаст активация этого же разговора (B6b).
+/// Authenticated kinds are exactly those whose bodies CHANGE THE OUTCOME of a conversation and
+/// arrive AFTER the handshake: activation and renewal (their clock readings
+/// permanently advance the anti-rollback floor, finding N-2), plus the three attestation steps,
+/// whose verdict changes what activation issues in this same conversation (B6b).
 ///
-/// Рукопожатие — `Hello` и `Prove` — заверяться не может и не должно: ключа
-/// сессии до него ещё нет, он из этого разговора и выводится. Потребуй мы MAC
-/// здесь — рукопожатие стало бы невозможным; не потребуй у активации — MAC не
-/// стало бы вовсе.
+/// The handshake, `Hello` and `Prove`, cannot and must not be authenticated this way:
+/// no session key exists beforehand; it is derived from this conversation. Requiring a MAC
+/// here would make the handshake impossible; not requiring one for activation would remove
+/// the MAC entirely.
 #[test]
 fn the_kinds_sealed_by_the_session_mac_are_the_named_ones() {
     // (имя для сообщения, запрос, обязан ли нести хвост K25)
@@ -101,13 +101,13 @@ fn the_kinds_sealed_by_the_session_mac_are_the_named_ones() {
     }
 }
 
-/// ХВОСТ ОТДЕЛЯЕТСЯ ЦЕЛИКОМ, А ТЕЛО ПОД MAC — ВЕСЬ КАДР ВМЕСТЕ С БАЙТОМ ВИДА.
+/// THE WHOLE TRAILER IS SEPARATED, AND THE MAC COVERS THE ENTIRE FRAME INCLUDING ITS KIND BYTE.
 ///
-/// Два свойства одной строкой, и оба несущие. Первое: под MAC идёт байт вида —
-/// иначе посредник менял бы `Activate` на `Renew` в перехваченном кадре, не
-/// трогая хвоста, и продление проходило бы за активацию. Второе: отделённое
-/// тело — РОВНО то, что уйдёт в разбор, байт в байт, без хвоста; оставь в нём
-/// хоть байт MAC — и разбор увидел бы поле, которого отправитель не писал.
+/// Two essential properties in one statement. First, the MAC includes the kind byte:
+/// otherwise an intermediary could change `Activate` to `Renew` in an intercepted frame without
+/// touching the trailer, letting renewal pass as activation. Second, the separated
+/// body is EXACTLY what reaches parsing, byte for byte, without the trailer; leaving even
+/// one MAC byte would make parsing see a field the sender never wrote.
 #[test]
 fn the_mac_tail_splits_off_whole_and_leaves_the_kind_byte_under_the_mac() {
     let framed = encode_request(&Request::Activate(activate_req())).unwrap();
@@ -121,11 +121,11 @@ fn the_mac_tail_splits_off_whole_and_leaves_the_kind_byte_under_the_mac() {
     assert_eq!(mac, &tail, "хвост взят не с конца кадра");
 }
 
-/// КАДР КОРОЧЕ ХВОСТА ИЛИ РАВНЫЙ ЕМУ — ОТКАЗ, А НЕ ПУСТОЕ ТЕЛО.
+/// A FRAME NO LONGER THAN THE TRAILER IS REJECTED, NOT TREATED AS AN EMPTY BODY.
 ///
-/// Ровно 32 байта — это «тело пустое, весь кадр и есть MAC». Прими мы такое,
-/// и у кадра не стало бы даже байта вида, по которому выбирается ветка; отказ
-/// здесь дешевле любой догадки о том, чем считать пустоту.
+/// Exactly 32 bytes means "empty body, the entire frame is the MAC". Accepting that
+/// would leave the frame without even a kind byte to select a branch; rejection
+/// here is cheaper than guessing what emptiness should mean.
 #[test]
 fn a_frame_no_longer_than_the_tail_is_refused() {
     for len in [0_usize, 1, 31, 32] {

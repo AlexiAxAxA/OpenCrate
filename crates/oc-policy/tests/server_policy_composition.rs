@@ -7,12 +7,12 @@
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects
 )]
-//! Профиль сервера складывается с политикой автора ВНУТРИ решателя.
+//! The server profile is combined with the author's policy INSIDE the evaluator.
 //!
-//! Главное свойство здесь — не «пересечение считается правильно» (за это
-//! отвечает `intersect` и его собственные пробы), а то, что складывает его
-//! `evaluate`, и ни один вызывающий не может этого пропустить. Поэтому все
-//! пробы идут через `evaluate` и ни одна не зовёт `intersect` напрямую.
+//! The key property is not "intersection is computed correctly" (covered by
+//! `intersect` and its own probes), but that
+//! `evaluate` performs the combination and no caller can skip it. Therefore all
+//! probes use `evaluate`; none calls `intersect` directly.
 
 use oc_policy::{
     Action, Binding, Context, DenyReason, DeviceClock, DeviceFacts, LeaseFacts, Network, Policy,
@@ -38,7 +38,7 @@ fn ctx() -> Context {
     }
 }
 
-/// Политика автора: смотреть и выгружать можно, программной привязки хватает.
+/// Author policy: viewing and exporting allowed, software binding sufficient.
 fn author() -> Policy {
     let mut policy = Policy::deny_all().allow(Action::View).allow(Action::Export);
     policy.validity = Validity::Always;
@@ -66,7 +66,7 @@ fn lease(server_policy: Option<Policy>) -> LeaseFacts {
     }
 }
 
-/// Профиль без собственных ограничений: разрешает всё, чем владеет автор.
+/// A profile with no restrictions of its own: allows everything the author controls.
 fn permissive() -> Policy {
     let mut policy = Policy::deny_all();
     for action in [
@@ -83,7 +83,7 @@ fn permissive() -> Policy {
     policy
 }
 
-/// Сервер убрал выгрузку — и её нет, хотя автор её давал.
+/// The server removes export, so it is unavailable even though the author allowed it.
 #[test]
 fn a_server_that_drops_export_drops_it_for_the_reader() {
     let mut server = permissive();
@@ -98,11 +98,11 @@ fn a_server_that_drops_export_drops_it_for_the_reader() {
     }
 }
 
-/// Отсутствие профиля не значит ни «всё разрешено», ни «всё запрещено».
+/// No profile means neither "everything allowed" nor "everything denied".
 ///
-/// Решение обязано совпасть с тем, каким оно было до появления поля, — иначе
-/// один лишь выпуск новой сборки сервера изменил бы права у всех, кто ничего не
-/// настраивал.
+/// The decision must match what it was before the field existed; otherwise
+/// merely releasing a new server build would change permissions for everyone who
+/// configured nothing.
 #[test]
 fn no_profile_decides_exactly_as_before() {
     let facts = lease(None);
@@ -119,11 +119,11 @@ fn no_profile_decides_exactly_as_before() {
     assert!(evaluate(&author(), Some(&facts), Action::View, &soft).is_allowed());
 }
 
-/// Сервер НЕ МОЖЕТ расширить права: чего автор не дал, того не будет.
+/// The server CANNOT expand permissions: what the author did not grant stays unavailable.
 ///
-/// Это и есть обещание И-10, и проверяется оно с самой выгодной для сервера
-/// стороны: профиль разрешает всё, что бывает, — включая печать, которой автор
-/// не давал. Скомпрометированный сервер получает ровно столько же.
+/// This is the promise of I-10, tested from the position most favorable to the server:
+/// the profile allows everything possible, including printing, which the author
+/// did not grant. A compromised server obtains exactly the same result.
 #[test]
 fn a_server_cannot_hand_out_what_the_author_withheld() {
     let facts = lease(Some(permissive()));
@@ -133,7 +133,7 @@ fn a_server_cannot_hand_out_what_the_author_withheld() {
     }
 }
 
-/// Сервер поднял ступень привязки — программная машина закрывается.
+/// The server raises the binding level, denying a software-bound machine.
 #[test]
 fn a_server_may_raise_the_binding_floor() {
     let mut server = permissive();
@@ -153,7 +153,7 @@ fn a_server_may_raise_the_binding_floor() {
     assert!(evaluate(&author(), Some(&facts), Action::View, &ctx()).is_allowed());
 }
 
-/// Сервер урезал бюджет открытий — считается его число, а не авторское.
+/// The server reduces the open budget: its number applies, not the author's.
 #[test]
 fn a_server_may_shrink_the_open_budget() {
     let mut relaxed = author();
@@ -172,10 +172,10 @@ fn a_server_may_shrink_the_open_budget() {
     assert!(evaluate(&relaxed, Some(&lease(None)), Action::View, &third).is_allowed());
 }
 
-/// Сервер потребовал водяной знак — обязательство приходит вместе с доступом.
+/// The server requires a watermark: the obligation accompanies access.
 ///
-/// Обязательства — не украшение решения: клиент исполняет их, и подмешаны они
-/// тем же пересечением, что и запреты.
+/// Obligations are not decorations on a verdict: the client enforces them, and they enter
+/// through the same intersection as denials.
 #[test]
 fn a_server_may_demand_a_watermark() {
     let mut server = permissive();
@@ -187,7 +187,7 @@ fn a_server_may_demand_a_watermark() {
     }
 }
 
-/// Сервер потребовал строгий онлайн — офлайн-клиент закрывается.
+/// The server requires strict online operation, denying an offline client.
 #[test]
 fn a_server_may_forbid_going_offline() {
     let mut server = permissive();
@@ -202,11 +202,11 @@ fn a_server_may_forbid_going_offline() {
     }
 }
 
-/// Правило из БУДУЩЕЙ версии, названное сервером, закрывает файл.
+/// A rule from a FUTURE version specified by the server makes the file inaccessible.
 ///
-/// Иначе получалось бы худшее из возможного: сервер ужесточил доступ правилом,
-/// которого клиент не знает, клиент этого правила не увидел — и открыл файл,
-/// считая, что прочёл политику целиком.
+/// Otherwise the worst case would arise: the server tightened access with a rule
+/// unknown to the client; the client missed that rule and opened the file,
+/// believing it had read the entire policy.
 #[test]
 fn a_rule_the_client_cannot_read_closes_the_file() {
     let mut server = permissive();
@@ -220,11 +220,11 @@ fn a_rule_the_client_cannot_read_closes_the_file() {
     }
 }
 
-/// Пустой профиль закрывает всё — и это законное состояние, а не авария.
+/// An empty profile denies everything: a valid state, not a failure.
 ///
-/// Оператору оно доступно словом (`cca policy set --allow none`), и смысл у
-/// него свой: заморозка останавливает ВЫДАЧИ, а пустой профиль закрывает и уже
-/// выданное — с того мига, как клиент увидит новый лизинг.
+/// The operator can request it (`cca policy set --allow none`), and its meaning
+/// is distinct: freezing stops ISSUANCE, while an empty profile also closes already-issued
+/// access as soon as the client sees the new lease.
 #[test]
 fn an_empty_profile_closes_everything() {
     let facts = lease(Some(Policy::deny_all()));

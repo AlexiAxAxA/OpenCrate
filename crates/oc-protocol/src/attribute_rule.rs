@@ -1,75 +1,75 @@
-//! Правило файла по атрибутам держателя — байты (Ф-27, B4b).
+//! File rule based on holder attributes: bytes (F-27, B4b).
 //!
-//! # Зачем правило здесь, а не только в сервере
+//! # Why the rule lives here rather than only on the server
 //!
-//! До B4b правило жило одним типом в `cc-authority` и одним кодеком в его
-//! хранилище: задавал его только оператор, командой на машине сервера, и
-//! байты не выходили за пределы файла состояния. С подписанным распоряжением
-//! автора (`order::Kind::SetRule`) те же байты едут по проводу под подписью —
-//! а у документа, который подписывают и проверяют разные стороны, определение
-//! обязано быть одно и лежать там, где лежат остальные документы.
+//! Before B4b, the rule was a type in `cc-authority` and a codec in its
+//! store: only the operator set it, using a command on the server machine, and
+//! its bytes never left the state file. With a signed author order
+//! (`order::Kind::SetRule`), those same bytes travel over the wire under a signature;
+//! a document signed and verified by different parties must have a single
+//! definition, located alongside the other documents.
 //!
-//! Раскладка совпадает с той, что хранилище писало до переезда, байт в байт:
-//! файлы состояния прежних серверов читаются без правок, и отпечаток
-//! состояния от обновления не меняется. Хранилище зовёт этот же кодек.
+//! The layout matches the store's pre-move output byte for byte:
+//! old server state files remain readable unchanged, and the state
+//! fingerprint does not change on upgrade. The store calls this same codec.
 //!
-//! # Раскладка
+//! # Layout
 //!
-//! TLV, теги по возрастанию, все критичные:
+//! TLV, tags in ascending order, all critical:
 //!
-//! | Тег | Поле | Значение |
+//! | Tag | Field | Value |
 //! |---|---|---|
-//! | 1 | потолок срока лизы | `i64le` секунд, больше нуля; необязателен |
-//! | 2 | условия выдачи | поток условий; пишется всегда, в том числе пустым |
-//! | 3 | ужесточения | поток из пар `[условие, профиль]`; только если есть |
+//! | 1 | lease lifetime cap | `i64le` seconds, positive; optional |
+//! | 2 | issuance conditions | condition stream; always written, even when empty |
+//! | 3 | restrictions | stream of `[condition, profile]` pairs; only when present |
 //!
-//! Поток — подряд `u32le длина ‖ байты`. Условие — `u8 режим ‖ поток [атрибут,
-//! значение…]`. Профиль — кодек политики (`policy_codec`, версия контейнера).
+//! A stream is consecutive `u32le length ‖ bytes`. A condition is `u8 mode ‖ stream [attribute,
+//! value…]`. A profile uses the policy codec (`policy_codec`, container version).
 //!
-//! # Что разбор отвергает сам
+//! # What parsing rejects itself
 //!
-//! Имя или значение не идентификатор; условие без значений; «не ниже» не с
-//! одним значением; незнакомый режим; пределы числа условий, значений и
-//! ужесточений; неположительный потолок срока; пустой поток ужесточений —
-//! его писатель не производит, значит пришёл он не от писателя. Смысл имён
-//! (есть ли такой атрибут в словаре) проверяет сервер: словарь — его.
+//! A name or value that is not an identifier; a condition without values; "at least" with
+//! other than one value; an unknown mode; limits on conditions, values and
+//! restrictions; a nonpositive lifetime cap; an empty restrictions stream:
+//! the writer never produces one, so it cannot have come from the writer. The meaning of names
+//! (whether an attribute exists in the dictionary) is checked by the server, which owns the dictionary.
 
 use oc_policy::Policy;
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
 
-/// Предел длины имени атрибута и значения, в байтах.
+/// Maximum attribute name and value length, in bytes.
 pub const MAX_NAME_BYTES: usize = 64;
-/// Сколько значений у одного условия (и у одного атрибута словаря).
+/// Number of values per condition (and per dictionary attribute).
 pub const MAX_VALUES: usize = 64;
-/// Сколько условий выдачи в правиле.
+/// Number of issuance conditions in a rule.
 pub const MAX_CLAUSES: usize = 16;
-/// Сколько ужесточений в правиле.
+/// Number of restrictions in a rule.
 pub const MAX_TIGHTENINGS: usize = 8;
 
-/// Теги правила. Все критичные (И-7).
+/// Rule tags. All critical (I-7).
 pub mod tag {
     pub const MAX_LEASE: u16 = 1;
     pub const CLAUSES: u16 = 2;
     pub const TIGHTENINGS: u16 = 3;
 }
 
-/// Как условие читает значения.
+/// How a condition interprets its values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Mode {
-    /// Хотя бы одно из перечисленных.
+    /// At least one listed value.
     AnyOf = 1,
-    /// Все перечисленные.
+    /// All listed values.
     AllOf = 2,
-    /// Значение с рангом не ниже названного — по порядку значений в словаре.
-    /// Значение в условии ровно одно.
+    /// A value ranked at least as high as the specified one, by dictionary value order.
+    /// The condition has exactly one value.
     AtLeast = 3,
 }
 
 impl Mode {
-    /// Обратное к `as u8`. Незнакомый номер — `None`, и разбор его отвергает.
+    /// Inverse of `as u8`. An unknown number gives `None` and is rejected by parsing.
     #[must_use]
     pub fn from_u8(byte: u8) -> Option<Self> {
         match byte {
@@ -81,7 +81,7 @@ impl Mode {
     }
 }
 
-/// Одно условие правила: атрибут, режим, значения.
+/// One rule condition: attribute, mode, values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Clause {
     pub attribute: String,
@@ -89,47 +89,47 @@ pub struct Clause {
     pub values: Vec<String>,
 }
 
-/// Ужесточение по держанию: всем, кто НЕ проходит `unless`, — не больше `profile`.
+/// Holder-based restriction: anyone who does NOT satisfy `unless` gets no more than `profile`.
 ///
-/// Профиль — обычная политика и складывается пересечением (`docs/format.md`
-/// §4.3), поэтому ужесточение не умеет ничего, чего не умеет строгий профиль
-/// сервера, и расширить права автора не может.
+/// The profile is an ordinary policy composed by intersection (`docs/format.md`
+/// §4.3), so a restriction can do only what the server's strict profile
+/// can do, and cannot expand the author's permissions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tightening {
-    /// Кого ужесточение НЕ касается.
+    /// Who is NOT subject to the restriction.
     pub unless: Clause,
-    /// Чем ужесточается политика для всех прочих.
+    /// How the policy is restricted for everyone else.
     pub profile: Policy,
 }
 
-/// Правило файла: все условия разом (между условиями — «и»), потолок срока
-/// лизы и ужесточения по держанию. Пустое правило — это отсутствие правила.
+/// File rule: all conditions together (logical AND between conditions), a lease lifetime
+/// cap and holder-based restrictions. An empty rule means no rule.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Rule {
     pub clauses: Vec<Clause>,
-    /// Не длиннее чем на столько выдаётся лиза устройству, прошедшему правило.
-    /// Ужесточает срок автора, не расширяет: пересечение берётся минимумом.
+    /// Maximum lease lifetime for a device that satisfies the rule.
+    /// Tightens the author's lifetime rather than extending it: intersection takes the minimum.
     pub max_lease_seconds: Option<i64>,
-    /// Ужесточения ДЕЙСТВИЙ по держанию. Ворота (`clauses`) решают, выдавать
-    /// ли; ужесточения — что разрешено внутри выданного.
+    /// Holder-based ACTION restrictions. The gate (`clauses`) decides whether to issue;
+    /// restrictions determine what is allowed within the issued lease.
     pub tightenings: Vec<Tightening>,
 }
 
 impl Rule {
-    /// Правила нет: ни условий, ни потолка срока, ни ужесточений. Потолок без
-    /// условий — правило («всем, но на неделю»), и хранится как правило.
+    /// No rule: no conditions, lifetime cap or restrictions. A cap without
+    /// conditions is a rule ("everyone, but for a week") and is stored as one.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.clauses.is_empty() && self.max_lease_seconds.is_none() && self.tightenings.is_empty()
     }
 }
 
-/// Строка — идентификатор: латиница, цифры, `_ . : / -`, от 1 до
-/// [`MAX_NAME_BYTES`] байт.
+/// A string is an identifier: Latin letters, digits, `_ . : / -`, from 1 to
+/// [`MAX_NAME_BYTES`] bytes.
 ///
-/// Набор знаков узкий намеренно: имена печатаются в журнале, в отказе и в
-/// строке команды, и пробел или кавычка в них означали бы, что команду нельзя
-/// прочитать обратно однозначно.
+/// The character set is deliberately narrow: names appear in the journal, rejection messages and
+/// command lines; a space or quote would prevent the command
+/// from being read back unambiguously.
 #[must_use]
 pub fn is_identifier(text: &str) -> bool {
     !text.is_empty()
@@ -139,18 +139,18 @@ pub fn is_identifier(text: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'/' | b'-'))
 }
 
-/// Условие из строки команды: `имя=a|b` — любое, `имя=a&b` — все, `имя>=a` — не ниже.
+/// Command-line condition: `name=a|b` means any, `name=a&b` all, `name>=a` at least.
 ///
-/// Разбор один на `cca` и `cc`: соавторы набирают правило на своих машинах, и
-/// одна и та же строка обязана дать одно и то же условие — иначе подписи легли
-/// бы под разные намерения.
+/// One parser serves both `cca` and `cc`: coauthors enter rules on their own machines,
+/// and identical strings must yield identical conditions; otherwise signatures
+/// would cover different intentions.
 ///
-/// `>=` проверяется первым: строка с ним содержит и `=`, и разбор по `=`
-/// прочёл бы «имя>» как имя. Значения с `|` и `&` идентификаторами не бывают,
-/// поэтому разделители однозначны. Годность имён проверяет кодек при записи.
+/// `>=` is checked first: a string containing it also contains `=`, so parsing on `=`
+/// would read "name>" as the name. Values containing `|` and `&` cannot be identifiers,
+/// so the separators are unambiguous. The codec validates names on encoding.
 ///
 /// # Errors
-/// Строка без `=` или смешивающая `|` и `&`.
+/// A string without `=`, or one mixing `|` and `&`.
 pub fn parse_clause(text: &str) -> Result<Clause, &'static str> {
     if let Some((attribute, value)) = text.split_once(">=") {
         return Ok(Clause {
@@ -172,11 +172,11 @@ pub fn parse_clause(text: &str) -> Result<Clause, &'static str> {
     })
 }
 
-/// Закодировать правило.
+/// Encode a rule.
 ///
 /// # Errors
-/// [`FormatError`], если правило не проходит те же проверки, что разбор:
-/// документ, который мы отказываемся принять, мы и не выписываем.
+/// [`FormatError`] if the rule fails the same checks as decoding:
+/// we do not issue documents that we would refuse to accept.
 pub fn encode(rule: &Rule) -> Result<Vec<u8>, FormatError> {
     check(rule)?;
     let mut w = TlvWriter::new();
@@ -204,11 +204,11 @@ pub fn encode(rule: &Rule) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать правило — строго.
+/// Decode a rule strictly.
 ///
 /// # Errors
-/// [`FormatError`] при незнакомом теге, неверной длине, незнакомом режиме,
-/// имени не-идентификаторе или нарушенном пределе.
+/// [`FormatError`] for an unknown tag, invalid length, unknown mode,
+/// non-identifier name or exceeded limit.
 pub fn decode(bytes: &[u8]) -> Result<Rule, FormatError> {
     let mut rule = Rule::default();
     let mut clauses_seen = false;
@@ -265,7 +265,7 @@ pub fn decode(bytes: &[u8]) -> Result<Rule, FormatError> {
     Ok(rule)
 }
 
-/// Проверки, общие для записи и разбора.
+/// Checks shared by encoding and decoding.
 fn check(rule: &Rule) -> Result<(), FormatError> {
     if rule.clauses.len() > MAX_CLAUSES {
         return Err(FormatError::BadFieldLength { tag: tag::CLAUSES, len: rule.clauses.len() });
@@ -288,12 +288,12 @@ fn check(rule: &Rule) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Условие исполнимо: имена — идентификаторы, значений не ноль и не сверх
-/// предела, у «не ниже» ровно одно.
+/// The condition is satisfiable: names are identifiers, the value count is nonzero and within
+/// the limit, and "at least" has exactly one value.
 ///
-/// Условие без значений — не «выполнено у всех», а ошибка: встроенный ответ
-/// `all()` на пустом списке — «истинно», и правило, выглядящее закрытым,
-/// выполнялось бы у кого угодно (И-10).
+/// A condition without values is an error, not "satisfied by everyone": the built-in
+/// `all()` returns true for an empty list, so a rule that appeared closed
+/// would be satisfied by anyone (I-10).
 fn check_clause(clause: &Clause, at: u16) -> Result<(), FormatError> {
     if !is_identifier(&clause.attribute) || !clause.values.iter().all(|v| is_identifier(v)) {
         return Err(FormatError::UnknownCriticalField { tag: at });
@@ -337,7 +337,7 @@ fn text(bytes: &[u8]) -> Result<String, FormatError> {
         .map_err(|_| FormatError::UnknownCriticalField { tag: tag::CLAUSES })
 }
 
-/// Поток: подряд `u32le длина ‖ байты`.
+/// Stream: consecutive `u32le length ‖ bytes`.
 fn stream<T: AsRef<[u8]>>(at: u16, items: &[T]) -> Result<Vec<u8>, FormatError> {
     let mut out = Vec::new();
     for item in items {
@@ -350,11 +350,11 @@ fn stream<T: AsRef<[u8]>>(at: u16, items: &[T]) -> Result<Vec<u8>, FormatError> 
     Ok(out)
 }
 
-/// Разобрать поток — строго, и не дальше `limit` записей.
+/// Decode a stream strictly, with at most `limit` entries.
 ///
-/// Предел проверяется ДО того, как записи копятся: поток в мегабайт иначе
-/// заставил бы собрать тысячи записей, чтобы затем их отвергнуть. Обрыв внутри
-/// записи и хвост после последней — ошибки, а не «почти правильно».
+/// The limit is checked BEFORE accumulating entries: otherwise a megabyte stream
+/// would force allocation of thousands of entries only to reject them afterward. Truncation within
+/// an entry and trailing bytes after the last entry are errors, not "almost correct".
 fn unstream(at: u16, bytes: &[u8], limit: usize) -> Result<Vec<&[u8]>, FormatError> {
     let mut out = Vec::new();
     let mut rest = bytes;
@@ -415,7 +415,7 @@ mod tests {
         assert!(decode(&empty).unwrap().is_empty());
     }
 
-    /// БЕЗ УЖЕСТОЧЕНИЙ — ПРЕЖНИЕ БАЙТЫ: тег 3 не пишется вовсе.
+    /// WITHOUT RESTRICTIONS, THE OLD BYTES: tag 3 is not written at all.
     #[test]
     fn without_tightenings_the_third_tag_is_absent() {
         let plain = Rule { tightenings: Vec::new(), ..sample() };
@@ -484,7 +484,7 @@ mod tests {
         assert!(parse_clause("dept=a|b&c").is_err(), "смешанное условие разобрано");
     }
 
-    /// РАЗБОР ПРОИЗВОЛЬНЫХ БАЙТОВ НЕ ПАНИКУЕТ.
+    /// PARSING ARBITRARY BYTES DOES NOT PANIC.
     #[test]
     fn decoding_arbitrary_bytes_never_panics() {
         let bytes = encode(&sample()).unwrap();

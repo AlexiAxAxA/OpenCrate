@@ -1,118 +1,118 @@
-//! Документы протокола продукта: всё, что ходит между клиентом, сервером и
-//! свидетелем, но не лежит внутри контейнера `.cc`.
+//! Product protocol documents: everything exchanged between client, server and
+//! witness that does not reside inside the `.cc` container.
 //!
-//! # Почему это отдельный крейт, а не модули `oc-format`
+//! # Why this is a separate crate rather than modules in `oc-format`
 //!
-//! Граница проведена по ТЕМПУ ИЗМЕНЕНИЯ, а не по тому, кто чей сосед в
-//! каталоге. Формат контейнера замирает: после первого файла, ушедшего наружу,
-//! каждый байт заголовка обещан навсегда, и менять его можно только новой
-//! версией формата вместе с записанным решением (И-14). Протокол продукта
-//! растёт вместе с сервером — новый вид запроса, новое поле в положении файла,
-//! новая причина отказа появляются ровно тогда, когда появляется механизм, и
-//! никакого обещания вечности на них нет.
+//! The boundary follows the RATE OF CHANGE, not directory
+//! neighbors. The container format freezes: after the first file leaves the system,
+//! every header byte is promised forever, and changing it requires a new
+//! format version together with a recorded decision (I-14). The product protocol
+//! grows with the server: a new request kind, a new field in the file standing,
+//! a new rejection reason appear exactly when the mechanism appears, with
+//! no promise of permanence.
 //!
-//! Пока эти два рода жили в одном крейте, они были неразличимы снаружи: крейт,
-//! который обещано заморозить и открыть, содержал восемь с половиной тысяч
-//! строк, меняющихся каждую неделю. Смешать их значило либо заморозить то, что
-//! обязано меняться, либо открыть заморозку тому, что меняется само. Решение
-//! Р-2 (`docs/plan.md`, «Д-ядро-к-заморозке») развело их по крейтам, и теперь
-//! разница ВИДНА в строке `use` — до всякого гейта.
+//! While both kinds lived in one crate, they were indistinguishable externally: the crate
+//! promised to be frozen and opened contained eight and a half thousand
+//! lines changing every week. Mixing them meant either freezing what
+//! must change or exposing the freeze to things that change independently. Decision
+//! R-2 (`docs/plan.md`, «D-core-freeze») separated them into crates; now
+//! the difference is VISIBLE in a `use` statement, before any gate runs.
 //!
-//! # Что где живёт
+//! # What lives where
 //!
-//! В [`oc_format`] — контейнер: разрезание пролога, заголовок и его слоты,
-//! изменяемая область, кадры чанков, подвал, кодек политики, разборщик TLV,
-//! проверка подписи и общий тип ошибки [`oc_format::FormatError`]. Здесь — то,
-//! что приходит с провода или уходит на провод: активация, распоряжение автора,
-//! положение файла на сервере, запрос доступа и решение по нему, лиз, отзывная,
-//! аттестация ключа устройства, журнал свидетеля, каталог получателей, правило
-//! по атрибутам, управляющие операции и реплика.
+//! [`oc_format`] contains the container: splitting the prologue, the header and its slots,
+//! the mutable area, chunk frames, the footer, the policy codec, the TLV parser,
+//! signature verification and the shared error type [`oc_format::FormatError`]. This crate holds
+//! what arrives from or goes onto the wire: activation, author orders,
+//! file standing on the server, access requests and decisions, leases, revocations,
+//! device key attestation, the witness journal, the recipient directory, attribute
+//! rules, control operations and replicas.
 //!
-//! Стрелка одна и только одна: протокол зависит от формата. Обратной нет и быть
-//! не может — ни один разборщик контейнера не зовёт ни один документ протокола,
-//! и это проверено по коду до переноса, а не обещано.
+//! There is exactly one dependency arrow: protocol depends on format. The reverse does not
+//! and cannot exist: no container parser calls any protocol document;
+//! this was verified in the code before the move, not merely promised.
 //!
-//! Лиз ([`lease`]) лежит здесь, хотя кешируется рядом с контейнером и
-//! проверяется читателем: это ОТДЕЛЬНЫЙ документ со своей версией
-//! ([`lease::LEASE_VERSION`]) и своим жизненным циклом, выдаёт его сервер, и
-//! меняется он в темпе сервера, а не в темпе формата.
+//! The lease ([`lease`]) lives here although it is cached alongside the container and
+//! verified by the reader: it is a SEPARATE document with its own version
+//! ([`lease::LEASE_VERSION`]) and lifecycle, issued by the server,
+//! and changes at the server's pace rather than the format's pace.
 //!
-//! # Чистота
+//! # Purity
 //!
-//! Крейт входит в тот же гейт, что `oc-format`, `oc-crypto`, `oc-policy` и
-//! `oc-engine`: ни ввода-вывода, ни часов, ни генератора случайных чисел.
-//! Контрольная проверка — сборка под `wasm32-unknown-unknown`. Свойство это не
-//! стилевое: проба на путешествие во времени и на отзыв обязана быть ДАННЫМИ, а
-//! не подменой системных часов.
+//! The crate passes through the same gate as `oc-format`, `oc-crypto`, `oc-policy` and
+//! `oc-engine`: no I/O, clocks or random number generator.
+//! The verification check is a `wasm32-unknown-unknown` build. This is not a
+//! style concern: tests for time travel and revocation must be DATA,
+//! not a replacement of the system clock.
 //!
-//! # Незнакомый тег
+//! # Unknown tags
 //!
-//! **Правило то же, что у контейнера (И-7), с 2026-09-21.** Тег ≤
-//! `oc_format::tlv::CRIT_TAG_MAX` критичен: незнакомый такой тег — отказ
-//! [`oc_format::FormatError::UnknownCriticalField`], как и до решения, тем же
-//! вариантом ошибки. Тег выше — необязательный: значение пропускается. Решение
-//! принимает `oc_format::tlv::unknown_tag_action` — та же функция, что у
-//! контейнера; своей у протокола нет.
+//! **The same rule as the container (I-7), since 2026-09-21.** A tag ≤
+//! `oc_format::tlv::CRIT_TAG_MAX` is critical: an unknown such tag is rejected with
+//! [`oc_format::FormatError::UnknownCriticalField`], the same error
+//! variant as before the decision. Higher tags are optional: their values are skipped. The decision
+//! is made by `oc_format::tlv::unknown_tag_action`, the same function used by
+//! the container; the protocol has no separate one.
 //!
-//! До этого дня разборщики протокола отвергали ЛЮБОЙ незнакомый тег, а довод
-//! звучал так: клиент и сервер обновляются вместе. Довод перестал быть верным
-//! раньше, чем появился первый выпуск: после выпуска сервер и клиенты
-//! обновляются в разное время — оператор-одиночка держит свой сервер, получатели
-//! сидят на машинах, которыми никто не управляет. При прежнем правиле первое же
-//! новое поле после выпуска становилось днём отказа для всех выпущенных сторон.
-//! До выпуска правка бесплатна: внешних клиентов нет, клиент и сервер идут одним
-//! пакетом. После — потребовала бы версии провода.
+//! Before that date, protocol parsers rejected EVERY unknown tag, justified
+//! by clients and servers updating together. That argument ceased to hold
+//! even before the first release: after release, servers and clients
+//! update at different times: a solo operator runs their server, while recipients
+//! use unmanaged machines. Under the old rule, the very first
+//! new field after release would break every released peer.
+//! Before release, the change is free: there are no external clients, and client and server ship
+//! as one package. After release, it would require a wire version.
 //!
-//! # Необязательный диапазон НЕ открывает подделку
+//! # The optional range does NOT enable forgery
 //!
-//! Порядок проверок не изменился: подпись и MAC проверяются ДО разбора тела
-//! (И-5), и пропуск незнакомого тега случается ПОСЛЕ, внутри уже заверенных
-//! байтов. Подпись покрывает СЫРЫЕ байты тела — `lease`, `revocation`, `order`,
-//! `control` и `replica` подписывают ровно тот кусок, который потом разбирают, —
-//! поэтому дописать тег по дороге третья сторона не может: подпись перестанет
-//! сходиться. Незаверенные документы разобраны ниже, каждый со своим доводом.
+//! Verification order has not changed: signatures and MACs are verified BEFORE body parsing
+//! (I-5), and unknown tags are skipped AFTERWARD, within already authenticated
+//! bytes. Signatures cover the RAW body bytes: `lease`, `revocation`, `order`,
+//! `control` and `replica` sign exactly the slice they subsequently parse,
+//! so a third party cannot append a tag in transit: the signature would no longer
+//! verify. Unauthenticated documents are discussed below, each with its own rationale.
 //!
-//! Два исключения, и оба записаны на месте:
+//! There are two exceptions, both documented locally:
 //!
-//! * [`access::decode_decision`] остаётся СТРОГИМ. Его подпись проверяется не по
-//!   сырым байтам, а по телу, СОБРАННОМУ ЗАНОВО из разобранной структуры
-//!   ([`access::decision_body`]), и пропущенный тег из такой сборки выпадает.
-//!   Значит необязательный диапазон дал бы там ровно то, чего этот абзац
-//!   обещает не давать: посторонний дописал бы тег к подписанному решению, и
-//!   подпись сошлась бы. Расширения он при этом не даёт вовсе — поле, попавшее
-//!   в `decision_body` новой сборки, старая всё равно отвергнет по подписи.
-//! * [`witness`] правилу не подчиняется, потому что TLV в нём нет: голова, вид и
-//!   засвидетельствованная голова — раскладки точной длины.
+//! * [`access::decode_decision`] remains STRICT. Its signature is verified not over
+//!   raw bytes but over a body REBUILT from the parsed structure
+//!   ([`access::decision_body`]); a skipped tag disappears from that reconstruction.
+//!   Thus an optional range there would enable exactly what this paragraph
+//!   promises to prevent: a third party could append a tag to a signed decision,
+//!   and its signature would verify. It would provide no extension capability either: a field added
+//!   to `decision_body` by a new build would still fail signature verification in an old build.
+//! * [`witness`] does not follow this rule because it contains no TLV: heads, views and
+//!   cosigned heads have exact-length layouts.
 //!
-//! Что НЕ изменилось: виды запросов и ответов (`KIND_*`) — не теги, незнакомый
-//! вид по-прежнему отказ; перечисления ВНУТРИ значений (состояние лизинга, исход
-//! операции, режим наследования) — не теги, незнакомое значение знакомого поля
-//! по-прежнему отказ; строгий рост тегов, запрет дубликатов и точные длины
-//! знакомых полей (И-7, И-8) — как были, и рост проверяется в том числе на
-//! пропускаемом теге.
+//! What has NOT changed: request and response kinds (`KIND_*`) are not tags; an unknown
+//! kind is still rejected. Enumerations WITHIN values (lease state, operation
+//! outcome, inheritance mode) are not tags; an unknown value of a known field
+//! is still rejected. Strict tag ordering, duplicate rejection and exact lengths
+//! of known fields (I-7, I-8) remain unchanged, and ordering is checked even for
+//! skipped tags.
 
-/// Документы запроса доступа: получатель просит, автор одобряет.
+/// Access request documents: the recipient requests, the author approves.
 pub mod access;
-/// Документы двери действий (Agent Protocol, этап 2): грант действий, просьба,
-/// одноразовая лиза и проверка аргументов.
+/// Action door documents (Agent Protocol, stage 2): action grant, request,
+/// one-time lease and argument validation.
 pub mod action;
 pub mod activation;
-/// Документы Agent Protocol: грант агента, делегирование, проверка цепочки.
+/// Agent Protocol documents: agent grant, delegation, chain verification.
 pub mod agent;
-/// Аттестация ключа устройства на проводе: доказательство, учётные данные, вердикт (B6b).
+/// Device key attestation on the wire: evidence, credentials, verdict (B6b).
 pub mod attestation;
-/// Правило файла по атрибутам держателя: ворота выдачи и ужесточения (Ф-27, B4b).
+/// File rule based on holder attributes: issuance and tightening gates (F-27, B4b).
 pub mod attribute_rule;
 pub mod control;
 pub mod directory;
 pub mod lease;
-/// Распоряжение автора серверу за его подписью: регистрация, отзыв, наследник,
-/// признак жизни.
+/// An author's signed orders to the server: registration, revocation, heir,
+/// proof of life.
 pub mod order;
 pub mod replica;
-/// Отзывная: подписанный сервером документ «файл отозван», принимаемый откуда угодно.
+/// Revocation: a server-signed "file revoked" document accepted from any source.
 pub mod revocation;
-/// Положение файла на сервере: что из распоряжений автора сейчас действует.
+/// File standing on the server: which author orders currently apply.
 pub mod standing;
 mod unknown;
 pub mod witness;

@@ -16,12 +16,12 @@
     clippy::disallowed_methods,
     clippy::disallowed_types
 )]
-//! Направление 7, второй заход: `SecretBuf`, форма дерева при повторных правках,
-//! связывание пары «индекс + число листьев» и малleability подписи.
+//! Track 7, second pass: `SecretBuf`, tree shape after repeated edits,
+//! binding (index, leaf count), and signature malleability.
 //!
-//! Часть I — свойства, которые обязаны выполняться.
-//! Часть II — тесты с префиксом `probe_bug_`: заведены как воспроизведение
-//! найденных дефектов, после исправления кода работают как регрессионные.
+//! Part I: properties that must hold.
+//! Part II: tests prefixed `probe_bug_`, introduced to reproduce
+//! found defects and retained as regressions after code fixes.
 
 use oc_crypto::merkle::{Leaf, MerkleTree, leaf_of};
 use oc_crypto::secret::SecretBuf;
@@ -47,7 +47,7 @@ fn leaves(count: u32) -> Vec<Leaf> {
     (0..count).map(|i| leaf(i, 0)).collect()
 }
 
-/// Детерминированный генератор: проба обязана воспроизводиться байт в байт.
+/// Deterministic RNG: the probe must reproduce byte for byte.
 struct TestRng(u64);
 impl TestRng {
     fn step(&mut self) -> u64 {
@@ -82,9 +82,9 @@ impl rand_core::TryCryptoRng for TestRng {}
 // Часть I. SecretBuf
 // ---------------------------------------------------------------------------
 
-/// Ёмкость объявлена неизменной («задаётся один раз и не меняется»). Затирание
-/// не имеет права её сдвинуть: иначе `declare_len` начинает пропускать длины,
-/// которых буфер не обещал, и контракт с вызывающим расходится с реальностью.
+/// Capacity is declared immutable ("set once and never changes"). Wiping
+/// must not shift it, or `declare_len` would accept lengths
+/// the buffer never promised, diverging from its caller contract.
 #[test]
 fn capacity_survives_wipe_at_every_size() {
     for size in [0usize, 1, 7, 31, 32, 100, 4096, 65536] {
@@ -99,7 +99,7 @@ fn capacity_survives_wipe_at_every_size() {
     }
 }
 
-/// Обещание типа: `wipe` затирает ВЕСЬ буфер, включая незначимый хвост.
+/// Type promise: `wipe` wipes the ENTIRE buffer, including the unused tail.
 #[test]
 fn wipe_clears_the_whole_buffer_including_the_insignificant_tail() {
     let mut buf = SecretBuf::with_capacity(256);
@@ -117,8 +117,8 @@ fn wipe_clears_the_whole_buffer_including_the_insignificant_tail() {
     );
 }
 
-/// Короткая запись поверх длинной обязана уносить хвост с собой — ради этого тип
-/// и существует.
+/// A short write over a long one must remove the tail; that is why the type
+/// exists.
 #[test]
 fn fill_from_erases_the_tail_of_a_longer_previous_write() {
     let mut buf = SecretBuf::with_capacity(128);
@@ -134,8 +134,8 @@ fn fill_from_erases_the_tail_of_a_longer_previous_write() {
     );
 }
 
-/// Границы `fill_from`: ровно ёмкость — можно, на байт больше — отказ, и буфер
-/// после отказа не содержит ни старого, ни нового.
+/// `fill_from` boundaries: exactly capacity is allowed, one extra byte fails, leaving
+/// neither old nor new contents after rejection.
 #[test]
 fn fill_from_respects_the_capacity_boundary_exactly() {
     let mut buf = SecretBuf::with_capacity(16);
@@ -156,8 +156,8 @@ fn fill_from_respects_the_capacity_boundary_exactly() {
     );
 }
 
-/// `declare_len` не имеет права объявить больше ёмкости: иначе `as_slice`
-/// смотрел бы за границу выделенной памяти или молча укорачивался.
+/// `declare_len` must not declare more than capacity, or `as_slice`
+/// would read beyond allocated memory or silently shorten.
 #[test]
 fn declare_len_refuses_anything_beyond_capacity() {
     let mut buf = SecretBuf::with_capacity(32);
@@ -168,7 +168,7 @@ fn declare_len_refuses_anything_beyond_capacity() {
     assert_eq!(buf.len(), 32, "отказавший declare_len изменил длину");
 }
 
-/// Свежий буфер обязан отдавать нули, а не то, что лежало в куче до него.
+/// A fresh buffer must return zeroes, not previous heap contents.
 #[test]
 fn a_fresh_buffer_hands_out_zeroes_not_heap_residue() {
     for size in [1usize, 33, 4096] {
@@ -178,7 +178,7 @@ fn a_fresh_buffer_hands_out_zeroes_not_heap_residue() {
     }
 }
 
-/// `Debug` не имеет права печатать содержимое.
+/// `Debug` must not print contents.
 #[test]
 fn debug_of_secret_buf_never_leaks_the_plaintext() {
     let mut buf = SecretBuf::with_capacity(8);
@@ -192,9 +192,9 @@ fn debug_of_secret_buf_never_leaks_the_plaintext() {
 // Часть I. Дерево: повторные правки
 // ---------------------------------------------------------------------------
 
-/// Штатные тесты правят ОДИН лист свежепостроенного дерева. Реальное
-/// редактирование правит один и тот же файл многократно, и накопленная ошибка
-/// проявилась бы только на n-й правке.
+/// Ordinary tests edit ONE leaf of a newly built tree. Real
+/// editing modifies the same file repeatedly, and accumulated errors
+/// would surface only on the nth edit.
 #[test]
 fn repeated_updates_still_equal_a_full_rebuild() {
     for count in 1..=40u32 {
@@ -232,9 +232,9 @@ fn repeated_updates_still_equal_a_full_rebuild() {
 // Часть I. Подпись
 // ---------------------------------------------------------------------------
 
-/// Малleability по скаляру `S`: подпись `(R, S + L)` описывает то же уравнение,
-/// что и `(R, S)`. Приняв её, формат получил бы вторую байтовую строку для того
-/// же файла — а подпись заголовка здесь и есть идентичность файла.
+/// Scalar `S` malleability: signature `(R, S + L)` represents the same equation
+/// as `(R, S)`. Accepting it would give the format a second byte string for
+/// the same file, while its header signature is its identity.
 #[test]
 fn a_signature_malleated_by_adding_the_group_order_is_refused() {
     // L = 2^252 + 27742317777372353535851937790883648493, little-endian.
@@ -265,7 +265,7 @@ fn a_signature_malleated_by_adding_the_group_order_is_refused() {
     );
 }
 
-/// Подпись обязана быть привязана к длине данных, а не только к их байтам.
+/// A signature must bind data length as well as bytes.
 #[test]
 fn a_signature_over_a_length_prefixed_field_does_not_move_to_a_resplit() {
     let mut rng = TestRng(12);
@@ -285,19 +285,19 @@ fn a_signature_over_a_length_prefixed_field_does_not_move_to_a_resplit() {
 // Часть II. Заведены как воспроизведение дефектов; ПОЧИНЕНО, теперь регрессия.
 // ---------------------------------------------------------------------------
 
-/// ДЕФЕКТ (исправлен): `as_capacity_mut` отдавал окно записи, НЕ затирая буфер,
-/// а `declare_len` затем вправе объявить любую длину до ёмкости. Открытый текст
-/// предыдущей, более длинной записи выходил наружу через `as_slice`.
+/// BUG (fixed): `as_capacity_mut` returned writable storage WITHOUT wiping the buffer,
+/// while `declare_len` could then declare any length up to capacity. Plaintext
+/// from a previous longer write escaped through `as_slice`.
 ///
-/// Обещание типа: «затирать нужно и „хвост“ за границей значимых данных, иначе
-/// остатки предыдущего, более длинного чанка переживут запись более короткого».
-/// На пути `fill_from` обещание выполнялось, на пути `as_capacity_mut` +
-/// `declare_len` — нет. Именно этим путём пользуется
+/// Type promise: "even the tail beyond meaningful data must be wiped,
+/// or remnants of a previous longer chunk survive a shorter write".
+/// `fill_from` fulfilled this promise, but `as_capacity_mut` plus
+/// `declare_len` did not. That is the path used by
 /// `cc-cli::payload::seal_stream`.
 ///
-/// Исправлено затиранием в самом `as_capacity_mut`. Тест оставлен как
-/// регрессионный: путь «длинная запись → короткая → снова длинная» короче любого
-/// сценария, в котором дефект был бы замечен на настоящем файле.
+/// Fixed by wiping inside `as_capacity_mut` itself. Retained as a
+/// regression: "long write → short write → long again" is shorter than any
+/// scenario exposing the flaw in a real file.
 #[test]
 fn probe_bug_declare_len_hands_out_stale_plaintext_written_before_the_current_one() {
     let mut buf = SecretBuf::with_capacity(64);
@@ -321,21 +321,21 @@ fn probe_bug_declare_len_hands_out_stale_plaintext_written_before_the_current_on
     );
 }
 
-/// ДЕФЕКТ (исправлен): доказательство не связывало пару «индекс + число листьев».
+/// BUG (fixed): the proof did not bind the (index, leaf count) pair.
 ///
-/// Закрыто связкой корня с числом листьев (`root_of`). Тест оставлен
-/// регрессионным: он перебирает деревья до 16 листьев и ищет вторую пару, под
-/// которой проходит тот же путь, — то есть проверяет отсутствие коллизии, а не
-/// один заранее известный случай.
+/// Closed by binding the root to leaf count (`root_of`). Retained as a
+/// regression: enumerates trees through 16 leaves, seeking a second pair
+/// under which the same path verifies, checking absence of collisions rather than
+/// one known case.
 ///
-/// Проверка ходит по форме пути, а форма у пары (i, n) может совпасть с формой
-/// пары (j, m) при i ≠ j и n ≠ m. Тогда одни и те же байты листа и один и тот же
-/// путь проходят под ДВУМЯ разными утверждениями о положении чанка в файле.
+/// Verification follows path shape, and pair (i, n) may share a shape
+/// with (j, m), with i ≠ j and n ≠ m. Then identical leaf bytes and the same
+/// path verify TWO different claims about a chunk's position in a file.
 ///
-/// Штатная проба (`a_proof_does_not_move_to_another_index_or_another_leaf_count`)
-/// это не ловит: она пересчитывает лист под другой индекс, а `leaf_of` номер
-/// чанка в себя включает. Здесь лист берётся ТОТ ЖЕ — то есть проверяется
-/// свойство самого `verify_proof`, а не свойство `leaf_of`.
+/// The ordinary probe (`a_proof_does_not_move_to_another_index_or_another_leaf_count`)
+/// misses this: it recomputes the leaf for another index, and `leaf_of` includes
+/// the chunk index. Here the leaf is IDENTICAL, testing
+/// `verify_proof` itself rather than `leaf_of`.
 #[test]
 fn probe_bug_a_proof_verifies_under_a_second_pair_of_index_and_leaf_count() {
     let mut collisions: Vec<(u32, u32, u32, u32)> = Vec::new();

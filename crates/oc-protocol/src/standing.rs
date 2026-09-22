@@ -1,84 +1,84 @@
-//! Положение файла на сервере: что автор увидит, спросив «а что там стоит».
+//! File standing on the server: what the author sees when asking "what is set there?".
 //!
-//! # Зачем отдельный документ
+//! # Why a separate document
 //!
-//! Автор задаёт серверу распоряжения — отозвать, назначить наследника, поставить
-//! предел, — и до этого документа не имел никакой возможности УВИДЕТЬ, что из
-//! них сейчас действует. Единственным зеркалом был журнал, то есть история
-//! действий, а не их итог: «наследник назначен» и «наследник назначен, затем
-//! снят» — две разные истории с одинаково пустым итогом, и различать их глазами
-//! по хвосту журнала автор не обязан.
+//! The author gives the server orders: revoke, appoint an heir, set
+//! a limit. Before this document, there was no way to SEE which
+//! orders currently applied. The only mirror was the journal, a history
+//! of actions rather than their result: "heir appointed" and "heir appointed, then
+//! removed" are different histories with the same empty outcome, and the author should not
+//! have to distinguish them by reading the journal tail.
 //!
-//! Особенно это верно для мёртвой руки, где итог необратим: человек, назначивший
-//! наследника, вправе убедиться, что срок такой, какой он думал, и что до
-//! события ещё далеко.
+//! This is especially true for the dead man's switch, whose result is irreversible: someone who appointed
+//! an heir has the right to verify that the interval is what they intended and that
+//! the event is still far away.
 //!
-//! # Чего здесь нет
+//! # What is absent here
 //!
-//! Тайн. Всё, что сюда попадает, автор и так сообщил серверу сам, а получателю
-//! видно из очереди и журнала. Поэтому доказательства владения ответ не требует
-//! — как и очередь просьб (`Requests`). Завещания здесь нет: оно принадлежит
-//! наследнику, а не любому спросившему, и отдаётся `Collect`-ом после события.
+//! Secrets. Everything here was already disclosed to the server by the author, and is visible to recipients
+//! in the queue and journal. The response therefore requires no proof of possession,
+//! like the request queue (`Requests`). The bequest is absent: it belongs to
+//! the heir, not anyone who asks, and is delivered by `Collect` after the event.
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
 
-/// Теги. Все критичны: незнакомый — отказ (И-7).
+/// Tags. All critical: unknown means rejection (I-7).
 pub mod tag {
     pub const FILE_ID: u16 = 1;
     pub const REVOKED: u16 = 2;
     pub const MAX_DEVICES: u16 = 3;
     pub const MAX_GRANTS: u16 = 4;
-    /// Ключи соавторов подряд по 32 байта.
+    /// Consecutive coauthor keys, 32 bytes each.
     pub const COAUTHORS: u16 = 5;
-    /// Сколько подписей соавторов требуется.
+    /// Required number of coauthor signatures.
     pub const COAUTHOR_THRESHOLD: u16 = 6;
-    /// Сколько живёт предложение — уже РАЗРЕШЁННЫЙ срок, а не «назначен ли он».
+    /// Proposal lifetime: the RESOLVED duration, not "whether it was assigned".
     pub const PROPOSAL_TTL: u16 = 16;
-    /// Ключи одобряющих открытие подряд по 32 байта.
+    /// Consecutive opening approver keys, 32 bytes each.
     pub const APPROVERS: u16 = 7;
-    /// Сколько их голосов требуется.
+    /// Required number of their votes.
     pub const APPROVER_THRESHOLD: u16 = 8;
-    /// Что будет после тишины: 1 — открыть завещание, 2 — закрыть файл.
+    /// Action after silence: 1 open the bequest, 2 close the file.
     pub const HEIR_MODE: u16 = 9;
     pub const SILENCE_SECONDS: u16 = 10;
-    /// Когда автора видели последний раз.
+    /// When the author was last seen.
     pub const LAST_ALIVE: u16 = 11;
-    /// Когда событие тишины замечено.
+    /// When the silence event was detected.
     pub const HEIR_RELEASED_AT: u16 = 12;
-    /// Кому адресованы завещания: отпечатки подряд по 32 байта.
+    /// Bequest recipients: consecutive fingerprints, 32 bytes each.
     pub const HEIR_FPR: u16 = 13;
-    /// Голоса потоком: `отпечаток(32) ‖ голосующий(32) ‖ за(1) ‖ когда(8)`.
+    /// Votes as a stream: `fingerprint(32) ‖ voter(32) ‖ approve(1) ‖ when(8)`.
     pub const VOTES: u16 = 14;
-    /// Предложения потоком, каждое со своей длиной.
+    /// Proposals as a stream, each with its own length.
     pub const PROPOSALS: u16 = 15;
-    /// Выдачи заморожены кнопкой паники автора — `u8`, пишется только когда так.
+    /// Issuance frozen by the author's panic button: `u8`, written only when true.
     ///
-    /// Семнадцатый: после срока предложения, теги строго возрастают (И-7), и
-    /// место задаёт номер, а не родство с `revoked`.
+    /// Seventeenth: after proposal lifetime, tags strictly increase (I-7);
+    /// placement follows the number, not its relation to `revoked`.
     pub const FROZEN: u16 = 17;
 }
 
-/// Что стоит на файле насчёт тишины автора.
+/// What the file specifies for the author's silence.
 ///
-/// Отдельным перечислением, а не набором необязательных полей рядом: «открыть,
-/// но неизвестно кому» и «закрыть, но с наследником» — положения, которых не
-/// бывает, и представимыми их держать незачем. Тот же приём, что у сервера
-/// (`cc_authority::AfterSilence`) и у распоряжения (`order::HeirMode`).
+/// A separate enum rather than adjacent optional fields: "open,
+/// but to whom is unknown" and "close, but with an heir" are states that cannot
+/// occur, so there is no reason to make them representable. The same technique as on the server
+/// (`cc_authority::AfterSilence`) and in the order (`order::HeirMode`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeirStanding {
-    /// Наследник не назначен, по тишине не закрывается.
+    /// No heir appointed; silence does not close the file.
     Absent,
-    /// После тишины завещания откроются этим устройствам.
+    /// After silence, bequests open for these devices.
     ///
-    /// Список, а не одно: наследников бывает несколько, и каждый получает СВОЁ —
-    /// доля запечатана на его ключ.
+    /// A list rather than a single device: there may be several heirs, each receiving THEIR OWN share,
+    /// sealed to their key.
     Open { device_fprs: Vec<[u8; 32]>, silence_seconds: u64, released_at: Option<i64> },
-    /// После тишины файл закроется всем.
+    /// After silence, the file closes for everyone.
     Close { silence_seconds: u64, released_at: Option<i64> },
 }
 
-/// Голос одобряющего, как его видит автор.
+/// An approver's vote as seen by the author.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vote {
     pub device_fpr: [u8; 32],
@@ -87,32 +87,32 @@ pub struct Vote {
     pub at: i64,
 }
 
-/// Предложение, ждущее подписей.
+/// A proposal awaiting signatures.
 ///
-/// Тело первого подписавшего едет как ОБРАЗЕЦ. Первая редакция его не везла —
-/// «подписывают своё веление, а не чужие байты», — и довод верен: подписывать
-/// чужое тело нельзя, оно к тому же несвежее. Но соавтор, подписывающий из окна,
-/// обязан ВОСПРОИЗВЕСТИ параметры, а отпечаток намерения прячет их по построению.
-/// Выход — образец: клиент берёт из него параметры, ставит свой момент и
-/// подписывает своим ключом. Веление то же, байты свои.
+/// The first signer's body is carried as a TEMPLATE. The first revision omitted it:
+/// "sign your own command, not someone else's bytes". That reasoning is valid: signing
+/// someone else's body is wrong, and it is also stale. But a coauthor signing through the UI
+/// must REPRODUCE the parameters, which the intent digest hides by construction.
+/// The solution is a template: the client extracts parameters, inserts its own time and
+/// signs with its own key. The same command, its own bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProposalStanding {
-    /// Отпечаток НАМЕРЕНИЯ — по нему предложение называют.
+    /// INTENT digest: identifies the proposal.
     ///
-    /// Намерения, а не тела: соавторы подписывают одно и то же веление со своих
-    /// машин, и моменты выписки у них разные (`order::intent_digest`).
+    /// Intent, not body: coauthors sign the same command from their own
+    /// machines with different issuance times (`order::intent_digest`).
     pub intent: [u8; 32],
-    /// Вид распоряжения (`oc_protocol::order::Kind`).
+    /// Order kind (`oc_protocol::order::Kind`).
     pub kind: u8,
     pub at: i64,
     pub need: u8,
-    /// Кто уже подписал.
+    /// Who has already signed.
     pub signers: Vec<[u8; 32]>,
-    /// Тело первого подписавшего — образец для пересборки.
+    /// The first signer's body: a reconstruction template.
     pub body: Vec<u8>,
 }
 
-/// Положение файла целиком.
+/// The complete file standing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Standing {
     pub file_id: [u8; 16],
@@ -121,26 +121,26 @@ pub struct Standing {
     pub max_grants: Option<u32>,
     pub coauthors: Vec<[u8; 32]>,
     pub coauthor_threshold: u8,
-    /// Сколько живёт предложение: назначенный автором либо умолчание сервера.
+    /// Proposal lifetime: assigned by the author or the server default.
     ///
-    /// Разрешённое значение, а не `Option`: спрашивающему нужен ответ «сколько»,
-    /// а не «назначено ли». Откуда оно взялось, важно серверу, а не человеку.
+    /// A resolved value rather than `Option`: the requester needs "how long",
+    /// not "was it assigned?". Its origin matters to the server, not the person.
     pub proposal_ttl: i64,
     pub approvers: Vec<[u8; 32]>,
     pub approver_threshold: u8,
     pub heir: HeirStanding,
-    /// Когда сервер последний раз видел автора. `None` — ни разу.
+    /// When the server last saw the author. `None` means never.
     pub last_alive: Option<i64>,
     pub votes: Vec<Vote>,
     pub proposals: Vec<ProposalStanding>,
-    /// Выдачи остановлены кнопкой паники автора — по всем его файлам сразу.
+    /// Issuance stopped by the author's panic button for all their files at once.
     pub frozen: bool,
 }
 
-/// Закодировать положение.
+/// Encode the standing.
 ///
 /// # Errors
-/// [`FormatError`], если поле не записывается.
+/// [`FormatError`] if a field cannot be written.
 pub fn encode(standing: &Standing) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
     w.put(tag::FILE_ID, &standing.file_id)?;
@@ -243,7 +243,7 @@ pub fn encode(standing: &Standing) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Ключи подряд, без разделителей: длина элемента постоянна.
+/// Consecutive keys, no separators: element length is constant.
 fn flatten(keys: &[[u8; 32]]) -> Vec<u8> {
     let mut out = Vec::with_capacity(keys.len().saturating_mul(32));
     for k in keys {
@@ -252,35 +252,35 @@ fn flatten(keys: &[[u8; 32]]) -> Vec<u8> {
     out
 }
 
-/// Длина записи голоса: отпечаток, голосующий, решение, время.
+/// Vote record length: fingerprint, voter, decision, time.
 const VOTE_LEN: usize = 73;
 
-/// Разобрать положение — строго: длины точные, режим сходится с полями, и
-/// НИ ОДНО значение не имеет двух представлений.
+/// Parse the standing strictly: exact lengths, mode consistent with fields, and
+/// NO value has two representations.
 ///
-/// # Что отвергается с 2026-09-20 и почему
+/// # What has been rejected since 2026-09-20, and why
 ///
-/// Писатель [`encode`] умалчивает обо всём, что равно «ничего»: пустой состав,
-/// нулевой порог, нулевой срок предложения и незамороженное положение он не
-/// пишет вовсе. Разбор же принимал и умолчание, и явную запись того же смысла —
-/// то есть у каждой из этих величин было ДВА представления на проводе, а
-/// каноничность (И-7) держится ровно на том, что представление одно.
+/// The writer [`encode`] omits everything meaning "nothing": an empty roster,
+/// a zero threshold, zero proposal lifetime and unfrozen standing are never
+/// written. Parsing formerly accepted both omission and explicit encoding of the same meaning,
+/// so each quantity had TWO wire representations, while
+/// canonicality (I-7) requires exactly one.
 ///
-/// **Незамороженное положение при этом законно** — оно и есть самое частое, —
-/// но выражается ОТСУТСТВИЕМ тега 17, а не записью `frozen = 0`. То же у
-/// состава, порога и срока: отсутствие остаётся законным и читается как раньше,
-/// отвергается только вторая, никем не пишущаяся форма.
+/// **Unfrozen standing remains valid**, and is the most common case,
+/// but is expressed by ABSENCE of tag 17, not by `frozen = 0`. The same applies to
+/// roster, threshold and lifetime: absence remains valid and reads as before;
+/// only the second form, which no writer produces, is rejected.
 ///
-/// Состав и порог вдобавок сверяются друг с другом — тем же правилом, что
-/// `oc_format::header::check_coauthors` и [`crate::order`]: порог обязан быть
-/// исполним составом. Сервер иначе и не отдаёт (`check_roster` не пропускает
-/// такое распоряжение, а `Coauthors` — такой заголовок), поэтому проверка не
-/// отнимает ни одного достижимого положения, зато закрывает картину «кворум,
-/// которого никто никогда не наберёт» от того, кто байты сочиняет сам.
+/// Roster and threshold are also checked against each other under the same rule as
+/// `oc_format::header::check_coauthors` and [`crate::order`]: the threshold must be
+/// achievable by the roster. The server never returns otherwise (`check_roster` rejects
+/// such an order, and `Coauthors` such a header), so the check excludes no
+/// reachable standing while preventing a manually crafted "quorum
+/// that nobody can ever reach".
 ///
 /// # Errors
-/// [`FormatError`] при незнакомом теге, неверной длине, значении, которого
-/// писатель не пишет, или наборе полей, не отвечающем режиму.
+/// [`FormatError`] for an unknown tag, invalid length, a value the
+/// writer never produces, or fields inconsistent with the mode.
 pub fn decode(bytes: &[u8]) -> Result<Standing, FormatError> {
     let mut file_id = None;
     let mut revoked = None;
@@ -439,12 +439,12 @@ fn split_keys(tag: u16, value: &[u8]) -> Result<Vec<[u8; 32]>, FormatError> {
     Ok(out)
 }
 
-/// Состав, у которого тег вообще стоит, обязан быть непустым.
+/// A roster whose tag is present must be nonempty.
 ///
-/// Пустое значение и отсутствие тега означают одно и то же — «состава нет», — а
-/// пишет писатель только второе. Отдельно от [`split_keys`] потому, что у
-/// подписавших предложение пустота ЗАКОННА: предложение без единой подписи
-/// представимо и обязано пережить круг.
+/// An empty value and an absent tag both mean "no roster", but
+/// the writer only emits the latter. Separate from [`split_keys`] because an empty
+/// proposal signer list IS valid: a proposal without any signatures
+/// is representable and must survive a round trip.
 fn nonempty_keys(tag: u16, value: &[u8]) -> Result<Vec<[u8; 32]>, FormatError> {
     if value.is_empty() {
         return Err(FormatError::BadFieldLength { tag, len: 0 });
@@ -459,16 +459,16 @@ fn one_byte(tag: u16, value: &[u8]) -> Result<u8, FormatError> {
     }
 }
 
-/// Исполним ли порог своим составом — то же правило, что у распоряжения
-/// (`order::check_roster`) и у заголовка (`header::check_coauthors`).
+/// Whether a threshold is achievable by its roster: the same rule as for orders
+/// (`order::check_roster`) and headers (`header::check_coauthors`).
 ///
-/// Возвращает порог числом: наружу структура отдаёт `0` за «кворума нет», и
-/// превращение `None` в ноль происходит здесь, после того как согласованность
-/// проверена, а не при чтении поля.
+/// Returns the threshold as a number: externally the structure uses `0` for "no quorum";
+/// `None` becomes zero here, after consistency has been
+/// checked, not while reading the field.
 ///
-/// Предел состава берётся из [`crate::order::MAX_KEYS`], а не пишется числом
-/// рядом: два места, называющих одну величину, расходятся на первой же правке, и
-/// разойдутся молча — положение, принятое одной проверкой, отвергнет другая.
+/// The roster limit comes from [`crate::order::MAX_KEYS`], not a neighboring numeric
+/// literal: two places naming one quantity diverge on the first change,
+/// silently; one check would reject standing accepted by the other.
 fn check_roster(
     keys_tag: u16,
     threshold_tag: u16,
@@ -515,7 +515,7 @@ fn decode_vote(chunk: &[u8]) -> Result<Vote, FormatError> {
     })
 }
 
-/// Предложения: каждое со своей длиной, потому что число подписей у них разное.
+/// Proposals: each has its own length because signature counts differ.
 fn split_proposals(mut rest: &[u8]) -> Result<Vec<ProposalStanding>, FormatError> {
     let bad = || FormatError::BadFieldLength { tag: tag::PROPOSALS, len: 0 };
     let mut out = Vec::new();
@@ -586,10 +586,10 @@ mod tests {
         }
     }
 
-    /// КВОРУМ ПОКАЗЫВАЕТСЯ ЦЕЛИКОМ И ВОЗВРАЩАЕТСЯ ТЕМ ЖЕ.
+    /// THE QUORUM IS SHOWN IN FULL AND ROUND-TRIPS UNCHANGED.
     ///
-    /// Составы, пороги, голоса и предложения — всё, что автору нужно, чтобы
-    /// понять, почему файл не открывается и чьей подписи ждут.
+    /// Rosters, thresholds, votes and proposals: everything the author needs to
+    /// understand why the file will not open and whose signature is awaited.
     #[test]
     fn a_quorum_survives_the_round_trip_whole() {
         let case = Standing {
@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(decode(&encode(&case).unwrap()).unwrap(), case, "кворум не пережил круг");
     }
 
-    /// ДЛИНЫ ПОТОКОВ ТОЧНЫЕ (И-8).
+    /// STREAM LENGTHS ARE EXACT (I-8).
     #[test]
     fn stream_lengths_are_exact() {
         let mut w = TlvWriter::new();
@@ -653,7 +653,7 @@ mod tests {
         assert!(decode(&w.finish()).is_err(), "предложение длиннее своего потока принято");
     }
 
-    /// КРУГ КОДИРОВАНИЯ ДЛЯ ВСЕХ ТРЁХ ПОЛОЖЕНИЙ НАСЛЕДНИКА.
+    /// ENCODING ROUND TRIP FOR ALL THREE HEIR STATES.
     #[test]
     fn every_standing_survives_the_round_trip() {
         let cases = [
@@ -682,11 +682,11 @@ mod tests {
         }
     }
 
-    /// РЕЖИМ ОБЯЗАН СХОДИТЬСЯ С ПОЛЯМИ.
+    /// THE MODE MUST MATCH THE FIELDS.
     ///
-    /// Байты приходят по сети, и «открыть, но неизвестно кому» противник
-    /// собирает так же легко, как честное положение. Принять такое значило бы
-    /// показать автору наследника, которого нет.
+    /// Bytes arrive over the network, and an adversary can construct "open, but to whom is unknown"
+    /// as easily as honest standing. Accepting it would mean
+    /// showing the author a nonexistent heir.
     #[test]
     fn a_mode_that_does_not_match_its_fields_is_refused() {
         // Открытие без отпечатка.
@@ -721,16 +721,16 @@ mod tests {
         assert!(decode(&w.finish()).is_err(), "событие без наследника принято");
     }
 
-    /// ЗНАЧЕНИЯ, КОТОРЫХ ПИСАТЕЛЬ НЕ ПИШЕТ, ОТВЕРГАЮТСЯ (2026-09-20).
+    /// VALUES NEVER PRODUCED BY THE WRITER ARE REJECTED (2026-09-20).
     ///
-    /// У каждой из этих величин было ДВА представления на проводе: умолчание
-    /// (тега нет) и явная запись того же смысла. Вторую никто никогда не
-    /// производит, а разбор её принимал — то есть две разные последовательности
-    /// байтов означали одно и то же, чего И-7 не допускает.
+    /// Each quantity had TWO wire representations: omission
+    /// (no tag) and an explicit encoding of the same meaning. Nobody ever
+    /// produces the latter, yet parsing accepted it: two different byte sequences
+    /// meant the same thing, which I-7 forbids.
     ///
-    /// Проба перебирает их поимённо, а не проверяет «хоть что-нибудь отвергнуто»:
-    /// снятие ЛЮБОЙ одной проверки обязано красить пробу, и сообщение обязано
-    /// называть, какая именно форма прошла.
+    /// The test enumerates them by name rather than checking that "something was rejected":
+    /// removing ANY one check must fail the test, and the message must
+    /// identify exactly which form passed.
     #[test]
     fn values_the_writer_never_writes_are_refused() {
         // Каждый случай — приписка к минимальному законному положению.
@@ -770,13 +770,13 @@ mod tests {
         assert_eq!(plain.proposal_ttl, 0);
     }
 
-    /// ПОРОГ ОБЯЗАН БЫТЬ ИСПОЛНИМ СВОИМ СОСТАВОМ, А СОСТАВ — ИМЕТЬ ПОРОГ.
+    /// A THRESHOLD MUST BE ACHIEVABLE BY ITS ROSTER, AND A ROSTER MUST HAVE A THRESHOLD.
     ///
-    /// Правило одно на три места: заголовок (`header::check_coauthors`),
-    /// распоряжение (`order::check_roster`) и это. Сервер половинок не отдаёт,
-    /// но байты положения сочиняет тот, кто отвечает, — и «кворум, которого
-    /// никто никогда не наберёт» собирается из них так же легко, как честное
-    /// положение.
+    /// One rule serves three places: the header (`header::check_coauthors`),
+    /// the order (`order::check_roster`) and this module. The server does not return half-pairs,
+    /// but standing bytes are constructed by whoever responds, so a "quorum
+    /// that nobody can ever reach" is as easy to construct as honest
+    /// standing.
     #[test]
     fn a_threshold_must_be_reachable_by_its_roster() {
         let roster = |keys: usize, threshold: Option<u8>| {
@@ -807,8 +807,8 @@ mod tests {
         assert_eq!(roster(0, None).unwrap().coauthor_threshold, 0);
     }
 
-    /// ОДНОБАЙТОВЫЕ ПОЛЯ ЧИТАЮТСЯ ТОЧНОЙ ДЛИНОЙ (И-8), А НЕЗНАКОМЫЙ ТЕГ —
-    /// ОТКАЗ (И-7).
+    /// SINGLE-BYTE FIELDS ARE READ WITH EXACT LENGTH (I-8), AND AN UNKNOWN TAG IS
+    /// REJECTED (I-7).
     #[test]
     fn lengths_are_exact_and_unknown_tags_are_refused() {
         let mut w = TlvWriter::new();

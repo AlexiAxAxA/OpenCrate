@@ -1,13 +1,13 @@
-//! Криптографическое ядро контейнера `.cc`.
+//! Cryptographic core of the `.cc` container.
 //!
-//! Правило, действующее для всего крейта и проверяемое линтом: **ни ввода-вывода,
-//! ни часов, ни случайности из воздуха**. Nonce и генератор передаются
-//! аргументами. Благодаря этому каждый тест детерминирован, а векторы Wycheproof
-//! прогоняются через собственные места вызова, а не только через сами крейты.
+//! A crate-wide, lint-enforced rule: **no I/O,
+//! clocks, or randomness from thin air**. Nonces and RNGs are passed
+//! as arguments. This makes every test deterministic, while Wycheproof vectors
+//! exercise our own call sites, not merely the underlying crates.
 //!
-//! Разбор устроен так, что открытый текст не покидает функцию до проверки тега
-//! аутентификации: при ошибке буфер затирается, и вызывающий обязан считать его
-//! непригодным.
+//! Parsing ensures that plaintext never leaves the function before the authentication
+//! tag is checked: on failure the buffer is wiped, and the caller must treat it
+//! as unusable.
 
 pub mod aead;
 pub mod agreement;
@@ -16,14 +16,14 @@ pub mod mac;
 pub mod merkle;
 pub mod mlkem_p256;
 pub mod rsa;
-/// Программный подписант RSA-PSS — только пробам и стенду (`docs/format.md`,
-/// «ПРАВКА ИСПОЛНИМА»). В продукт не входит: признак `test-signer`.
+/// Software RSA-PSS signer: only for probes and the testbed (`docs/format.md`,
+/// "EDITING IS EXECUTABLE"). Excluded from production: the `test-signer` feature.
 #[cfg(any(test, feature = "test-signer"))]
 pub mod rsa_test_signer;
 pub mod seal;
 pub mod secret;
 pub mod sign;
-/// Дисциплина нарезки полезной нагрузки на чанки: один цикл на все хосты.
+/// Payload chunking discipline: one loop for every host.
 pub mod stream;
 pub mod tpm;
 pub mod transcript;
@@ -36,27 +36,27 @@ pub use secret::{
 };
 pub use transcript::Transcript;
 
-/// Ошибки криптографических операций.
+/// Cryptographic operation errors.
 ///
-/// Варианты намеренно бедны деталями: сообщение об ошибке не должно давать
-/// противнику дополнительный бит информации о том, какая именно проверка не
-/// прошла и на каком байте.
+/// Variants deliberately reveal few details: an error message must not give
+/// an adversary another bit of information about precisely which check
+/// failed or at which byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoError {
-    /// Проверка подлинности не прошла: тег AEAD, MAC или обязательство слота.
-    /// Один вариант на все три случая — это сделано намеренно.
+    /// Authentication failed: AEAD tag, MAC, or slot commitment.
+    /// One variant for all three cases, deliberately.
     Authentication,
-    /// Подпись неверна или неканонична.
+    /// The signature is invalid or noncanonical.
     BadSignature,
-    /// Длина входных или выходных данных не соответствует контракту.
+    /// Input or output length violates the contract.
     BadLength,
-    /// Данные не соответствуют корню дерева.
+    /// Data does not match the tree root.
     TreeMismatch,
-    /// Обращение за пределы дерева.
+    /// Access outside the tree.
     IndexOutOfRange,
-    /// Ключ не является корректной точкой кривой или запрещён (малый порядок).
+    /// The key is not a valid curve point or is forbidden (small order).
     BadKey,
-    /// Идентификатор алгоритма не поддерживается этой сборкой клиента.
+    /// This client build does not support the algorithm identifier.
     UnsupportedAlgorithm,
 }
 
@@ -77,42 +77,42 @@ impl core::fmt::Display for CryptoError {
 
 impl core::error::Error for CryptoError {}
 
-/// Идентификаторы алгоритмов, входящие в подпись заголовка.
+/// Algorithm identifiers covered by the header signature.
 ///
-/// Агильность задана явными числами, а не «текущим лучшим выбором», потому что
-/// KEM сменится в течение жизни продукта: X25519 уступит гибриду с ML-KEM, и
-/// слоты с разными KEM обязаны сосуществовать в одном файле.
+/// Agility uses explicit numbers rather than "the current best choice" because
+/// the KEM will change during the product's lifetime: X25519 will give way to an ML-KEM hybrid,
+/// and slots using different KEMs must coexist in one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum AeadAlg {
-    /// Основной профиль. 192-битный nonce позволяет хранить его случайным.
+    /// Primary profile. A 192-bit nonce allows storing a random nonce.
     XChaCha20Poly1305 = 1,
-    /// Профиль для требований FIPS. 96-битный nonce обязывает к счётчику и
-    /// делает контейнер фактически одноразовым на запись.
+    /// Profile for FIPS requirements. A 96-bit nonce requires a counter and
+    /// makes the container effectively write-once.
     Aes256Gcm = 2,
-    /// Стойкий к повторению nonce вариант.
+    /// Nonce-reuse-resistant variant.
     ///
-    /// Здесь стояло «для редактируемых файлов», и это было обещанием, а не
-    /// описанием: редактируемые файлы шифруются `aead_id = 1`, как и все
-    /// прочие. Свойство, ради которого SIV назывался, даёт засев nonce из
-    /// открытого текста ([`aead::seal_chunk_hedged`]) — он появился позже
-    /// самого обещания и сделал второй профиль ненужным. Разбор в
+    /// This used to say "for editable files", which was a promise, not a
+    /// description: editable files use `aead_id = 1`, like all
+    /// others. The property SIV was meant to provide comes from plaintext-hedged
+    /// nonces ([`aead::seal_chunk_hedged`]), introduced after
+    /// the promise itself and making the second profile unnecessary. See
     /// `docs/format.md` §6.1.
     ///
-    /// Член остаётся, чтобы номер 3 нельзя было занять другим шифром.
+    /// The member remains to prevent assigning number 3 to another cipher.
     Aes256GcmSiv = 3,
 }
 
 impl AeadAlg {
-    /// Разбор идентификатора из файла. Неизвестное значение — отказ, а не
-    /// подстановка значения по умолчанию.
+    /// Parse an identifier from a file. Unknown values cause rejection, not
+    /// substitution of a default.
     ///
-    /// Разбор сразу проходит через второй рубеж — [`aead::ensure_supported`], —
-    /// как это уже делает [`TreeHashAlg::from_u8`]. Асимметрия была
-    /// содержательной: заголовок с `aead_id = 2` проходил подпись, разбор слота,
-    /// согласование ключей и разворот CEK, и падал только на первом чанке. Вся
-    /// эта работа делалась над файлом, про который уже на разборе было известно,
-    /// что открыть его нечем.
+    /// Parsing immediately passes the second boundary, [`aead::ensure_supported`],
+    /// just as [`TreeHashAlg::from_u8`] already does. The asymmetry was
+    /// substantive: a header with `aead_id = 2` passed signature verification, slot parsing,
+    /// key agreement, and CEK unwrapping before failing on the first chunk. All
+    /// that work was done on a file already known, at parsing time,
+    /// to be impossible to open.
     pub fn from_u8(v: u8) -> Result<Self, CryptoError> {
         let alg = match v {
             1 => Self::XChaCha20Poly1305,
@@ -125,43 +125,43 @@ impl AeadAlg {
     }
 }
 
-/// Алгоритм подписи.
+/// Signature algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SigAlg {
-    /// Подпись автора. Единственная, которую эта сборка исполняет.
+    /// Author signature. The only one this build executes.
     Ed25519 = 1,
-    /// Подпись редактировавшего устройства, версия 3 формата: RSA-PSS-SHA256,
-    /// MGF1-SHA256, соль 32 байта, показатель 65537.
+    /// Editing-device signature, format version 3: RSA-PSS-SHA256,
+    /// MGF1-SHA256, 32-byte salt, exponent 65537.
     ///
-    /// Выбран не по вкусу, а по режиму отказа: ECDSA тратит эфемерный `k` на
-    /// каждую подпись, и две подписи разных сообщений с одним `k` выдают
-    /// приватный ключ арифметикой — а откат снапшота виртуальной машины ровно
-    /// это и устраивает. У PSS повтор соли даёт лишнюю валидную подпись и
-    /// ничего больше. Разбор — `docs/format.md`, «ВЕРСИЯ 3 ОТКРЫТА», п. 7.
+    /// Chosen for its failure mode, not taste: ECDSA consumes an ephemeral `k` for
+    /// every signature, and signing two different messages with the same `k` reveals
+    /// the private key by arithmetic, exactly what virtual-machine snapshot
+    /// rollback causes. With PSS, repeated salt yields one extra valid signature and
+    /// nothing more. See `docs/format.md`, "VERSION 3 OPENED", item 7.
     ///
-    /// Проверяющий — [`rsa::verify_pss_sha256`], на чистом Rust: подпись
-    /// проверяет `oc-format`, а он обязан собираться под
+    /// Verifier: [`rsa::verify_pss_sha256`], in pure Rust: `oc-format`
+    /// verifies the signature and must build for
     /// `wasm32-unknown-unknown`.
     ///
-    /// Употребляется **только тегом 6 изменяемой области**. В `suite.sig_alg`
-    /// этот номер недопустим: там подпись АВТОРА, и она заморожена версией 1 на
-    /// Ed25519. Проверку места ставит разбор заголовка — `ensure_supported`
-    /// отвечает «умеем ли», а не «в этом ли месте».
+    /// Used **only by mutable-region tag 6**. This number is invalid in `suite.sig_alg`:
+    /// that field specifies the AUTHOR signature, frozen in version 1 as
+    /// Ed25519. Header parsing checks placement: `ensure_supported`
+    /// answers "can we execute it", not "does it belong here".
     RsaPssSha256 = 2,
 }
 
 impl SigAlg {
-    /// Умеет ли сборка исполнить объявленный алгоритм.
+    /// Whether the build can execute the declared algorithm.
     ///
-    /// Второй рубеж, такой же, как у [`aead::ensure_supported`] и
-    /// [`merkle::ensure_supported`]. Без него идентификатор в подписанном
-    /// заголовке не управляет ничем: файл, объявивший RSA-PSS, всё равно
-    /// проверялся бы по Ed25519 — и был бы принят. Это тот же класс дефекта, из
-    /// которого в JWS появилось `alg: none`.
+    /// A second boundary, like [`aead::ensure_supported`] and
+    /// [`merkle::ensure_supported`]. Without it, an identifier in a signed
+    /// header controls nothing: a file declaring RSA-PSS would still
+    /// be verified as Ed25519 and accepted. This is the same defect class
+    /// that produced `alg: none` in JWS.
     ///
-    /// `match` намеренно без `_`: добавление члена обязано ломать сборку здесь,
-    /// рядом с проверкой, а не проходить молча.
+    /// The `match` deliberately has no `_`: adding a member must break the build here,
+    /// beside verification, rather than pass silently.
     pub fn ensure_supported(self) -> Result<(), CryptoError> {
         match self {
             Self::Ed25519 => Ok(()),
@@ -172,11 +172,11 @@ impl SigAlg {
         }
     }
 
-    /// Разбор идентификатора из файла.
+    /// Parse an identifier from a file.
     ///
-    /// Как и у [`AeadAlg::from_u8`], разбор сразу проходит через
-    /// [`Self::ensure_supported`]: заголовок с неисполнимым алгоритмом обязан
-    /// отвергаться НА РАЗБОРЕ, а не после согласования ключей и разворота CEK.
+    /// As with [`AeadAlg::from_u8`], parsing immediately passes through
+    /// [`Self::ensure_supported`]: a header using an unimplemented algorithm must
+    /// be rejected AT PARSING, not after key agreement and CEK unwrapping.
     pub fn from_u8(v: u8) -> Result<Self, CryptoError> {
         let alg = match v {
             1 => Self::Ed25519,
@@ -188,74 +188,74 @@ impl SigAlg {
     }
 }
 
-/// Механизм инкапсуляции ключа. Задаётся **на каждый слот**, а не на файл.
+/// Key encapsulation mechanism. Specified **per slot**, not per file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum KemAlg {
-    /// Автор → сервер и автор → получатель.
+    /// Author → server and author → recipient.
     X25519HkdfSha256 = 1,
-    /// Сервер → устройство. Именно P-256, а не X25519: Microsoft Platform Crypto
-    /// Provider не предоставляет X25519, TPM 2.0 даёт ECDH P-256 и RSA.
+    /// Server → device. P-256 specifically, not X25519: Microsoft Platform Crypto
+    /// Provider does not provide X25519; TPM 2.0 offers ECDH P-256 and RSA.
     P256HkdfSha256 = 2,
-    /// Запасной путь для TPM без поддержки ECDH.
+    /// Fallback for TPMs without ECDH support.
     RsaOaepSha256 = 3,
-    /// Гибрид X25519 и ML-KEM-768 по построению X-Wing — постквантовая половина
-    /// рядом с классической. Механизм — [`crate::xwing`], нормативная форма —
-    /// `docs/format.md`, «ВЕРСИЯ 3 ОТКРЫТА», пункт 1 (сам пункт в версии 4).
+    /// X25519 and ML-KEM-768 hybrid using X-Wing: a post-quantum half
+    /// alongside a classical half. Mechanism: [`crate::xwing`]; normative form:
+    /// `docs/format.md`, "VERSION 3 OPENED", item 1 (the item itself is in version 4).
     ///
-    /// Адресуется ПРОГРАММНОМУ ключу: X-Wing определён на X25519, а ключ в TPM
-    /// это P-256. Постквантовая защита и аппаратная привязка получателя сегодня
-    /// взаимоисключающи — `docs/threat-model.md` §2.
+    /// Targets a SOFTWARE key: X-Wing is defined over X25519, while a TPM key
+    /// is P-256. Post-quantum protection and hardware binding of the recipient are currently
+    /// mutually exclusive; see `docs/threat-model.md` §2.
     XWing = 4,
-    /// Гибрид ECDH P-256 и ML-KEM-768 — MLKEM768-P256. Механизм —
-    /// [`crate::mlkem_p256`], нормативная форма — `docs/format.md`, версия 5.
+    /// ECDH P-256 and ML-KEM-768 hybrid: MLKEM768-P256. Mechanism:
+    /// [`crate::mlkem_p256`]; normative form: `docs/format.md`, version 5.
     ///
-    /// Отличие от [`Self::XWing`] не в силе, а в том, ГДЕ живёт классическая
-    /// половина: P-256 умеет Platform Crypto Provider, а X25519 — нет. Поэтому
-    /// пятый механизм — единственный, у которого постквантовая защита и
-    /// неизвлекаемость ключа из TPM складываются, а не исключают друг друга.
+    /// The difference from [`Self::XWing`] is not strength but WHERE the classical
+    /// half resides: Platform Crypto Provider supports P-256 but not X25519. Thus
+    /// the fifth mechanism is the only one combining post-quantum protection with
+    /// TPM key non-exportability rather than making them mutually exclusive.
     MlKem768P256 = 5,
 }
 
 impl KemAlg {
-    /// Умеет ли сборка исполнить объявленный механизм — ОДНО имя этому вопросу.
+    /// Whether the build can execute the declared mechanism: ONE name for this question.
     ///
-    /// Имя понадобилось не ради стройности. Вопрос «исполним ли механизм»
-    /// отвечался порознь — таблицей отпечатка ([`kdf::device_fpr`]), таблицами
-    /// длин заголовка, веткой выдачи доли B у клиента, — и сходились эти ответы
-    /// по памяти автора правки. Разойтись такой набор может ровно один раз: в
-    /// сторону «механизм, который сборка исполнить не умеет, где-то сочли
-    /// исполнимым».
+    /// The name was not introduced for neatness. "Is this mechanism executable?"
+    /// was answered separately by the fingerprint table ([`kdf::device_fpr`]), header length
+    /// tables, and the client's share-B issuance branch; the answers agreed
+    /// only through the editor's memory. Such a set can diverge exactly once:
+    /// in the direction of "somewhere a mechanism this build cannot execute was considered
+    /// executable".
     ///
-    /// Ответ берётся у [`seal::supports_kem`], а не повторяется здесь: `match`
-    /// без `_` обязан стоять РЯДОМ С РЕАЛИЗАЦИЕЙ, чтобы добавление члена в
-    /// [`KemAlg`] ломало сборку у кода, которому его исполнять. Это форма
-    /// `Result` того же ответа — для вызывающих, которым нужен отказ, а не `bool`;
-    /// по образцу [`SigAlg::ensure_supported`].
+    /// The answer comes from [`seal::supports_kem`] rather than being duplicated here: the `match`
+    /// without `_` must sit BESIDE THE IMPLEMENTATION, so adding a [`KemAlg`]
+    /// member breaks the build at the code responsible for executing it. This is
+    /// the `Result` form of the same answer, for callers needing rejection rather than `bool`,
+    /// following [`SigAlg::ensure_supported`].
     ///
     /// # Errors
-    /// [`CryptoError::UnsupportedAlgorithm`] — номер в реестре есть, механизма в
-    /// сборке нет.
+    /// [`CryptoError::UnsupportedAlgorithm`]: the registry has the number but the build
+    /// lacks the mechanism.
     pub fn ensure_supported(self) -> Result<(), CryptoError> {
         if seal::supports_kem(self) { Ok(()) } else { Err(CryptoError::UnsupportedAlgorithm) }
     }
 
-    /// Разбор идентификатора из файла.
+    /// Parse an identifier from a file.
     ///
-    /// # Почему здесь НЕТ второго рубежа, в отличие от всех соседей
+    /// # Why this has NO second boundary, unlike its neighbors
     ///
-    /// [`AeadAlg::from_u8`], [`SigAlg::from_u8`] и [`TreeHashAlg::from_u8`]
-    /// вызывают `ensure_supported` прямо на разборе: неисполнимый алгоритм
-    /// заголовка обязан отвергнуть ФАЙЛ, и чем раньше, тем лучше. У `kem_id`
-    /// последствие другое и оно нормативно: `docs/format.md` §3.3 и §3.5 требуют
-    /// ПРОПУСТИТЬ слот с неисполнимым или незнакомым механизмом, а не отвергнуть
-    /// файл, — рядом может лежать собственный, полностью открываемый слот.
-    /// Встроенный сюда отказ поднял бы решение «пропустить или отвергнуть» с
-    /// уровня вызывающего на уровень разбора номера, где о слотах не известно
-    /// ничего.
+    /// [`AeadAlg::from_u8`], [`SigAlg::from_u8`], and [`TreeHashAlg::from_u8`]
+    /// call `ensure_supported` during parsing: an unimplemented header algorithm
+    /// must reject the FILE, the earlier the better. For `kem_id`, the consequence
+    /// differs normatively: `docs/format.md` §3.3 and §3.5 require
+    /// SKIPPING a slot with an unimplemented or unknown mechanism rather than rejecting
+    /// the file; a usable slot for this recipient may be adjacent.
+    /// Rejection built in here would move "skip or reject" from
+    /// the caller's level into number parsing, which knows nothing
+    /// about slots.
     ///
-    /// Поэтому рубеж остаётся отдельным вызовом [`Self::ensure_supported`], а
-    /// разбор отвечает только на вопрос «есть ли такой номер в реестре».
+    /// The boundary therefore remains a separate [`Self::ensure_supported`] call,
+    /// while parsing answers only "is this number in the registry?".
     pub fn from_u8(v: u8) -> Result<Self, CryptoError> {
         match v {
             1 => Ok(Self::X25519HkdfSha256),
@@ -268,28 +268,28 @@ impl KemAlg {
     }
 }
 
-/// Хеш для дерева полезной нагрузки.
+/// Payload-tree hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TreeHashAlg {
-    /// Сам по себе древовидный и заметно быстрее SHA-256.
+    /// Naturally tree-based and substantially faster than SHA-256.
     Blake3 = 1,
-    /// Значится в реестре формата, но деревом в этой сборке не считается: см.
-    /// [`merkle::ensure_supported`]. Член оставлен, чтобы номер 2 нельзя было
-    /// переиспользовать под другой хеш — старые файлы иначе стали бы читаться
-    /// не тем алгоритмом, а не отвергаться.
+    /// Listed in the format registry but not used to compute trees in this build: see
+    /// [`merkle::ensure_supported`]. The member remains to prevent reusing number 2
+    /// for another hash; otherwise old files would be read with the wrong
+    /// algorithm rather than rejected.
     Sha256 = 2,
 }
 
 impl TreeHashAlg {
-    /// Разбор идентификатора из файла.
+    /// Parse an identifier from a file.
     ///
-    /// Разобрать номер и суметь его исполнить — разные вещи, и раньше сборка
-    /// делала только первое: `tree_hash_id = 2` принимался, а дерево всё равно
-    /// считалось BLAKE3. Поэтому разбор сразу проходит через второй рубеж —
-    /// [`merkle::ensure_supported`], единственное место, где записано, что эта
-    /// сборка умеет. Единственное, чтобы список поддерживаемого не мог
-    /// разойтись с тем, что делает хешер.
+    /// Parsing a number and being able to execute it are distinct; previously this build
+    /// only did the first: it accepted `tree_hash_id = 2`, yet still computed the tree
+    /// using BLAKE3. Parsing therefore immediately passes a second boundary,
+    /// [`merkle::ensure_supported`], the sole declaration of what this
+    /// build supports. A single place prevents the supported-algorithm list from
+    /// diverging from the hasher's behavior.
     pub fn from_u8(v: u8) -> Result<Self, CryptoError> {
         let alg = match v {
             1 => Self::Blake3,
@@ -301,79 +301,79 @@ impl TreeHashAlg {
     }
 }
 
-/// Метки разделения доменов.
+/// Domain-separation labels.
 ///
-/// Ни одна не используется дважды во всей системе. Единственный способ попасть
-/// под подпись — через [`Transcript`], конструктор которого требует метку.
+/// None is used twice across the system. The only route into
+/// a signature is through [`Transcript`], whose constructor requires a label.
 pub mod label {
-    /// Метка домена — значение, которое НЕЛЬЗЯ сочинить.
+    /// A domain label: a value that CANNOT be invented.
     ///
-    /// # Зачем тип там, где хватало `&'static [u8]`
+    /// # Why a type where `&'static [u8]` used to suffice
     ///
-    /// И-12 требует, чтобы набор меток был уникален и беспрефиксен, и стерегут
-    /// это четыре пробы: уникальность, беспрефиксность, версионность и сверка со
-    /// спекой §3.6. Все четыре смотрят на [`ALL`] — то есть на РЕЕСТР. Место
-    /// вызова они не видели вовсе: `Transcript::new` и `seal::slot_info`
-    /// принимали любые байты, и вызывающий был вправе передать
-    /// `b"CC/v1/lease-cache"` — строку, которой в реестре нет и которая является
-    /// расширением [`LEASE`]. Ни одна проба такого не заметила бы, потому что
-    /// проверять она стала бы список, а не вызов.
+    /// I-12 requires unique, prefix-free labels, guarded by
+    /// four probes: uniqueness, prefix-freeness, versioning, and agreement with
+    /// specification §3.6. All four inspect [`ALL`], the REGISTRY. They never saw
+    /// call sites: `Transcript::new` and `seal::slot_info`
+    /// accepted arbitrary bytes, and a caller could pass
+    /// `b"CC/v1/lease-cache"`, a string absent from the registry and extending
+    /// [`LEASE`]. No probe would detect that, because it would
+    /// check the list rather than the call.
     ///
-    /// Новый тип закрывает именно эту щель: значение `Label` получается ТОЛЬКО
-    /// из констант этого модуля, потому что конструктор приватен, а поле не
-    /// публично. Гарантия реестра становится гарантией каждого вызова, и
-    /// проверяет её компилятор, а не проба.
+    /// The new type closes exactly this gap: `Label` values come ONLY
+    /// from this module's constants because the constructor is private and the field
+    /// is not public. The registry's guarantee becomes a guarantee of every call,
+    /// checked by the compiler rather than a probe.
     ///
-    /// # Почему `Debug` печатает саму строку
+    /// # Why `Debug` prints the string itself
     ///
-    /// Метка не секрет: она лежит открытым текстом в каждом файле и в спеке.
-    /// И-11 запрещает попадание в `Debug` секретов, а не имён доменов; прятать
-    /// метку значило бы сделать отладку отказа подписи слепой без малейшего
-    /// выигрыша.
+    /// A label is not secret: it is plaintext in every file and in the specification.
+    /// I-11 forbids secrets in `Debug`, not domain names; hiding
+    /// the label would blind signature-failure debugging without the slightest
+    /// benefit.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Label(&'static [u8]);
 
     impl Label {
-        /// Завести метку. Приватен намеренно: см. докстроку типа.
+        /// Create a label. Deliberately private: see the type documentation.
         ///
-        /// `const fn` — потому что все метки объявлены константами, а константа,
-        /// собираемая во время работы, потребовала бы `OnceLock` там, где нужен
-        /// массив байт.
+        /// `const fn` because all labels are constants; a constant
+        /// constructed at runtime would require `OnceLock` where all that is needed
+        /// is a byte array.
         const fn new(bytes: &'static [u8]) -> Self {
             Self(bytes)
         }
 
-        /// Байты метки — то, что уходит в `info`, в транскрипт и в прообраз.
+        /// Label bytes: what enters `info`, the transcript, and the preimage.
         #[must_use]
         pub const fn as_bytes(self) -> &'static [u8] {
             self.0
         }
 
-        /// Длина в байтах. Нужна в `const`-контексте: раскладка AAD приватных
-        /// метаданных считается на этапе сборки (`aead::META_AAD_LEN`).
+        /// Byte length. Needed in `const` context: the private-metadata AAD layout
+        /// is computed at build time (`aead::META_AAD_LEN`).
         #[must_use]
         pub const fn len(self) -> usize {
             self.0.len()
         }
 
-        /// Пуста ли метка. Всегда `false` — метка без байтов не разделяет
-        /// домены, — но без этого метода `clippy::len_without_is_empty` права.
+        /// Whether the label is empty. Always `false`: a label with no bytes cannot separate
+        /// domains, but without this method `clippy::len_without_is_empty` is right.
         #[must_use]
         pub const fn is_empty(self) -> bool {
             self.0.is_empty()
         }
 
-        /// Метка ВНЕ РЕЕСТРА — прототипам и пробам, и только им.
+        /// A label OUTSIDE THE REGISTRY: for prototypes and probes only.
         ///
-        /// Нужна двоим прототипам вне дерева (`experiments/attested-release`,
-        /// `spikes/disclosure-capsules`): каждый подписывает СВОЁ утверждение в
-        /// своём домене (`"F29/proto/evidence"`, `"SS/spike/..."`), и вносить эти
-        /// строки в реестр нельзя — реестр нормативен, а прототип завтра умрёт.
+        /// Needed by two out-of-tree prototypes (`experiments/attested-release`,
+        /// `spikes/disclosure-capsules`): each signs ITS OWN statement in
+        /// its own domain (`"F29/proto/evidence"`, `"SS/spike/..."`); adding those
+        /// strings to the registry is forbidden, since the registry is normative and the prototype may die tomorrow.
         ///
-        /// Признак `ad-hoc-label` выключен по умолчанию и внесён в список
-        /// непоставляемых (`cc-cli/tests/repository_hygiene.rs`) по той же
-        /// причине, что `explicit-nonce`: включённый в поставке, он возвращает
-        /// продукту дверь, ради закрытия которой тип и заведён.
+        /// The `ad-hoc-label` feature is disabled by default and listed as
+        /// non-shipping (`cc-cli/tests/repository_hygiene.rs`) for the same
+        /// reason as `explicit-nonce`: enabling it in a release restores the
+        /// production escape hatch that this type was introduced to close.
         #[cfg(any(test, feature = "ad-hoc-label"))]
         #[must_use]
         pub const fn ad_hoc(bytes: &'static [u8]) -> Self {
@@ -396,167 +396,167 @@ pub mod label {
     pub const HEADER_SIG: Label = Label::new(b"CC/v1/header-sig");
     pub const REVOCATION: Label = Label::new(b"CC/v1/revocation");
     pub const GRANT: Label = Label::new(b"CC/v1/grant");
-    /// Подпись автора под ГРАНТОМ АГЕНТА: дверь, срок, глубина и доли B
-    /// поддерева (`oc_protocol::agent::AgentGrant`, Agent Protocol, этап 1).
+    /// Author signature on an AGENT GRANT: door, expiry, depth, and shares B
+    /// for the subtree (`oc_protocol::agent::AgentGrant`, Agent Protocol, stage 1).
     ///
-    /// Своя, а не [`GRANT`], и это не педантизм: `"CC/v1/grant"` помечает
-    /// одобрение автора по ОДНОЙ просьбе об одном файле
-    /// (`oc_protocol::access::decision_transcript`), а грант агента раздаёт доли
-    /// сразу на дерево и называет ключ, которым дверь подписывает делегирования.
-    /// Совпади домены — подпись под одобрением одного файла годилась бы подписью
-    /// под раздачей всего поддерева.
+    /// Its own label, not [`GRANT`], for good reason: `"CC/v1/grant"` marks
+    /// author approval of ONE request for one file
+    /// (`oc_protocol::access::decision_transcript`), whereas an agent grant distributes shares
+    /// for an entire tree and names the key with which the door signs delegations.
+    /// If the domains coincided, approval of one file would also serve as a signature
+    /// for distributing the entire subtree.
     ///
-    /// Беспрефиксна: `"CC/v1/grant"` не является её началом (седьмой байт `a`
-    /// против `g`), а ближайшие соседи на `a` — `"CC/v1/activate-req"`,
+    /// Prefix-free: `"CC/v1/grant"` is not its prefix (seventh byte `a`
+    /// versus `g`); its nearest `a` neighbors, `"CC/v1/activate-req"`,
     /// `"CC/v1/audit-entry"`, `"CC/v1/audit-head"`, `"CC/v1/attest-nonce"`,
     /// `"CC/v1/attest-qualify"`, `"CC/v1/author-order"`,
-    /// `"CC/v1/authority-binding"`, `"CC/v1/authority-transfer"` — расходятся с
-    /// нею на восьмом байте (`g` против `c`, `u`, `t`).
+    /// `"CC/v1/authority-binding"`, and `"CC/v1/authority-transfer"`, differ
+    /// at byte eight (`g` versus `c`, `u`, `t`).
     ///
-    /// Контейнера не касается: версия формата от неё не меняется, в заголовок
-    /// она не попадает. В реестре она потому, что беспрефиксность доказывается
-    /// только здесь (И-12).
+    /// Does not affect the container: it changes no format version and enters no
+    /// header. It is registered because prefix-freeness can be proved
+    /// only here (I-12).
     pub const AGENT_GRANT: Label = Label::new(b"CC/v1/agent-grant");
-    /// Подпись двери-родителя под ДЕЛЕГИРОВАНИЕМ потомку
-    /// (`oc_protocol::agent::Delegation`, там же).
+    /// Parent-door signature on a DELEGATION to a child
+    /// (`oc_protocol::agent::Delegation`, same source).
     ///
-    /// Своя, а не [`AGENT_GRANT`]: грант подписывает автор ключом из заголовка
-    /// контейнера, делегирование — дверь своим эфемерным ключом Ed25519. Подпись
-    /// одного не должна годиться подписью другого, иначе дверь, получившая
-    /// грант, выписала бы себе грант — то есть новую глубину и новый срок.
+    /// Distinct from [`AGENT_GRANT`]: the author signs a grant with the container
+    /// header's key, while the door signs delegations with its own ephemeral Ed25519 key. A signature
+    /// on one must not work for the other, or a door receiving
+    /// a grant could issue itself another grant, with new depth and expiry.
     ///
-    /// Беспрефиксна: из меток на `d` ближайшие — `"CC/v1/device-fpr"`,
-    /// `"CC/v1/directory-entry"`, `"CC/v1/directory-head"`, и все расходятся с
-    /// нею на восьмом байте (`e` против `e`/`i`; у `device-fpr` — на девятом,
-    /// `l` против `v`).
+    /// Prefix-free: the nearest `d` labels are `"CC/v1/device-fpr"`,
+    /// `"CC/v1/directory-entry"`, and `"CC/v1/directory-head"`, all differing
+    /// at byte eight (`e` versus `e`/`i`; for `device-fpr`, at byte nine,
+    /// `l` versus `v`).
     pub const DELEGATION: Label = Label::new(b"CC/v1/delegation");
-    /// Подпись автора под ГРАНТОМ ДЕЙСТВИЙ: какие действия и с какими
-    /// ограничителями дверь вправе просить у сервера
-    /// (`oc_protocol::action::ActionGrant`, Agent Protocol, этап 2,
+    /// Author signature on an ACTION GRANT: which actions, subject to which
+    /// constraints, the door may request from the server
+    /// (`oc_protocol::action::ActionGrant`, Agent Protocol, stage 2,
     /// `docs/agent-protocol/stage-2-actions.md` §4.1).
     ///
-    /// Своя, а не [`AGENT_GRANT`], и довод тот же, что развёл грант агента с
-    /// [`GRANT`]: грант агента раздаёт доли B на ЧТЕНИЕ поддерева, грант
-    /// действий раздаёт право ДЕЙСТВОВАТЬ снаружи клетки — толкнуть ветку,
-    /// удалить файл, постучаться наружу. Совпади домены — подпись под раздачей
-    /// чтения годилась бы подписью под раздачей действий, то есть автор,
-    /// открывший агенту каталог, молча открыл бы ему и `git push`.
+    /// Distinct from [`AGENT_GRANT`], for the same reason separating an agent grant from
+    /// [`GRANT`]: an agent grant distributes shares B for READING a subtree; an action
+    /// grant distributes permission to ACT outside the sandbox: push a branch,
+    /// delete a file, contact the outside. If domains matched, a signature granting
+    /// read access would grant actions too: an author opening a directory
+    /// to an agent would silently grant it `git push` as well.
     ///
-    /// Беспрефиксна: из меток на `a` ближайшая по началу — `"CC/v1/activate-req"`,
-    /// и расходится она на пятом байте имени (`o` против `v`:
-    /// `action` против `activate`); с соседкой [`ACTION_LEASE`] общее только
-    /// `"CC/v1/action-"`, дальше `g` против `l`. Ни одна не продолжает другую.
+    /// Prefix-free: among `a` labels, the closest prefix is `"CC/v1/activate-req"`,
+    /// which differs at the fifth byte of the name (`o` versus `v`:
+    /// `action` versus `activate`); its neighbor [`ACTION_LEASE`] shares only
+    /// `"CC/v1/action-"`, followed by `g` versus `l`. Neither extends the other.
     ///
-    /// Контейнера не касается: версия формата от неё не меняется, в заголовок
-    /// она не попадает, и ни один её байт в `.cc` не лежит. В реестре она
-    /// потому, что беспрефиксность доказывается только здесь (И-12).
+    /// Does not affect the container: it changes no format version, enters no header,
+    /// and none of its bytes occur in `.cc`. It is registered
+    /// because prefix-freeness can be proved only here (I-12).
     pub const ACTION_GRANT: Label = Label::new(b"CC/v1/action-grant");
-    /// Подпись СЕРВЕРА под одноразовой лизой действия
-    /// (`oc_protocol::action::ActionLease`, там же, §4.3).
+    /// SERVER signature on a single-use action lease
+    /// (`oc_protocol::action::ActionLease`, same source, §4.3).
     ///
-    /// Ключ тот же, которым сервер подписывает лизинги файлов
-    /// (`authority.lease_verify_key` из заголовка), — а метка своя, и это не
-    /// педантизм: лизинг разрешает ОТКРЫТЬ файл, лиза действия разрешает
-    /// ИСПОЛНИТЬ действие с названными аргументами. Совпади домены — один
-    /// подписанный документ годился бы вместо другого под тем же ключом, и
-    /// разница между «читай» и «толкай ветку» свелась бы к тому, как получатель
-    /// истолкует байты.
+    /// The key is the same one the server uses to sign file leases
+    /// (`authority.lease_verify_key` from the header), but the label is distinct for a
+    /// reason: a file lease permits OPENING a file; an action lease permits
+    /// EXECUTING an action with specified arguments. If domains matched, one
+    /// signed document could replace the other under the same key, reducing
+    /// the distinction between "read" and "push a branch" to how the recipient
+    /// interprets the bytes.
     ///
-    /// Беспрефиксна с [`LEASE`] (`"CC/v1/lease"` не является её началом) и с
-    /// [`ACTION_GRANT`] (см. там).
+    /// Prefix-free with [`LEASE`] (`"CC/v1/lease"` is not its prefix) and
+    /// [`ACTION_GRANT`] (see there).
     pub const ACTION_LEASE: Label = Label::new(b"CC/v1/action-lease");
-    /// Подпись АВТОРА под решением по просьбе об исполнении действия
-    /// (`oc_protocol::action::ActionDecision`, этап 2, §5 шаг 3).
+    /// AUTHOR signature on a decision concerning an action-execution request
+    /// (`oc_protocol::action::ActionDecision`, stage 2, §5 step 3).
     ///
-    /// Своя, а не [`GRANT`], которой подписано решение по просьбе о ДОСТУПЕ
-    /// (`oc_protocol::access::decision_transcript`). Ключ у обоих один — тот,
-    /// что лежит в заголовке и записан сервером при регистрации файла, — и
-    /// домены разводит только метка. Совпади они, разошлись бы два разных
-    /// утверждения автора под одной подписью: «выдать этому устройству долю B
-    /// файла» и «исполнить этой двери `git push` в эту ветку». Надеяться, что
-    /// их разведёт несовпадение номеров тегов, нельзя: раскладка обоих тел —
-    /// TLV, и совпадение номеров — вопрос времени, а не устройства.
+    /// Distinct from [`GRANT`], which signs decisions about ACCESS requests
+    /// (`oc_protocol::access::decision_transcript`). Both use the same key,
+    /// from the header and recorded by the server at file registration;
+    /// only the label separates the domains. If they coincided, two different author
+    /// statements would share one signature: "issue this device the file's share B"
+    /// and "let this door execute `git push` to this branch". Differing tag
+    /// numbers cannot be relied on to separate them: both bodies use
+    /// TLV, and matching numbers are a matter of time, not construction.
     ///
-    /// Беспрефиксна: с [`ACTION_GRANT`] и [`ACTION_LEASE`] общее только
-    /// `"CC/v1/action-"`, дальше `d` против `g` и `l`; ни одна метка реестра не
-    /// начинается с `"CC/v1/action-d"`. Контейнера не касается, как и обе
-    /// соседки: версия формата от неё не меняется, в заголовок она не попадает.
+    /// Prefix-free: with [`ACTION_GRANT`] and [`ACTION_LEASE`] it shares only
+    /// `"CC/v1/action-"`, then `d` versus `g` and `l`; no registry label
+    /// starts with `"CC/v1/action-d"`. Like both neighbors, it does not affect
+    /// the container: it changes no format version and enters no header.
     pub const ACTION_DECISION: Label = Label::new(b"CC/v1/action-decision");
     pub const LEASE: Label = Label::new(b"CC/v1/lease");
     pub const ACTIVATE_REQ: Label = Label::new(b"CC/v1/activate-req");
     pub const AUDIT_ENTRY: Label = Label::new(b"CC/v1/audit-entry");
-    /// Подписанная голова журнала: размер и корень дерева над записями.
+    /// Signed log head: size and tree root over the entries.
     ///
-    /// Своя метка, а не общая с записями, и это не педантизм: голова и запись —
-    /// РАЗНЫЕ утверждения. Подпись под одним не должна годиться для другого,
-    /// иначе подписанная запись могла бы быть предъявлена как подписанная голова.
+    /// Its own label rather than a shared entry label, for good reason: heads and entries are
+    /// DIFFERENT statements. A signature on one must not work for the other,
+    /// or a signed entry could be presented as a signed head.
     ///
-    /// Беспрефиксна: `"CC/v1/audit-entry"` не является её началом и наоборот
-    /// (И-12), что проверяется тестом на весь список.
+    /// Prefix-free: `"CC/v1/audit-entry"` is not its prefix, nor vice versa
+    /// (I-12), tested across the entire list.
     pub const AUDIT_HEAD: Label = Label::new(b"CC/v1/audit-head");
     pub const ATTEST_NONCE: Label = Label::new(b"CC/v1/attest-nonce");
     pub const CONTENT_MAC: Label = Label::new(b"CC/v1/content-mac");
-    /// Подпись редактора над изменяемой областью (`docs/format.md`, «ПРАВКА
-    /// ИСПОЛНИМА», п. C).
+    /// Editor signature over the mutable region (`docs/format.md`, "EDITING IS
+    /// EXECUTABLE", item C).
     pub const EDITOR_SIG: Label = Label::new(b"CC/v1/editor-sig");
-    /// Сертификат ключа правки: автор или соавтор заверяет «у устройства X на
-    /// этот файл ключ правки S» (там же, п. B).
+    /// Editing-key certificate: the author or a coauthor certifies "device X has
+    /// editing key S for this file" (same source, item B).
     ///
-    /// Беспрефиксна с [`EDITOR_SIG`]: общее у них только `"CC/v1/editor-"`, и
-    /// ни одна не продолжает другую.
+    /// Prefix-free with [`EDITOR_SIG`]: they share only `"CC/v1/editor-"`, and
+    /// neither extends the other.
     pub const EDITOR_CERT: Label = Label::new(b"CC/v1/editor-cert");
-    /// Голова сеанса правки — хеш-цепочка сохранений (там же, п. D).
+    /// Editing-session head: a hash chain of saves (same source, item D).
     pub const EDIT_SESSION: Label = Label::new(b"CC/v1/edit-session");
-    /// Заявка о редакции серверу (`docs/protocol.md` §9.12): своя метка, чтобы
-    /// подпись ключа правки под заявкой не годилась подписью области и
-    /// наоборот (И-12).
+    /// Revision submission to the server (`docs/protocol.md` §9.12): a separate label so
+    /// an editing-key signature on a submission cannot serve as a region signature,
+    /// or vice versa (I-12).
     pub const EDITION_CLAIM: Label = Label::new(b"CC/v1/edition-claim");
-    /// Отпечаток файла под метку времени RFC 3161 (`docs/format.md`, «ФУТЕР И
-    /// МЕТКА ВРЕМЕНИ», п. B).
+    /// File imprint for an RFC 3161 timestamp (`docs/format.md`, "FOOTER AND
+    /// TIMESTAMP", item B).
     pub const FOOTER_IMPRINT: Label = Label::new(b"CC/v1/footer-imprint");
-    /// Подпись свидетеля под головой журнала сервера (`docs/protocol.md`
-    /// §9.13, D3). Своя, а не `audit-head`: голову подписывает сервер,
-    /// свидетельство — другая сторона, и подпись одного не должна годиться
-    /// подписью другого.
+    /// Witness signature over the server's log head (`docs/protocol.md`
+    /// §9.13, D3). Separate from `audit-head`: the server signs the head,
+    /// while another party signs the witness statement; one's signature must not serve
+    /// as the other's.
     pub const WITNESS_COSIGN: Label = Label::new(b"CC/v1/witness-cosign");
-    /// Лист журнала каталога ключей: хеш записи каталога (`docs/protocol.md`
-    /// §9.14, D4). В отличие от журнала событий, лист — от САМОЙ записи, а не
-    /// от MAC: проверяющий обязан видеть, что именно доказано.
+    /// Key-directory log leaf: directory-entry hash (`docs/protocol.md`
+    /// §9.14, D4). Unlike the event log, the leaf hashes the entry ITSELF, not
+    /// its MAC: verifiers must see exactly what is proved.
     pub const DIRECTORY_ENTRY: Label = Label::new(b"CC/v1/directory-entry");
-    /// Подпись головы журнала каталога. Своя, а не `audit-head`: голова
-    /// каталога и голова журнала событий — разные утверждения.
+    /// Directory-log head signature. Separate from `audit-head`: a directory
+    /// head and an event-log head are different statements.
     pub const DIRECTORY_HEAD: Label = Label::new(b"CC/v1/directory-head");
-    /// Отпечаток раскладки смысловой метки (D5): какие точки и какие
-    /// равноценные варианты в них.
+    /// Semantic-mark layout fingerprint (D5): which points and which
+    /// equivalent variants they contain.
     pub const MARK_LAYOUT: Label = Label::new(b"CC/v1/mark-layout");
-    /// Выбор варианта смысловой метки ключом организации (D5). Беспрефиксна с
-    /// `mark-layout`: общее у них только `"CC/v1/mark-"`.
+    /// Semantic-mark variant selection using the organization key (D5). Prefix-free with
+    /// `mark-layout`: they share only `"CC/v1/mark-"`.
     pub const MARK_CHOICE: Label = Label::new(b"CC/v1/mark-choice");
-    /// Подпись манифеста пакета восстановления сервера ключом подписи лизингов
-    /// (E2, B5): какие ключи, какое состояние и какая голова журнала в пакете.
-    /// Контейнера не касается.
+    /// Server recovery-package manifest signature using the lease-signing key
+    /// (E2, B5): which keys, state, and log head the package contains.
+    /// Does not affect the container.
     pub const RECOVERY_MANIFEST: Label = Label::new(b"CC/v1/recovery-manifest");
-    /// Подпись привязки сервера ключом подписи лизингов (E2, B2,
+    /// Server-binding signature using the lease-signing key (E2, B2,
     /// `oc_protocol::control::Binding`).
     pub const AUTHORITY_BINDING: Label = Label::new(b"CC/v1/authority-binding");
-    /// Подпись управляющего под намерением (E2, B2,
+    /// Controller signature on an intent (E2, B2,
     /// `oc_protocol::control::ControlRequest`).
     pub const CONTROL_REQUEST: Label = Label::new(b"CC/v1/control-request");
-    /// Подпись квитанции операции сервером (E2, B2,
-    /// `oc_protocol::control::Receipt`). Беспрефиксна с `operation-id`: общее у
-    /// них только `"CC/v1/operation-"`.
+    /// Server signature on an operation receipt (E2, B2,
+    /// `oc_protocol::control::Receipt`). Prefix-free with `operation-id`: they share
+    /// only `"CC/v1/operation-"`.
     pub const OPERATION_RECEIPT: Label = Label::new(b"CC/v1/operation-receipt");
-    /// Подпись снимка состояния, посланного реплике (E2, B4,
+    /// Signature on a state snapshot sent to a replica (E2, B4,
     /// `oc_protocol::replica::Push`).
     pub const REPLICA_PUSH: Label = Label::new(b"CC/v1/replica-push");
-    /// Подпись реплики под принятым снимком (E2, B4,
-    /// `oc_protocol::replica::Ack`). Своя, а не `replica-push`: подписывают
-    /// разные стороны, и подпись одной не должна годиться подписью другой.
+    /// Replica signature on an accepted snapshot (E2, B4,
+    /// `oc_protocol::replica::Ack`). Separate from `replica-push`: different
+    /// parties sign, and one's signature must not serve as the other's.
     pub const REPLICA_ACK: Label = Label::new(b"CC/v1/replica-ack");
-    /// Подпись управляющего под передачей полномочий преемнику (E2, B7,
-    /// `oc_protocol::control::Transfer`). Своя, а не `control-request`:
-    /// намерение меняет привязку внутри эпохи, передача меняет эпоху, и
-    /// подпись под одним не должна годиться под другим.
+    /// Controller signature transferring authority to a successor (E2, B7,
+    /// `oc_protocol::control::Transfer`). Separate from `control-request`:
+    /// an intent changes binding within an epoch; a transfer changes the epoch,
+    /// and a signature on one must not work for the other.
     pub const AUTHORITY_TRANSFER: Label = Label::new(b"CC/v1/authority-transfer");
     pub const CHUNK: Label = Label::new(b"CC/v1/chunk");
     pub const LEAF: Label = Label::new(b"CC/v1/leaf");
@@ -566,195 +566,195 @@ pub mod label {
     pub const PAYLOAD: Label = Label::new(b"CC/v1/payload");
     pub const NONCE_BASE: Label = Label::new(b"CC/v1/nonce-base");
     pub const PRIVATE_META: Label = Label::new(b"CC/v1/private-meta");
-    /// Пара ключей УСТРОЙСТВА, выведенная из кода-претензии.
+    /// DEVICE keypair derived from a claim code.
     ///
-    /// # Зачем понадобилась третья метка при коде, когда есть две
+    /// # Why a third code-related label was needed when two already existed
     ///
-    /// `SLOT_B_CLAIM` выводит долю B прямо из кода — так устроен слот
-    /// `RecipientClaim`, и там это верно: доля получателя может быть какой
-    /// угодно, лишь бы обе стороны вывели одно.
+    /// `SLOT_B_CLAIM` derives share B directly from the code: that is how a
+    /// `RecipientClaim` slot works, correctly in that case: the recipient's share can be
+    /// anything, provided both parties derive the same value.
     ///
-    /// У наследника по коду доля ФИКСИРОВАНА: это доля B данного файла, лежащая
-    /// в слоте автора. Вывести её из произвольного кода нельзя — вывод даёт то,
-    /// что даёт. Поэтому код выводит не долю, а ПАРУ КЛЮЧЕЙ, и завещание
-    /// запечатывается на её открытый ключ обычным `seal`, как на любое
-    /// устройство. Ни одного нового примитива: тот же HKDF, тот же X25519, тот
-    /// же `seal`.
+    /// For a code-based heir the share is FIXED: this file's share B, stored
+    /// in the author slot. It cannot be derived from an arbitrary code: derivation produces
+    /// what it produces. The code therefore derives a KEYPAIR, not a share, and the bequest
+    /// is sealed to its public key with ordinary `seal`, just as for any
+    /// device. No new primitives: the same HKDF, the same X25519, the
+    /// same `seal`.
     ///
-    /// Метка отдельная и обязана быть отдельной: с `SLOT_B_CLAIM` над тем же
-    /// `ikm` она дала бы приватный ключ, равный доле слота, — то есть код,
-    /// открывающий один файл, выдал бы ключ, которым подписан другой.
+    /// The label is separate and must remain so: using `SLOT_B_CLAIM` with the same
+    /// `ikm` would yield a private key equal to the slot share, so a code
+    /// opening one file would reveal the key used to sign another.
     pub const CLAIM_DEVICE: Label = Label::new(b"CC/v1/claim-device");
     pub const SLOT_B_CLAIM: Label = Label::new(b"CC/v1/slot-b-claim");
     pub const SLOT_B_COMMIT: Label = Label::new(b"CC/v1/slot-b-commit");
     pub const SLOT_COMMIT: Label = Label::new(b"CC/v1/slot-commit");
     pub const A_TO_DEVICE: Label = Label::new(b"CC/v1/a-to-device");
-    /// Доля B, уходящая ОТ АВТОРА к устройству получателя.
+    /// Share B sent FROM THE AUTHOR to the recipient's device.
     ///
-    /// Отдельный домен от [`A_TO_DEVICE`], и это не симметрия ради симметрии:
-    /// доли выдают РАЗНЫЕ стороны по разным решениям. Совпади домены — блок,
-    /// выданный сервером, годился бы там, где ждут блок автора, и наоборот.
+    /// A distinct domain from [`A_TO_DEVICE`], not symmetry for its own sake:
+    /// DIFFERENT parties issue shares under different decisions. If domains matched, a block
+    /// issued by the server could stand in for an author block, or vice versa.
     ///
-    /// Беспрефиксна относительно `a-to-device` и всех прочих (И-12): первые
-    /// байты различаются.
+    /// Prefix-free relative to `a-to-device` and all others (I-12): their initial
+    /// bytes differ.
     pub const B_TO_DEVICE: Label = Label::new(b"CC/v1/b-to-device");
-    /// Намеренно не `"CC/v1/lease-cache"`: та строка была бы расширением
-    /// [`LEASE`], а метки используются ещё и как префикс `info` для HKDF, где
-    /// разделяющего нулевого байта нет. Набор меток обязан быть беспрефиксным.
+    /// Deliberately not `"CC/v1/lease-cache"`: that string would extend
+    /// [`LEASE`], while labels also prefix HKDF `info`, with no
+    /// separating zero byte. The label set must be prefix-free.
     pub const CACHED_LEASE: Label = Label::new(b"CC/v1/cached-lease");
     pub const SEAL_KEY: Label = Label::new(b"CC/v1/seal-key");
-    /// Засев nonce запечатывания слота (§3.3).
+    /// Slot-sealing nonce hedging (§3.3).
     ///
-    /// Метка производной **nonce**, и её появление — не отход от правила «nonce
-    /// хранятся, а не выводятся», а его уточнение. Читатель nonce по-прежнему
-    /// **не вычисляет**: он берёт его из записи слота. Выводит его отправитель, и
-    /// только для того, чтобы значение перестало быть чистой функцией состояния
-    /// генератора. См. [`crate::kdf::hedged_nonce`].
+    /// A **nonce** derivation label: its introduction clarifies rather than abandons
+    /// "nonces are stored, not derived". The reader still takes the nonce
+    /// **without computing it**, from the slot record. The sender derives it,
+    /// solely to stop the value being a pure function of
+    /// RNG state. See [`crate::kdf::hedged_nonce`].
     pub const SEAL_NONCE: Label = Label::new(b"CC/v1/seal-nonce");
-    /// Засев nonce обёртки CEK (§3.1). То же назначение, что у [`SEAL_NONCE`].
+    /// CEK-wrapper nonce hedging (§3.1). Same purpose as [`SEAL_NONCE`].
     pub const WRAP_NONCE: Label = Label::new(b"CC/v1/wrap-nonce");
-    /// Засев nonce кадра полезной нагрузки (§6.1).
+    /// Payload-frame nonce hedging (§6.1).
     ///
-    /// Четвёртая метка того же назначения, и появилась она позже трёх остальных не
-    /// от полноты картины: решение С-13 применили к запечатыванию слота и к обёртке
-    /// CEK, а два nonce — кадра и приватных метаданных — остались брать байты прямо
-    /// из генератора. Дыра одна и та же, просто в менее заметных местах.
+    /// The fourth label serving this purpose; its later appearance was not about
+    /// completeness: decision C-13 was applied to slot sealing and CEK wrapping,
+    /// while two nonces, frame and private metadata, still took bytes directly
+    /// from the RNG. The same hole, simply in less conspicuous places.
     ///
-    /// Намеренно **не** `"CC/v1/chunk-nonce"`: та строка была бы расширением метки
-    /// [`CHUNK`], а метки используются ещё и как префикс `info` для HKDF, где
-    /// разделяющего нулевого байта нет — `"CC/v1/chunk"‖"-nonce"‖X` совпало бы с
-    /// `"CC/v1/chunk-nonce"‖X`. Ровно тот же случай, что у [`CACHED_LEASE`], и
-    /// поймал его тот же тест на беспрефиксность. Отсюда «кадр» вместо «чанка»:
-    /// nonce принадлежит именно кадру на диске, а не логическому чанку.
+    /// Deliberately **not** `"CC/v1/chunk-nonce"`: that string would extend the
+    /// [`CHUNK`] label, and labels also prefix HKDF `info`, where no
+    /// zero byte separates them: `"CC/v1/chunk"‖"-nonce"‖X` would equal
+    /// `"CC/v1/chunk-nonce"‖X`. Exactly the same case as [`CACHED_LEASE`], caught
+    /// by the same prefix-freeness test. Hence "frame" rather than "chunk":
+    /// the nonce belongs to the on-disk frame, not the logical chunk.
     pub const FRAME_NONCE: Label = Label::new(b"CC/v1/frame-nonce");
-    /// Засев nonce приватных метаданных (§2.0).
+    /// Private-metadata nonce hedging (§2.0).
     ///
-    /// Здесь повтор состояния генератора обходился дороже, чем в чанке: `CEK` и
-    /// `header_salt` берутся из того же генератора, поэтому при откате снапшота
-    /// повторялись и ключ K5, и nonce — а открытые тексты (имя файла, размер)
-    /// различались. Это переиспользование потока ключей и повторный одноразовый ключ
-    /// Poly1305 внутри подписанного автором заголовка.
+    /// Repeated RNG state cost more here than for a chunk: `CEK` and
+    /// `header_salt` come from the same RNG, so snapshot rollback
+    /// repeated both the K5 key and nonce while plaintexts (filename, size)
+    /// differed. This reuses the keystream and repeats the one-time
+    /// Poly1305 key inside the author-signed header.
     pub const META_NONCE: Label = Label::new(b"CC/v1/meta-nonce");
-    /// Хеш ядра заголовка: всё, кроме ключевого материала.
+    /// Header-core hash: everything except key material.
     pub const CORE_HASH: Label = Label::new(b"CC/v1/core-hash");
-    /// Хеш политики по её байтовому диапазону.
+    /// Policy hash over its byte range.
     pub const POLICY_HASH: Label = Label::new(b"CC/v1/policy-hash");
 
-    /// Назначение слота: доля сервера лицензий.
+    /// Slot purpose: license-server share.
     ///
-    /// У каждого вида слота своя метка, и она входит в `info` запечатывания.
-    /// Поэтому шифротекст, адресованный серверу, не открывается как шифротекст,
-    /// адресованный устройству автора, даже если оба запечатаны на один ключ.
+    /// Each slot kind has its own label in the sealing `info`.
+    /// Consequently, ciphertext addressed to the server does not open as ciphertext
+    /// addressed to the author's device, even if both are sealed to the same key.
     pub const SLOT_SERVER: Label = Label::new(b"CC/v1/slot-server");
-    /// Назначение слота: доля получателя.
+    /// Slot purpose: recipient share.
     pub const SLOT_RECIPIENT: Label = Label::new(b"CC/v1/slot-recipient");
-    /// Назначение слота: обе доли для устройства автора.
+    /// Slot purpose: both shares for the author's device.
     pub const SLOT_AUTHOR_DEVICE: Label = Label::new(b"CC/v1/slot-author-device");
 
-    /// Текст кода-претензии → `claim_secret` (§3.4).
+    /// Claim-code text → `claim_secret` (§3.4).
     ///
-    /// Живёт здесь, хотя применяется в клиенте: реестр меток один на систему, и
-    /// метка, объявленная вне него, ломает единственную имеющуюся гарантию
-    /// беспрефиксности — тест над [`ALL`]. Проверять её было бы нечем именно
-    /// потому, что список полон.
+    /// Lives here although used in the client: the system has one label registry,
+    /// and declaring a label outside it breaks the only available prefix-freeness
+    /// guarantee, the test over [`ALL`]. There would be nothing to check it with,
+    /// precisely because the list is complete.
     ///
-    /// Отличие от [`SLOT_B_CLAIM`] существенно: та метка выводит **долю** из уже
-    /// готового 32-байтового секрета, а эта превращает в этот секрет
-    /// **напечатанный текст**. Разные входы, разные домены.
+    /// The difference from [`SLOT_B_CLAIM`] matters: that label derives a **share** from
+    /// an existing 32-byte secret, while this one transforms
+    /// **printed text** into that secret. Different inputs, different domains.
     pub const CLAIM_CODE: Label = Label::new(b"CC/v1/claim-code");
-    /// Распоряжение автора серверу — зарегистрировать или отозвать файл — по
-    /// проводу. Подписывается ключом автора, тем же, что подписал заголовок.
+    /// An author's wire instruction to the server to register or revoke a file.
+    /// Signed by the author key, the same one that signed the header.
     pub const AUTHOR_ORDER: Label = Label::new(b"CC/v1/author-order");
 
-    /// Доказательство открытия секретного вызова (K23).
+    /// Proof of opening a secret challenge (K23).
     ///
-    /// **Протоколом не используется с 2026-09-21** (`docs/format.md`, раздел
-    /// «ЭХО ПРИВЯЗАНО К РАЗГОВОРУ 2026-09-21»): эхо считается производной K31 по
-    /// транскрипту рукопожатия. Метка и производная остаются ради замороженного
-    /// вектора `k23_prove_echo` в `derivations_wire.kat` — И-14 запрещает менять
-    /// замороженное, а удалить метку из реестра значило бы убрать из-под вектора
-    /// проверяемый домен.
+    /// **Unused by the protocol since 2026-09-21** (`docs/format.md`, section
+    /// "ECHO BOUND TO THE CONVERSATION 2026-09-21"): K31 derives the echo from
+    /// the handshake transcript. The label and derivation remain for the frozen
+    /// `k23_prove_echo` vector in `derivations_wire.kat`: I-14 forbids changing
+    /// frozen artifacts, and removing the label from the registry would remove
+    /// the tested domain beneath the vector.
     pub const PROVE_ECHO: Label = Label::new(b"CC/v1/prove-echo");
-    /// Ключ MAC запросов после доказательства (K24).
+    /// Request MAC key after proof (K24).
     pub const SESSION_MAC: Label = Label::new(b"CC/v1/session-mac");
-    /// Эхо доказательства владения, привязанное к разговору (K31,
-    /// `docs/protocol.md` §9.4, решение 2026-09-21).
+    /// Conversation-bound proof-of-possession echo (K31,
+    /// `docs/protocol.md` §9.4, decision 2026-09-21).
     ///
-    /// Одна метка на обе ступени ОДНОЙ производной: ею помечен транскрипт
-    /// рукопожатия и ею же разделён домен HMAC, ключом которого служит секрет
-    /// вызова. Второго домена здесь нет — есть один, «эхо по транскрипту», и
-    /// метка в сообщении HMAC нужна затем, чтобы эхо не столкнулось с K23 под
-    /// тем же ключом.
+    /// One label for both steps of ONE derivation: it labels the handshake
+    /// transcript and also separates the HMAC domain whose key is the challenge
+    /// secret. There is no second domain, only "echo over transcript";
+    /// the label in the HMAC message prevents an echo colliding with K23 under
+    /// the same key.
     ///
-    /// **Имя выбрано так, чтобы не продолжать `"CC/v1/prove-echo"`**: набор
-    /// беспрефиксный, и `"CC/v1/prove-echo-bound"` было бы расширением уже
-    /// занятой метки — ровно то, что запрещает И-12. Ближайшие соседи на `e` —
+    /// **The name deliberately does not extend `"CC/v1/prove-echo"`**: this set is
+    /// prefix-free, and `"CC/v1/prove-echo-bound"` would extend an already
+    /// occupied label, exactly what I-12 forbids. The nearest `e` neighbors,
     /// `"CC/v1/editor-sig"`, `"CC/v1/editor-cert"`, `"CC/v1/edit-session"`,
-    /// `"CC/v1/edition-claim"` — расходятся с нею на восьмом байте (`c` против
+    /// and `"CC/v1/edition-claim"`, differ at byte eight (`c` versus
     /// `d`).
     pub const ECHO_TRANSCRIPT: Label = Label::new(b"CC/v1/echo-transcript");
 
-    /// Отпечаток устройства для механизмов, чей публичный ключ длиннее 32 байт
-    /// (K27). У X25519 отпечаток И ЕСТЬ ключ, и метка там не участвует:
-    /// та форма заморожена векторами K11, K21, K23, K24.
+    /// Device fingerprint for mechanisms whose public keys exceed 32 bytes
+    /// (K27). For X25519 the fingerprint IS the key, and this label is unused:
+    /// that form is frozen by K11, K21, K23, and K24 vectors.
     pub const DEVICE_FPR: Label = Label::new(b"CC/v1/device-fpr");
 
-    /// Тождество операции на проводе (K28, `docs/protocol.md` §9.10).
+    /// Wire operation identity (K28, `docs/protocol.md` §9.10).
     ///
-    /// Идентификатор выводится из засева и тела запроса, а не берётся голым из
-    /// генератора — по тому же доводу, что засевы nonce (С-13): генератор
-    /// повторяется при откате снапшота и клоне образа, и два РАЗНЫХ запроса с
-    /// одним идентификатором сервер принял бы за один — второму досталось бы
-    /// чужое «выдано».
+    /// The identifier derives from a seed and the request body rather than coming directly
+    /// from the RNG, for the same reason as nonce hedging (C-13): RNGs
+    /// repeat after snapshot rollback and image cloning, and a server would treat two DIFFERENT
+    /// requests with one identifier as one request, giving the second
+    /// someone else's "issued" outcome.
     pub const OPERATION_ID: Label = Label::new(b"CC/v1/operation-id");
-    /// Свежее значение, порождаемое СЕРВЕРОМ (K30, `docs/format.md`, раздел
-    /// «СВЕЖЕСТЬ СЕРВЕРА ВЫВОДИТСЯ 2026-09-20»).
+    /// Fresh value generated by the SERVER (K30, `docs/format.md`, section
+    /// "SERVER FRESHNESS IS DERIVED 2026-09-20").
     ///
-    /// Одна метка на два назначения — вызов аттестации (§9.11.1) и секрет
-    /// доказательства владения (§9.4), — и разводит их `kind` внутри прообраза,
-    /// как у [`OPERATION_ID`]. Вторая метка означала бы второй домен там, где
-    /// домен один: значение свежести сервера.
+    /// One label serves two purposes, attestation challenge (§9.11.1) and
+    /// proof-of-possession secret (§9.4), separated by `kind` inside the preimage,
+    /// as with [`OPERATION_ID`]. A second label would create a second domain where
+    /// there is only one: a server freshness value.
     ///
-    /// Беспрефиксна: `"CC/v1/seal-key"`, `"CC/v1/seal-nonce"` и
-    /// `"CC/v1/session-mac"` расходятся с нею на восьмом байте, и ни одна метка
-    /// реестра не является её началом.
+    /// Prefix-free: `"CC/v1/seal-key"`, `"CC/v1/seal-nonce"`, and
+    /// `"CC/v1/session-mac"` differ at byte eight, and no registry label
+    /// is its prefix.
     pub const SERVER_FRESH: Label = Label::new(b"CC/v1/server-fresh");
 
-    /// Подпись описи ПАКЕТА ПОСТАВКИ ключом издателя (`manifest.txt` пакета
-    /// Close Crate, проверяет `cc install`).
+    /// Publisher-key signature on the DISTRIBUTION PACKAGE manifest (`manifest.txt` in a
+    /// Close Crate package, verified by `cc install`).
     ///
-    /// # Почему метка, а не «подписать байты описи»
+    /// # Why a label rather than "sign the manifest bytes"
     ///
-    /// Потому что ключ издателя — обычный Ed25519, и без домена его подпись под
-    /// произвольными байтами годилась бы везде, где этим же ключом проверяют
-    /// что-то ещё. Домен у описи поставки свой: она не контейнер, не документ
-    /// протокола и не файл оператора, а перечень программ архива.
+    /// Because the publisher key is ordinary Ed25519, and without a domain its signature over
+    /// arbitrary bytes would work anywhere the same key verifies
+    /// something else. A distribution manifest has its own domain: it is neither a container,
+    /// protocol document, nor operator file, but an inventory of programs in an archive.
     ///
-    /// Контейнера метка не касается вовсе: версия формата от неё не меняется, в
-    /// заголовок она не попадает. Она живёт в реестре не потому, что нужна
-    /// формату, а потому, что реестр — ЕДИНСТВЕННОЕ место, где доказывается
-    /// беспрефиксность (И-12): метка, объявленная мимо него, не проверена ничем.
+    /// The label does not affect the container at all: it changes no format version and enters no
+    /// header. It belongs in the registry not because the format needs it,
+    /// but because the registry is the ONLY place prefix-freeness is proved
+    /// (I-12): a label declared elsewhere is checked by nothing.
     ///
-    /// Беспрефиксна: из меток на `p` ближайшие — `"CC/v1/payload"`,
-    /// `"CC/v1/private-meta"`, `"CC/v1/policy-hash"`, `"CC/v1/prove-echo"`, и
-    /// все расходятся с нею на восьмом байте; `"CC/v1/recovery-manifest"`
-    /// совпадает лишь хвостом, а не началом.
+    /// Prefix-free: the nearest `p` labels are `"CC/v1/payload"`,
+    /// `"CC/v1/private-meta"`, `"CC/v1/policy-hash"`, and `"CC/v1/prove-echo"`;
+    /// all differ at byte eight; `"CC/v1/recovery-manifest"`
+    /// shares only a suffix, not a prefix.
     pub const PACKAGE_MANIFEST: Label = Label::new(b"CC/v1/package-manifest");
 
-    /// K29: данные квалификации утверждения TPM о ключе устройства (B6a,
-    /// `docs/protocol.md` §9.11) — `extraData` в `TPMS_ATTEST`.
+    /// K29: qualifying data for a TPM statement about the device key (B6a,
+    /// `docs/protocol.md` §9.11): `extraData` in `TPMS_ATTEST`.
     ///
-    /// Своя, а не [`ATTEST_NONCE`]: та уже служит `info` запечатывания вызова
-    /// доказательства владения (§9.4), и одна метка на два применения — это
-    /// неразделённый домен (И-12). Беспрефиксна: `"CC/v1/attest-nonce"` не
-    /// начало этой строки и наоборот.
+    /// Separate from [`ATTEST_NONCE`]: that already serves as `info` when sealing a proof-of-possession
+    /// challenge (§9.4), and one label for two applications leaves
+    /// an unseparated domain (I-12). Prefix-free: `"CC/v1/attest-nonce"` is not
+    /// a prefix of this string, nor vice versa.
     pub const ATTEST_QUALIFY: Label = Label::new(b"CC/v1/attest-qualify");
 
-    /// Все метки одним списком — для теста на уникальность.
+    /// All labels in one list for the uniqueness test.
     ///
-    /// Список остаётся ЕДИНСТВЕННЫМ источником для четырёх проб И-12, и после
-    /// появления [`Label`] это не изменилось: тип стережёт место вызова, список —
-    /// содержимое реестра. Ни одна из двух проверок не заменяет другую.
+    /// The list remains the SOLE source for the four I-12 probes even after
+    /// [`Label`] was introduced: the type guards call sites, the list guards
+    /// the registry's contents. Neither check replaces the other.
     pub const ALL: &[Label] = &[
         HEADER_SIG, REVOCATION, GRANT, LEASE, ACTIVATE_REQ, AUDIT_ENTRY, AUDIT_HEAD,
         ATTEST_NONCE,
@@ -775,81 +775,81 @@ pub mod label {
     ];
 }
 
-/// Минимальная энтропия кода-претензии.
+/// Minimum claim-code entropy.
 ///
-/// Не косметическое число. XChaCha20-Poly1305 не является key-committing, и без
-/// проверки обязательства слота код низкой энтропии восстанавливается через
-/// оракул разбиения существенно быстрее полного перебора. Шестизначный код
-/// недопустим.
+/// Not a cosmetic number. XChaCha20-Poly1305 is not key-committing, and without
+/// slot-commitment verification a low-entropy code can be recovered through
+/// a partitioning oracle substantially faster than exhaustive search. A six-digit code
+/// is unacceptable.
 ///
-/// Граница проверяется **на сборке**, а не во время работы, и иначе не могла бы.
-/// `ClaimSecret::from_bytes` принимает любые 32 байта и обязан: к этому моменту
-/// код уже сжат хешем, и энтропии в результате не видно. Мерить её надо там, где
-/// код порождается, — и там же она измерима точно: длина кода и размер алфавита
-/// известны константами. Проверка стоит в `cc_cli::claim` (`const _: () =
-/// assert!(...)`), поэтому короткий код не «упадёт в тесте», а не скомпилируется.
+/// The boundary is checked **at build time**, not runtime, and could not be otherwise.
+/// `ClaimSecret::from_bytes` accepts any 32 bytes and must: by then
+/// the code has been hash-compressed and the result does not reveal entropy. It must be measured
+/// at generation, where it is exactly measurable: code length and alphabet size
+/// are known constants. The check lives in `cc_cli::claim` (`const _: () =
+/// assert!(...)`), so a short code will not "fail a test"; it will not compile.
 ///
-/// Кода, придуманного человеком, в продукте нет по той же причине: обязательство
-/// лежит в контейнере открытым текстом, перебор идёт оффлайн, и ограничить число
-/// попыток нечем — пробуют не у нас.
+/// Human-invented codes are absent from the product for the same reason: the commitment
+/// is plaintext in the container, guessing is offline, and attempt counts
+/// cannot be limited, since the guesses are not made against us.
 pub const MIN_CLAIM_BITS: u32 = 128;
 
-/// SHA-256 от куска байтов.
+/// SHA-256 of a byte slice.
 ///
-/// # Зачем общая функция, если хеши формата считаются в `oc-format`
+/// # Why a shared function when format hashes are computed in `oc-format`
 ///
-/// Потому что не всё, что надо захешировать, — формат. Опись пакета поставки
-/// перечисляет программы и их суммы; это не контейнер, версий у него нет, и
-/// заводить ради него запись в реестре тегов было бы ошибкой.
+/// Because not everything that needs hashing is format data. A distribution manifest
+/// lists programs and checksums; it is not a container, has no format versions,
+/// and creating a tag-registry entry for it would be a mistake.
 ///
-/// Живёт она здесь, а не в `cc-cli`, по правилу крейтов: `sha2` уже зависимость
-/// этого крейта, и добавление её вторым ребром к `cc-cli` завело бы прямую
-/// зависимость там, где она не нужна. Крейт при этом остаётся чистым — ни
-/// ввода-вывода, ни часов, ни RNG здесь нет.
+/// It lives here rather than in `cc-cli` under the crate rules: `sha2` is already a dependency
+/// of this crate, and a second edge to `cc-cli` would introduce a direct
+/// dependency where none is needed. This crate remains pure:
+/// no I/O, clocks, or RNGs here.
 ///
-/// Сравнивать результат — только через [`digest_eq`].
+/// Compare results only through [`digest_eq`].
 #[must_use]
 pub fn sha256(bytes: &[u8]) -> [u8; 32] {
     use sha2::Digest as _;
     sha2::Sha256::digest(bytes).into()
 }
 
-/// Сравнить два 32-байтовых дайджеста за постоянное время.
+/// Compare two 32-byte digests in constant time.
 ///
-/// Единственный способ сравнивать хеши, корни, отпечатки и обязательства во всём
-/// репозитории — и это правило, а не оптимизация. Часть таких значений публична
-/// (корень дерева лежит в файле открытым), часть нет (обязательство слота), и
-/// граница между ними со временем двигается: `original_root` сегодня публичен, а
-/// в режиме detached становится адресом. Разрешив «здесь можно обычным `==`,
-/// потому что значение публичное», мы обязывались бы доказывать это заново при
-/// каждой правке — и однажды доказали бы неверно.
+/// The only way to compare hashes, roots, fingerprints, and commitments throughout the
+/// repository, a rule rather than an optimization. Some values are public
+/// (the tree root is plaintext in the file), some are not (the slot commitment), and
+/// the boundary moves over time: `original_root` is public today, but
+/// becomes an address in detached mode. Permitting "ordinary `==` here
+/// because the value is public" would oblige us to prove that again with
+/// every change, and eventually prove it incorrectly.
 ///
-/// Сравнение принимает массивы фиксированной длины, а не срезы: длина, которую
-/// можно перепутать, — это второй способ ошибиться, и он здесь не нужен.
+/// Comparison accepts fixed-length arrays rather than slices: a length that can
+/// be confused is a second way to err, which is unnecessary here.
 #[must_use]
 pub fn digest_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     use subtle::ConstantTimeEq;
     bool::from(a.ct_eq(b))
 }
 
-/// Сравнить два ПУБЛИЧНЫХ ключа возможно разной длины, константным временем.
+/// Compare two PUBLIC keys of possibly different lengths in constant time.
 ///
-/// Отдельная функция, а не ослабленный до срезов [`digest_eq`], и это принципиально.
-/// Доктрина «сравнение принимает массивы фиксированной длины» защищает от того,
-/// чтобы длина стала вторым способом ошибиться, и распространять исключение на все
-/// сравнения репозитория значило бы её отменить. Здесь исключение оправдано ровно
-/// одним обстоятельством: длина ключа — функция механизма (`kem_id`), она разная у
-/// X25519 и P-256, и обе стороны сравнения приходят из **подписанного автором**
-/// заголовка, где длина публична по построению.
+/// A separate function, not [`digest_eq`] weakened to slices; this distinction is essential.
+/// The rule "comparison accepts fixed-length arrays" prevents
+/// length from becoming a second source of errors; extending the exception to every
+/// comparison in the repository would abolish that rule. Exactly one circumstance
+/// justifies this exception: key length is a function of the mechanism (`kem_id`), differing for
+/// X25519 and P-256, and both comparison operands come from the **author-signed**
+/// header, where length is public by construction.
 ///
-/// Несовпадение длин даёт `false` сразу, до сравнения содержимого, и утечки здесь
-/// нет: длина лежит в файле открытым числом, противник знает её и так. Означает
-/// это «слот не для нашего механизма», то есть «не наш слот», — ровно то же, что
-/// и несовпадение самих байтов.
+/// Length mismatch returns `false` immediately, before comparing contents, without leaking
+/// anything: the length is a public number in the file, already known to an attacker. This means
+/// "the slot is not for our mechanism", hence "not our slot", exactly the same as
+/// mismatching key bytes.
 ///
-/// Содержимое сравнивается `subtle` (И-13): ключ публичен, но по времени ответа
-/// не должно быть видно, на скольких байтах разошлось, — иначе появляется побайтовый
-/// оракул подбора того, кому адресован слот.
+/// Contents are compared using `subtle` (I-13): the key is public, but response timing
+/// must not reveal how many bytes matched, or a byte-by-byte oracle for guessing
+/// the slot's recipient would emerge.
 #[must_use]
 pub fn public_key_eq(a: &[u8], b: &[u8]) -> bool {
     use subtle::ConstantTimeEq;

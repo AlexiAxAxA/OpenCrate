@@ -1,70 +1,70 @@
-//! Согласование ключей за трейтом: X25519 в коде, P-256 в коде или в TPM.
+//! Key agreement behind a trait: X25519 in software, P-256 in software or in a TPM.
 //!
-//! Модуль существует ради одного свойства: приватный ключ может не покидать
-//! железо. `NCryptSecretAgreement` возвращает общий секрет, но не ключ, поэтому
-//! вывести ключ AEAD «взяв приватный ключ и посчитав DH» нельзя в принципе —
-//! операция согласования обязана быть точкой расширения, а не деталью функции
-//! запечатывания. Именно поэтому конструкция запечатывания написана вручную по
-//! образцу RFC 9180, а не взята готовым HPKE-крейтом: готовый требует ключ.
+//! This module exists for one property: the private key may never leave
+//! hardware. `NCryptSecretAgreement` returns a shared secret, not the key, so
+//! deriving an AEAD key by "taking the private key and computing DH" is fundamentally impossible:
+//! key agreement must be an extension point rather than an implementation detail
+//! of sealing. That is why the sealing construction is implemented manually following
+//! RFC 9180 rather than using an off-the-shelf HPKE crate: that crate requires the key.
 //!
-//! Крейт при этом остаётся чистым. Здесь только абстракция и программные
-//! реализации; TPM живёт в `cc-keystore`, который зависит от этого трейта, а не
-//! наоборот.
+//! The crate remains pure. This contains only the abstraction and software
+//! implementations; TPM support lives in `cc-keystore`, which depends on this trait,
+//! not the reverse.
 
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
 
-/// Длина общего секрета: 32 байта и у X25519, и у P-256.
+/// Shared-secret length: 32 bytes for both X25519 and P-256.
 ///
-/// Совпадение не случайно и не обязано сохраниться: у X25519 это результат
-/// умножения точки, у P-256 — координата X общей точки, обе по 32 байта для
-/// 256-битных кривых. Механизм с другим размером поля даст другое число, и тогда
-/// эта константа станет функцией механизма.
+/// The equality is not accidental and need not last: X25519 returns a
+/// point multiplication result, P-256 the shared point's X coordinate, both 32 bytes for
+/// 256-bit curves. A mechanism with a different field size would give a different value,
+/// turning this constant into a function of the mechanism.
 pub const SHARED_SECRET_LEN: usize = 32;
 
-/// Общий секрет согласования, в **big-endian**.
+/// The key-agreement shared secret, in **big-endian** order.
 ///
-/// ## Почему конструктор один и почему он назван по порядку байтов
+/// ## Why there is one constructor and why it names the byte order
 ///
-/// Спайк `spikes/tpm-ecdh` обнаружил то, что стоило бы пропустить молча:
-/// `NCryptSecretAgreement` с Microsoft Platform Crypto Provider отдаёт общий
-/// секрет **little-endian**, тогда как все чистые реализации P-256 — включая
-/// `p256` — работают с big-endian представлением координаты X, и RFC 5903 (ECDH
-/// для IKE) предписывает именно его.
+/// The `spikes/tpm-ecdh` spike discovered something easily overlooked:
+/// `NCryptSecretAgreement` with Microsoft Platform Crypto Provider returns the shared
+/// secret in **little-endian** order, whereas all pure P-256 implementations, including
+/// `p256`, use the big-endian X-coordinate representation, as prescribed by RFC 5903 (ECDH
+/// for IKE).
 ///
-/// Порядок байтов, оставленный комментарием, — это ошибка, ждущая своего дня:
-/// перевёрнутый секрет даёт другой ключ AEAD, слот не открывается, и выглядит это
-/// как «файл повреждён». Ошибку нашли бы, но не там, где она есть.
+/// Byte order left to a comment is a bug waiting to happen:
+/// a reversed secret yields a different AEAD key; the slot will not open, appearing
+/// as "file corrupted". The error would be found, but not at its actual source.
 ///
-/// Поэтому конструктор здесь **ровно один**, и он называет порядок в своём имени.
-/// Реализация, получившая байты от NCrypt, обязана их развернуть, чтобы вызвать
-/// его не соврав; забыть об этом молча нельзя — другого входа в тип нет.
+/// There is therefore **exactly one** constructor, and its name states the byte order.
+/// An implementation receiving NCrypt bytes must reverse them to invoke it
+/// truthfully; this cannot be silently forgotten, since the type has no other entry point.
 #[derive(Clone)]
 pub struct SharedSecret(Zeroizing<[u8; SHARED_SECRET_LEN]>);
 
 impl SharedSecret {
-    /// Единственный конструктор. Байты обязаны быть big-endian.
+    /// The only constructor. Bytes must be big-endian.
     #[must_use]
     pub fn from_be_bytes(bytes: [u8; SHARED_SECRET_LEN]) -> Self {
         Self(Zeroizing::new(bytes))
     }
 
-    /// Секрет для вывода ключа. Внутри крейта: наружу общий секрет не отдаётся.
+    /// Secret for key derivation. Crate-internal: the shared secret is not exposed externally.
     pub(crate) fn expose(&self) -> &[u8; SHARED_SECRET_LEN] {
         &self.0
     }
 
-    /// Сравнить два секрета константным временем.
+    /// Compare two secrets in constant time.
     ///
-    /// Именованный метод, а не производный `PartialEq`: производный сравнивал бы
-    /// байты обычным способом, то есть с ранним выходом на первом расхождении, — а
-    /// это оракул подбора (И-13). Тип, у которого `==` небезопасен, не должен его
-    /// иметь вовсе.
+    /// A named method rather than derived `PartialEq`: derivation would compare
+    /// bytes conventionally, returning early at the first difference,
+    /// which is a guessing oracle (I-13). A type for which `==` is unsafe should not
+    /// provide it at all.
     ///
-    /// Нужен снаружи: аппаратная реализация согласования обязана быть сверена с
-    /// программной на одних и тех же ключах, и сверять их иначе как сравнением
-    /// секретов нечем.
+    /// Needed externally: the hardware agreement implementation must be checked against
+    /// the software implementation using identical keys, and comparing
+    /// secrets is the only way to do that.
     #[must_use]
     pub fn ct_eq(&self, other: &Self) -> bool {
         use subtle::ConstantTimeEq as _;
@@ -79,37 +79,37 @@ impl core::fmt::Debug for SharedSecret {
     }
 }
 
-/// Сторона согласования: своя половина известна, чужая приходит на вход.
+/// An agreement party: its own half is known; the peer's half is input.
 ///
-/// Трейт умышленно узкий — две операции. Всё, что нужно от TPM, это отдать
-/// публичный ключ и согласовать с чужим; приватного ключа в трейте нет и быть не
-/// может, иначе аппаратная реализация его не удовлетворит, а ради неё трейт и
-/// заведён.
+/// The trait is deliberately narrow: two operations. All we need from a TPM is
+/// its public key and agreement with a peer; no private key appears in the trait, nor
+/// can one appear, or hardware implementations could not implement the very trait
+/// introduced for them.
 pub trait KeyAgreement {
-    /// Публичный ключ этой стороны — в той форме, в которой он идёт на провод.
+    /// This party's public key, in its wire representation.
     ///
-    /// Возвращает `Vec`, а не массив: у X25519 это 32 байта, у P-256 — 65
-    /// (несжатая точка SEC1). Форму задаёт механизм, и проверяет её `oc-format`
-    /// по таблице длин, а не этот трейт.
+    /// Returns a `Vec`, not an array: X25519 uses 32 bytes and P-256 uses 65
+    /// (an uncompressed SEC1 point). The mechanism determines the form, which `oc-format`
+    /// validates against the length table; this trait does not.
     fn public_key(&self) -> Vec<u8>;
 
-    /// Согласовать общий секрет с публичным ключом другой стороны.
+    /// Agree on a shared secret with the other party's public key.
     ///
-    /// Реализация обязана отвергнуть чужой ключ, не лежащий на кривой, и точку
-    /// малого порядка. Для P-256 это существенно иначе, чем для X25519: у
-    /// X25519 любая 32-байтовая строка — законный публичный ключ, а у P-256
-    /// точка, не лежащая на кривой, открывает атаку invalid-curve, и `enc`
-    /// приходит из **враждебного файла**. Полагаться на то, что проверку
-    /// выполнит библиотека внутри, нельзя — она обязана быть названа контрактом.
+    /// Implementations must reject peer keys off the curve and points
+    /// of small order. This is materially different for P-256 and X25519:
+    /// any 32-byte string is a valid X25519 public key, whereas a P-256
+    /// point off the curve enables an invalid-curve attack, and `enc`
+    /// comes from a **hostile file**. Relying on the underlying library to perform
+    /// this check is insufficient; it must be stated as a contract.
     fn agree(&self, peer_public: &[u8]) -> Result<SharedSecret, CryptoError>;
 }
 
-/// X25519 в коде: сторона, у которой приватный ключ есть.
+/// Software X25519: a party that possesses its private key.
 ///
-/// Обёртка вокруг существующего секрета, а не новый способ хранить ключ. Нужна
-/// затем, чтобы путь X25519 и путь P-256 проходили через один и тот же трейт, —
-/// иначе у одного механизма была бы абстракция, а у другого прямой вызов, и
-/// разойтись они могли бы незаметно.
+/// Wraps an existing secret rather than introducing another key storage method.
+/// Ensures X25519 and P-256 paths pass through the same trait;
+/// otherwise one mechanism would have an abstraction and the other a direct call,
+/// allowing them to diverge unnoticed.
 pub struct X25519Agreement<'a> {
     secret: &'a crate::secret::X25519Secret,
 }
@@ -147,13 +147,13 @@ impl KeyAgreement for X25519Agreement<'_> {
     }
 }
 
-/// P-256 в коде: пара, живущая в памяти процесса.
+/// Software P-256: a keypair living in process memory.
 ///
-/// Нужна для двух вещей, и обе обязательны. Первая — проверяемость: без неё весь
-/// путь к слоту на P-256 тестировался бы только на машине с TPM, то есть не
-/// тестировался бы в CI вовсе. Вторая — программная ступень привязки: устройство
-/// без пригодного TPM обязано работать, честно объявив привязку программной, а не
-/// отказывать в запуске.
+/// Required for two reasons, both essential. First, testability: without it the entire
+/// P-256 slot path could only be tested on a TPM-equipped machine, meaning
+/// not at all in CI. Second, software binding: a device
+/// without a suitable TPM must work, honestly declaring software binding rather than
+/// refusing to start.
 pub struct P256Agreement {
     secret: p256::SecretKey,
 }
@@ -165,22 +165,22 @@ impl core::fmt::Debug for P256Agreement {
 }
 
 impl P256Agreement {
-    /// Создать пару из генератора, переданного параметром.
+    /// Create a pair using an RNG passed as a parameter.
     ///
-    /// Генератор именно параметром: RNG в этом крейте запрещён как зависимость —
-    /// `getrandom` однажды уже протекал сюда транзитивно и был выловлен сборкой
-    /// под wasm32, — а тесты обязаны быть детерминированными.
+    /// The RNG must be a parameter: RNG dependencies are forbidden in this crate;
+    /// `getrandom` once leaked in transitively and was caught by a wasm32
+    /// build. Tests must also be deterministic.
     ///
-    /// `generate_from_rng`, а не `SecretKey::random`: второй объявлен устаревшим.
-    /// Первая попытка звала `generate`, которого не существует, и сборка это
-    /// поймала — метод трейта называется полным именем.
+    /// `generate_from_rng`, not `SecretKey::random`: the latter is deprecated.
+    /// The first attempt called nonexistent `generate`, caught by compilation;
+    /// the trait method uses its full name.
     pub fn generate<R: rand_core::CryptoRng + ?Sized>(rng: &mut R) -> Self {
         use p256::elliptic_curve::Generate as _;
 
         Self { secret: p256::SecretKey::generate_from_rng(rng) }
     }
 
-    /// Восстановить пару из байтов приватного ключа (big-endian скаляр).
+    /// Restore a pair from private-key bytes (a big-endian scalar).
     pub fn from_be_bytes(bytes: &[u8; 32]) -> Result<Self, CryptoError> {
         let secret = p256::SecretKey::from_slice(bytes).map_err(|_| CryptoError::BadKey)?;
         Ok(Self { secret })
@@ -227,8 +227,8 @@ impl KeyAgreement for P256Agreement {
 mod tests {
     use super::*;
 
-    /// Ключи задаются байтами, а не генератором: тест обязан быть
-    /// детерминированным, а RNG в этом крейте приходит только параметром.
+    /// Keys are specified as bytes rather than generated: the test must be
+    /// deterministic, and RNGs enter this crate only as parameters.
     fn p256_pair(byte: u8) -> P256Agreement {
         P256Agreement::from_be_bytes(&[byte; 32]).expect("скаляр в диапазоне")
     }
@@ -240,8 +240,8 @@ mod tests {
         assert_eq!(pk.first(), Some(&0x04), "префикс несжатой точки SEC1");
     }
 
-    /// Обе стороны обязаны прийти к одному секрету — иначе слот не откроется, и
-    /// выглядеть это будет как повреждённый файл.
+    /// Both parties must reach the same secret, or the slot will not open,
+    /// appearing as file corruption.
     #[test]
     fn both_sides_of_a_p256_agreement_reach_the_same_secret() {
         let a = p256_pair(0x11);
@@ -264,13 +264,13 @@ mod tests {
         assert_eq!(from_a.expose(), from_b.expose());
     }
 
-    /// Точка, не лежащая на кривой, отвергается — а не скармливается умножению.
+    /// An off-curve point is rejected rather than fed into multiplication.
     ///
-    /// Это защита от атаки invalid-curve, и она нужна именно P-256: `enc`
-    /// приходит из враждебного файла, а точка вне кривой позволяет вытягивать
-    /// приватный ключ по частям, наблюдая результаты согласования. У X25519
-    /// проверки нет и не нужно — там законна любая 32-байтовая строка, и это
-    /// свойство кривой, а не поблажка.
+    /// This protects against invalid-curve attacks and is specifically needed for P-256: `enc`
+    /// comes from a hostile file, and an off-curve point allows extracting
+    /// parts of the private key by observing agreement results. X25519 needs
+    /// no such check: any 32-byte string is valid, a property
+    /// of the curve rather than a concession.
     #[test]
     fn a_point_off_the_curve_is_refused_rather_than_multiplied() {
         let a = p256_pair(0x11);
@@ -285,7 +285,7 @@ mod tests {
         assert!(a.agree(&[0x00]).is_err(), "точка в бесконечности принята");
     }
 
-    /// Длина, не соответствующая механизму, отвергается обеими реализациями.
+    /// Both implementations reject lengths inconsistent with the mechanism.
     #[test]
     fn a_public_key_of_the_wrong_length_is_refused() {
         let p = p256_pair(0x11);
@@ -301,24 +301,24 @@ mod tests {
         assert!(x.agree(&[0x00; 65]).is_err(), "X25519 принял 65 байт");
     }
 
-    /// Сжатую точку `agree` ПРИНИМАЕТ, и запрет сжатой формы живёт не здесь.
+    /// `agree` ACCEPTS compressed points; the compressed-form prohibition belongs elsewhere.
     ///
-    /// Прежняя редакция соседней пробы утверждала обратное — «P-256 принял сжатую
-    /// форму» — и кормила `agree` тридцатью тремя байтами `0x04`. Это не сжатая
-    /// точка: сжатая начинается с `0x02` или `0x03`, а `0x04` — префикс несжатой.
-    /// Отказ приходил от разбора SEC1, то есть проба зеленела по посторонней
-    /// причине, а свойства, о котором она говорила, у `agree` нет вовсе:
-    /// `from_sec1_bytes` разбирает обе формы, и обе дают один и тот же секрет.
+    /// The neighboring probe previously claimed the opposite, "P-256 accepted compressed
+    /// form", while feeding `agree` thirty-three bytes of `0x04`. That is not a compressed
+    /// point: compressed points start with `0x02` or `0x03`; `0x04` denotes uncompressed form.
+    /// Rejection came from SEC1 parsing, so the probe passed for an unrelated
+    /// reason, while `agree` does not have the property it claimed at all:
+    /// `from_sec1_bytes` parses both forms, and both yield the same secret.
     ///
-    /// Свойство, которого требует спека (§3.3: `enc` при `kem_id = 2` — ровно 65
-    /// байт, несжатая точка), исполняется таблицей ТОЧНЫХ ДЛИН в `oc-format`, и
-    /// разделение здесь намеренное: оно записано в докстроке
-    /// [`KeyAgreement::agree`] — форму на проводе проверяет формат, а не трейт
-    /// согласования. Иначе аппаратная реализация обязана была бы повторить
-    /// таблицу длин у себя, и две копии одной таблицы разошлись бы.
+    /// The specification's requirement (§3.3: `enc` for `kem_id = 2` is exactly 65
+    /// bytes, an uncompressed point) is enforced by the EXACT LENGTH table in `oc-format`.
+    /// This separation is deliberate and documented on
+    /// [`KeyAgreement::agree`]: wire form is checked by the format, not the key-agreement
+    /// trait. Otherwise the hardware implementation would have to duplicate
+    /// the length table, and two copies of one table would diverge.
     ///
-    /// Проба закрепляет фактическое поведение слоя, а не желаемое: заявление о
-    /// сжатой форме, которое можно проверить, — в `oc-format`.
+    /// The probe records this layer's actual behavior rather than a desired one; the verifiable
+    /// claim about compressed form lives in `oc-format`.
     #[test]
     fn a_compressed_p256_point_is_accepted_here_and_yields_the_same_secret() {
         use p256::elliptic_curve::sec1::ToSec1Point as _;
@@ -344,7 +344,7 @@ mod tests {
         );
     }
 
-    /// Секрет не печатается: ни в логи, ни в текст ошибки (И-11).
+    /// The secret is never printed, in logs or error text (I-11).
     #[test]
     fn a_shared_secret_never_prints_itself() {
         let secret = SharedSecret::from_be_bytes([0xab; 32]);

@@ -1,5 +1,107 @@
 # Getting started
 
+[Documentation](index.md) · [How it works](how-it-works.md) · [Examples](../examples/README.md)
+
+Start by verifying a document header and exploring an access decision. Then
+use the same policy example in a separate Rust application.
+
+## 1. Get the source
+
+Install Git and Rust through rustup. The checked-in toolchain file selects the
+Rust version and components; rustup downloads them on the first Cargo command.
+On Windows, use the MSVC Rust toolchain with the Visual Studio C++ build tools.
+
+```sh
+git clone https://github.com/AlexiAxAxA/OpenCrate.git
+cd OpenCrate
+```
+
+The commands below run from this directory unless stated otherwise. The first
+build needs internet access to download the toolchain and dependencies. No
+Open Crate account, license server or hardware security module is needed for
+these examples. A private preparation repository requires GitHub access until
+the public launch.
+
+## 2. Verify a header
+
+```sh
+cargo run --locked -p oc-format --example verify-header -- tests/golden/basic.cc
+```
+
+Expected output:
+
+```text
+Header signature verified. Author is UNKNOWN: pin a verified identity before granting access.
+```
+
+This authenticates the committed header. `UNKNOWN` is the expected result: the
+example has an empty trust store. Your application must establish which author
+identities it trusts before granting access. This example checks the header;
+it does not decrypt or authenticate every payload chunk.
+
+Try a negative control using a file that is not a container:
+
+```sh
+cargo run --locked -p oc-format --example verify-header -- Cargo.toml
+```
+
+Expected: `header authentication failed` and a nonzero exit code. The example
+must reject it. The command reads the file without modifying it.
+
+## 3. Explore access decisions
+
+![Three outcomes from the policy example](assets/access-decisions.svg)
+
+```sh
+cargo run --locked -p oc-policy --example access-policy
+```
+
+The [complete example](../crates/oc-policy/examples/access-policy.rs) starts with
+a deny-by-default policy and grants viewing. It uses synthetic lease, device,
+hash and time values to show three outcomes:
+
+| Request | Expected result | Why |
+| --- | --- | --- |
+| View at time 1100 | Allow, with obligations | The device and policy match an active lease |
+| Print at time 1100 | Deny | Printing was never granted |
+| View at time 2000 | Deny | The lease/offline window has ended |
+
+The program returns an error if any expected outcome changes. Inspect the
+obligations printed with `ALLOW`: the application must implement them before
+serving plaintext. These synthetic facts illustrate the decision API; they
+are not a production lease issuer or proof of a device's identity.
+
+## 4. Use it in your own application
+
+From inside `OpenCrate`, create a sibling project:
+
+```sh
+cd ..
+cargo new policy-demo
+cd policy-demo
+cargo add oc-policy --path ../OpenCrate/crates/oc-policy
+```
+
+Replace `src/main.rs` with the working example. In PowerShell:
+
+```powershell
+Copy-Item ../OpenCrate/crates/oc-policy/examples/access-policy.rs src/main.rs
+cargo run
+```
+
+Or in Bash:
+
+```sh
+cp ../OpenCrate/crates/oc-policy/examples/access-policy.rs src/main.rs
+cargo run
+```
+
+You should see the same three outcomes. This application consumes a path
+dependency from the exported repository, rather than relying on the private
+Close Crate workspace. Keep its generated `Cargo.lock` for reproducible builds.
+
+## Choose the libraries for your integration
+
 The pinned Rust toolchain is in `rust-toolchain.toml`. These packages are not
 published to crates.io. Start with a source checkout and path dependencies, and
 pin a reviewed source revision and lockfile in your own integration.
@@ -13,15 +115,7 @@ oc-policy = { path = "../OpenCrate/crates/oc-policy" }
 oc-engine = { path = "../OpenCrate/crates/oc-engine" }
 ```
 
-Run the checked-in example:
-
-```sh
-cargo run --locked -p oc-format --example verify-header -- tests/golden/basic.cc
-```
-
-Expected: the signature verifies, and the example reports an **unknown author**.
-Committed fixtures use test inputs. Never reuse their keys in an application.
-Successful parsing is not an authorization decision.
+Committed fixtures use public test inputs. Never reuse their keys in an application.
 
 ## Recipient integration
 
@@ -62,5 +156,21 @@ restoration. Test fail-closed enforcement of obligations. An author-only success
 does not validate the recipient path. Check output against an independent reader.
 
 Build the API reference with `cargo doc --locked --workspace --no-deps`.
-The full normative format and protocol documents are included in this candidate
-for fidelity, but are awaiting an English translation and publication review.
+The complete English [format](format.md) and [protocol](protocol.md) specifications
+are included. See [translation notes](translation-notes.md) for literal examples
+and the relationship between historical decisions and later amendments.
+
+## Troubleshooting
+
+| What you see | What to check |
+| --- | --- |
+| Repository not found or authentication required | Check the repository URL and access; preparation snapshots are private until launch |
+| `cargo` or the Windows linker is missing | Install rustup and, on Windows, the C++ build tools; reopen the terminal |
+| Toolchain or dependency download fails | Check network access to the Rust distribution service and crates.io; do not change the pinned version to hide the failure |
+| File not found for the fixture | Run the command from the `OpenCrate` repository root |
+| Author is `UNKNOWN` | Expected for the empty example trust store; configure trusted author keys in your application |
+| A policy request is denied | Check the action, device fingerprint, policy hash, lease validity and persisted replay state |
+| An allowed action includes obligations | Implement those obligations before delivering content; the library does not control your UI |
+
+From the repository root, run `cargo test --locked --workspace` for the full
+suite and `cargo doc --locked --workspace --no-deps --open` for the API reference.

@@ -1,110 +1,110 @@
-//! Документы ДВЕРИ ДЕЙСТВИЙ: грант действий, просьба об исполнении и лиза.
+//! ACTION DOOR documents: action grant, execution request and lease.
 //!
-//! # Что это за разговор и чем он отличается от гранта агента
+//! # What this conversation is and how it differs from an agent grant
 //!
-//! Грант агента ([`crate::agent::AgentGrant`]) отвечает на вопрос «этой двери на
-//! это поддерево и до этого часа», то есть раздаёт ЧТЕНИЕ. Здесь другой вопрос —
-//! «этой двери толкнуть эту ветку этого remote», — и свести его к первому
-//! нельзя: у чтения предмет файл, а у действия предмет АРГУМЕНТЫ, которых в
-//! момент выдачи ещё нет. Поэтому грант действий называет не действия, а
-//! ОГРАНИЧИТЕЛИ на них, а совпадение аргументов с ограничителями проверяется
-//! дважды: дверью до сети ([`crate::action::args_within`]) и сервером перед выдачей лизы.
+//! An agent grant ([`crate::agent::AgentGrant`]) says "this door, this
+//! subtree, until this time", granting READ access. This asks something else:
+//! "this door may push this branch to this remote". The latter cannot be reduced
+//! to the former: reading concerns a file, whereas an action concerns ARGUMENTS that do
+//! not yet exist when the grant is issued. Thus an action grant names not actions but
+//! CONSTRAINTS on them; arguments are checked against those constraints
+//! twice: by the door before networking ([`crate::action::args_within`]), and by the server before issuing a lease.
 //!
-//! # Почему capability, а не правило
+//! # Why a capability rather than a rule
 //!
-//! Агент в клетке не имеет средств действия — ни сети, ни ключа, ни записи в
-//! дерево. Отказ здесь держится не на том, что кто-то сказал «нельзя», а на
-//! отсутствии средства: выписать себе лизу модели нечем, а аргументы вне
-//! ограничителей сервер не подпишет. Инъекция вправе уговорить модель попросить;
-//! просьба — это всё, чего она добьётся.
+//! The sandboxed agent has no means of acting: no network, key or write access to
+//! the tree. Rejection relies not on someone saying "forbidden", but on
+//! absence of the means: the model cannot issue itself a lease, and the server will not sign
+//! arguments outside the constraints. Injection may persuade the model to ask;
+//! a request is all it can achieve.
 //!
-//! # Три документа и три разных доверия
+//! # Three documents and three different trust relationships
 //!
-//! * [`crate::action::ActionGrant`] подписан ключом АВТОРА — тем же, что заголовок контейнера
-//!   и грант агента. Раскладка `подпись(64) ‖ тело`, проверка `verify_strict` по
-//!   сырым байтам ДО разбора (И-5, И-6).
-//! * [`crate::action::ActionRequest`] НЕ ПОДПИСАН вовсе, как [`crate::access::AskAccess`]: ключ
-//!   двери согласовательный, подписывать им нечем. Имя просителя не берётся из
-//!   документа — сервер сверяет `door_fpr` с отпечатком, доказанным в
-//!   рукопожатии, константным временем.
-//! * [`crate::action::ActionLease`] подписана СЕРВЕРОМ, ключом подписи лизингов
-//!   (`authority.lease_verify_key` из заголовка, закреплённый подписью автора).
-//!   Метка своя ([`oc_crypto::label::ACTION_LEASE`]): ключ один и тот же, и без
-//!   разных доменов разрешение открыть файл годилось бы разрешением толкнуть
-//!   ветку.
+//! * [`crate::action::ActionGrant`] is signed by the AUTHOR key, the same key as the container header
+//!   and agent grant. Layout `signature(64) ‖ body`, `verify_strict` verification over
+//!   raw bytes BEFORE parsing (I-5, I-6).
+//! * [`crate::action::ActionRequest`] is ENTIRELY UNSIGNED, like [`crate::access::AskAccess`]: the door
+//!   has a key-agreement key, which cannot sign. Requester identity is not trusted from
+//!   the document: the server compares `door_fpr` with the fingerprint proved in
+//!   the handshake, in constant time.
+//! * [`crate::action::ActionLease`] is signed by the SERVER with its lease-signing key
+//!   (`authority.lease_verify_key` from the header, pinned by the author's signature).
+//!   It has its own label ([`oc_crypto::label::ACTION_LEASE`]): the key is shared, so without
+//!   separate domains permission to open a file could serve as permission to push
+//!   a branch.
 //!
-//! # Почему `force` невыразим, а не запрещён
+//! # Why `force` is unrepresentable rather than forbidden
 //!
-//! У [`crate::action::Args::GitPush`] нет поля под него — ни обязательного, ни необязательного.
-//! Запрет, записанный правилом, требует места, где правило исполняется, и такого
-//! места у нас два (дверь и сервер): один путь чинят, соседний забывают.
-//! Отсутствие поля исполняется разборщиком: аргумент с лишним критичным тегом
-//! отвергается на разборе, а необязательный тег до исполнителя не доходит — он
-//! читает структуру, а не байты.
+//! [`crate::action::Args::GitPush`] has no field for it, required or optional.
+//! A prohibition written as a rule needs an enforcement point, and we have
+//! two (door and server): one path gets fixed, its neighbor forgotten.
+//! An absent field is enforced by parsing: an argument with an extra critical tag
+//! is rejected during parsing; an optional tag never reaches the executor, which
+//! reads the structure rather than the bytes.
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
 
-/// Длина подписи впереди документа — как у гранта агента и у лизинга.
+/// Signature length before the document, as for agent grants and leases.
 pub const SIGNATURE_LEN: usize = 64;
 
-/// Сколько живёт лиза действия, в секундах.
+/// Action lease lifetime, in seconds.
 ///
-/// Тридцать: столько, чтобы дверь успела исполнить одно действие, и не столько,
-/// чтобы лиза пережила отзыв гранта сколько-нибудь заметно. Кеша лиз действий
-/// нет вовсе — они одноразовые, и переживать им нечего.
+/// Thirty: enough for the door to execute one action, but not enough
+/// for a lease to meaningfully outlive grant revocation. Action leases are never cached:
+/// they are single-use, with nothing to survive.
 pub const ACTION_LEASE_SECONDS: i64 = 30;
 
-/// Сколько правил помещается в один грант действий.
+/// Maximum rules in one action grant.
 ///
-/// Предел нужен по той же причине, что [`crate::agent::MAX_GRANT_FILES`]: длину
-/// списка называет чужая сторона. Тридцать два — набор, который человек ещё в
-/// состоянии охватить одним решением; дверь, которой нужно больше, получает
-/// второй грант, и это честнее одного, о составе которого автор уже не судит.
+/// The limit has the same rationale as [`crate::agent::MAX_GRANT_FILES`]: a foreign party supplies
+/// list length. Thirty-two is a set a person can still
+/// comprehend in one decision; a door needing more receives
+/// a second grant, more honestly than one whose contents the author cannot assess.
 pub const MAX_ACTION_RULES: usize = 32;
 
-/// Наибольшая длина короткого имени: `remote`, `branch`, `host`, `secret_ref`.
+/// Maximum short-name length: `remote`, `branch`, `host`, `secret_ref`.
 pub const MAX_ACTION_NAME: usize = 128;
 
-/// Наибольшая длина пути и префикса пути.
+/// Maximum path and path-prefix length.
 pub const MAX_ACTION_PATH: usize = 512;
 
-/// Наибольшее тело HTTP-запроса — 1 МиБ (спека этапа 2, §3).
+/// Maximum HTTP request body: 1 MiB (stage 2 specification, §3).
 ///
-/// Величина проверяется на РАЗБОРЕ и ещё раз в [`crate::action::args_within`]: первое закрывает
-/// документ, второе — исполнение. Поток наружу этап 2 не делает вовсе, и тело
-/// больше мегабайта означало бы, что дверь копит его в памяти.
+/// Checked DURING PARSING and again in [`crate::action::args_within`]: the former protects
+/// the document, the latter execution. Stage 2 does no outbound streaming; a body
+/// larger than a megabyte would require the door to accumulate it in memory.
 pub const MAX_BODY_LEN: u32 = 1024 * 1024;
 
-/// Реестр видов действий. Номера нормативны: они попадают в подписанное тело.
+/// Action kind registry. Numbers are normative: they enter the signed body.
 ///
-/// Расширять, не переименовывать, сожжённые не переиспользовать (CLAUDE.md,
-/// «Как менять формат», правило 3). Незнакомый номер отвергается НА РАЗБОРЕ, а
-/// не на первой попытке исполнить: вид, которого дверь не умеет, — это правило,
-/// которое никогда не сработает, и узнать об этом лучше здесь (правило 4).
+/// Extend, never rename or reuse retired numbers (CLAUDE.md,
+/// "How to change the format", rule 3). Unknown numbers are rejected DURING PARSING,
+/// not on first execution: a kind the door cannot execute is a rule
+/// that will never work, best discovered here (rule 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ActionKind {
-    /// `git push <remote> HEAD:<branch>` из контейнера двери.
+    /// `git push <remote> HEAD:<branch>` from the door container.
     GitPush = 1,
-    /// Удаление файла внутри дерева.
+    /// Delete a file within the tree.
     TreeRemove = 2,
-    /// Переименование внутри дерева.
+    /// Rename within the tree.
     TreeRename = 3,
-    /// Запрос `https` наружу.
+    /// An outbound `https` request.
     HttpRequest = 4,
 }
 
 impl ActionKind {
-    /// Номер вида на проводе.
+    /// Kind number on the wire.
     #[must_use]
     pub const fn as_u16(self) -> u16 {
         self as u16
     }
 
-    /// Вид по номеру с провода.
+    /// Kind from its wire number.
     ///
     /// # Errors
-    /// [`FormatError::BadFieldLength`] с переданным тегом — номер вне реестра.
+    /// [`FormatError::BadFieldLength`] with the supplied tag: number outside the registry.
     pub const fn from_u16(value: u16, tag: u16) -> Result<Self, FormatError> {
         match value {
             1 => Ok(Self::GitPush),
@@ -116,12 +116,12 @@ impl ActionKind {
     }
 }
 
-/// Метод HTTP. Реестр, а не строка, и это не экономия байтов.
+/// HTTP method. A registry rather than a string, not to save bytes.
 ///
-/// Строка на проводе означала бы, что множество методов бесконечно, а
-/// «`method ∈ methods`» — сравнение текста, выбранного чужой стороной. С
-/// реестром незнакомый метод отвергается на разборе, и метода, которого нет в
-/// этом списке, дверь не исполнит никогда.
+/// A wire string would make the method set infinite, and
+/// "`method ∈ methods`" would compare text chosen by a foreign party. With
+/// a registry, an unknown method is rejected during parsing, and the door never executes
+/// a method absent from this list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Method {
     Get = 1,
@@ -133,16 +133,16 @@ pub enum Method {
 }
 
 impl Method {
-    /// Номер метода на проводе.
+    /// Method number on the wire.
     #[must_use]
     pub const fn as_u8(self) -> u8 {
         self as u8
     }
 
-    /// Метод по номеру с провода.
+    /// Method from its wire number.
     ///
     /// # Errors
-    /// [`FormatError::BadFieldLength`] с переданным тегом — номер вне реестра.
+    /// [`FormatError::BadFieldLength`] with the supplied tag: number outside the registry.
     pub const fn from_u8(value: u8, tag: u16) -> Result<Self, FormatError> {
         match value {
             1 => Ok(Self::Get),
@@ -156,12 +156,12 @@ impl Method {
     }
 }
 
-/// Ограничитель: что именно дверь вправе просить у сервера по этому виду.
+/// Constraint: exactly what the door may request from the server for this kind.
 ///
-/// Вариант несёт вид: поле `kind` у [`ActionRule`] от него ПРОИЗВОДНО и сверяется
-/// на записи и на чтении. Держать номер отдельно всё же нужно — он идёт на
-/// провод первым и по нему разборщик выбирает, какие теги ждать; без него
-/// разбор ограничителя был бы угадыванием по составу полей.
+/// The variant carries the kind: `kind` in [`ActionRule`] is DERIVED from it and checked
+/// on writing and reading. A separate number is still needed: it goes onto
+/// the wire first and tells the parser which tags to expect; otherwise
+/// constraint parsing would guess from the field set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Constraint {
     GitPush {
@@ -177,18 +177,18 @@ pub enum Constraint {
     },
     HttpRequest {
         host: String,
-        /// Строго по возрастанию, без повторов: из возрастания бесплатно
-        /// следует, что один набор методов — одна последовательность байтов.
+        /// Strictly ascending, without duplicates: ordering automatically gives
+        /// one byte sequence per method set.
         methods: Vec<Method>,
         path_prefix: String,
-        /// Имя ссылки на секрет в окружении ДВЕРИ. Агент называет ссылку, а не
-        /// значение; значения он не видит никогда.
+        /// Name of a secret reference in the DOOR's environment. The agent names a reference,
+        /// not a value; it never sees the value.
         secret_ref: Option<String>,
     },
 }
 
 impl Constraint {
-    /// Вид, которому принадлежит ограничитель.
+    /// The kind to which this constraint belongs.
     #[must_use]
     pub const fn kind(&self) -> ActionKind {
         match self {
@@ -200,28 +200,28 @@ impl Constraint {
     }
 }
 
-/// Одно правило гранта: вид, ограничитель, предел числа исполнений и два флага.
+/// One grant rule: kind, constraint, execution-count limit and two flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionRule {
     pub kind: ActionKind,
     pub constraint: Constraint,
-    /// Сколько раз действие можно исполнить. `0` — без предела.
+    /// Allowed executions. `0` means unlimited.
     ///
-    /// Счёт ведёт сервер и ПО ЦЕПОЧКЕ: исполнение потомка списывается и с
-    /// предка, иначе делегирование умножало бы предел.
+    /// The server counts ALONG THE CHAIN: a descendant execution also consumes an
+    /// ancestor's allowance; otherwise delegation would multiply the limit.
     pub max_uses: u32,
-    /// Требуется живое «да» владельца на КАЖДОЕ исполнение.
+    /// A live owner "yes" is required for EVERY execution.
     pub confirm: bool,
-    /// Можно ли передать это правило потомку. Умолчание — `false`.
+    /// Whether this rule can be delegated to a descendant. Defaults to `false`.
     pub delegable: bool,
 }
 
-/// Грант действий — подписан автором, привязан к файловому гранту.
+/// An author-signed action grant, bound to a file grant.
 ///
-/// Якорь здесь `grant_id`, а не файл: у действия нет контейнера с заголовком, из
-/// которого берётся `author_key`. Ключ проверки — тот, что сервер записал при
-/// регистрации файлового гранта; держатель, потолок срока и погашение — оттуда
-/// же. Цепочка одна, второй сущности отзыва не появляется.
+/// The anchor is `grant_id`, not a file: an action has no container header from
+/// which to obtain `author_key`. Verification uses the key recorded by the server when
+/// registering the file grant; holder, lifetime ceiling and revocation also come
+/// from there. There is one chain, with no second revocation entity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionGrant {
     pub grant_id: [u8; 16],
@@ -232,10 +232,10 @@ pub struct ActionGrant {
     pub signature: [u8; SIGNATURE_LEN],
 }
 
-/// Аргументы одного исполнения.
+/// Arguments for one execution.
 ///
-/// Поля ровно те, что ограничитель умеет проверить, и ни одного сверх. `force`
-/// здесь нет — см. докстроку модуля.
+/// Exactly the fields the constraint can check, no more. There is no `force`
+/// field; see the module documentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Args {
     GitPush {
@@ -250,23 +250,23 @@ pub enum Args {
         to: String,
     },
     HttpRequest {
-        /// Есть и здесь, хотя план его не выписал: лиза обязана нести аргументы
-        /// ДОСЛОВНО (спека §4.3), а дверь исполняет то, что в лизе. Возьми она
-        /// хост из гранта, а остальное из лизы — исполняемый адрес собирался бы
-        /// из двух документов, и «аргументы лизы равны запрошенным» перестало бы
-        /// значить «адрес тот же».
+        /// Included here even though the plan omitted it: the lease must carry arguments
+        /// VERBATIM (specification §4.3), and the door executes what is in the lease. Taking the
+        /// host from the grant and everything else from the lease would assemble the executed address
+        /// from two documents, so "lease arguments equal requested arguments" would no longer
+        /// mean "the same address".
         host: String,
         method: Method,
         path: String,
-        /// Хеш тела. Само тело на сервер не уходит: серверу незачем видеть, что
-        /// дверь посылает наружу, а привязать лизу к телу хешем достаточно.
+        /// Body hash. The body itself is not sent to the server: it need not see what
+        /// the door sends outward; a hash suffices to bind the lease to the body.
         body_digest: [u8; 32],
         body_len: u32,
     },
 }
 
 impl Args {
-    /// Вид, к которому относятся аргументы.
+    /// The kind to which these arguments belong.
     #[must_use]
     pub const fn kind(&self) -> ActionKind {
         match self {
@@ -278,28 +278,28 @@ impl Args {
     }
 }
 
-/// Просьба двери об исполнении. НЕ ПОДПИСАНА — см. докстроку модуля.
+/// The door's execution request. UNSIGNED; see the module documentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionRequest {
     pub grant_id: [u8; 16],
-    /// Имя просителя. Сервер сверяет его с доказанным в рукопожатии отпечатком
-    /// константным временем; из документа оно НЕ принимается на веру.
+    /// Requester identity. The server compares it with the fingerprint proved during the handshake
+    /// in constant time; the document's claim is NOT trusted.
     pub door_fpr: [u8; 32],
     pub kind: ActionKind,
     pub args: Args,
-    /// Случайное значение двери: им сервер отличает повтор от нового исполнения.
+    /// Door-generated random value: distinguishes a replay from a new execution for the server.
     pub nonce: [u8; 16],
-    /// Записка — правило то же, что у просьбы о доступе.
+    /// Note, under the same rule as an access request.
     pub note: String,
 }
 
-/// Лиза действия — подписана сервером ключом подписи лизингов.
+/// Action lease, signed by the server with the lease-signing key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionLease {
     pub grant_id: [u8; 16],
     pub door_fpr: [u8; 32],
     pub kind: ActionKind,
-    /// Аргументы ДОСЛОВНО: дверь исполняет то, что в лизе, а не то, что просила.
+    /// Arguments VERBATIM: the door executes what is in the lease, not what it requested.
     pub args: Args,
     pub nonce: [u8; 16],
     pub issued_at: i64,
@@ -308,71 +308,71 @@ pub struct ActionLease {
     pub signature: [u8; SIGNATURE_LEN],
 }
 
-/// Реестр тегов гранта действий. Возрастание строгое, критичность по диапазону.
+/// Action grant tag registry. Strictly ascending; criticality by range.
 pub mod grant_tag {
-    /// Файловый грант, к которому привязан. `bytes[16]`.
+    /// The file grant to which it is bound. `bytes[16]`.
     pub const GRANT_ID: u16 = 1;
-    /// Список правил: вложенный TLV с нумерацией позицией.
+    /// Rule list: nested TLV numbered by position.
     pub const RULES: u16 = 2;
-    /// Момент выдачи. `i64le`, секунды.
+    /// Issuance time. `i64le`, seconds.
     pub const ISSUED_AT: u16 = 3;
-    /// Момент истечения. `i64le`, секунды.
+    /// Expiration time. `i64le`, seconds.
     pub const EXPIRES_AT: u16 = 4;
-    /// Ключ автора, которым грант подписан. `bytes[32]`.
+    /// Author key signing the grant. `bytes[32]`.
     pub const AUTHOR_KEY: u16 = 5;
 }
 
-/// Теги ОДНОГО правила внутри списка.
+/// Tags for ONE rule in the list.
 pub mod rule_tag {
-    /// Вид действия. `u16le`.
+    /// Action kind. `u16le`.
     pub const KIND: u16 = 1;
-    /// Ограничитель: вложенный TLV, состав тегов зависит от вида.
+    /// Constraint: nested TLV, tag set depends on kind.
     pub const CONSTRAINT: u16 = 2;
-    /// Предел числа исполнений, `u32le`; `0` — без предела.
+    /// Execution-count limit, `u32le`; `0` means unlimited.
     pub const MAX_USES: u16 = 3;
-    /// Требуется ли одобрение владельца на каждое исполнение. `u8`, 0 или 1.
+    /// Whether owner approval is required for every execution. `u8`, 0 or 1.
     pub const CONFIRM: u16 = 4;
-    /// Можно ли делегировать. `u8`, 0 или 1.
+    /// Whether delegation is allowed. `u8`, 0 or 1.
     pub const DELEGABLE: u16 = 5;
 }
 
-/// Теги ограничителей И аргументов — реестр ОДИН на оба.
+/// Constraint AND argument tags: ONE registry for both.
 ///
-/// Один, а не два, намеренно: спека требует, чтобы аргументы шли «теми же
-/// тегами, что ограничители» (§4.2). Два реестра с одинаковым смыслом и разными
-/// номерами — это приглашение проверить `remote` из одного против `branch` из
-/// другого, и ошибка эта не поймалась бы ничем, кроме глаз.
+/// Deliberately one rather than two: the specification requires arguments to use "the same
+/// tags as constraints" (§4.2). Two registries with identical meanings but different
+/// numbers invite comparing `remote` from one with `branch` from
+/// the other, an error only visual inspection would catch.
 ///
-/// Виды пользуются НЕПЕРЕСЕКАЮЩИМИСЯ подмножествами, и каждое возрастает: то,
-/// что не ждёт разборщик этого вида, отвергается как незнакомый критичный тег.
+/// Kinds use DISJOINT subsets, each ascending: anything unexpected by
+/// that kind's parser is rejected as an unknown critical tag.
 pub mod field_tag {
-    /// `git.push`: имя remote. Текст.
+    /// `git.push`: remote name. Text.
     pub const REMOTE: u16 = 1;
-    /// `git.push`: имя ветки. Текст.
+    /// `git.push`: branch name. Text.
     pub const BRANCH: u16 = 2;
-    /// `tree.remove`: префикс (в ограничителе) или путь (в аргументах).
+    /// `tree.remove`: prefix (constraint) or path (arguments).
     pub const PATH: u16 = 3;
-    /// `tree.rename`: откуда.
+    /// `tree.rename`: source.
     pub const FROM: u16 = 4;
-    /// `tree.rename`: куда.
+    /// `tree.rename`: destination.
     pub const TO: u16 = 5;
-    /// `http.request`: хост, точно, без масок.
+    /// `http.request`: exact host, no wildcards.
     pub const HOST: u16 = 6;
-    /// `http.request`: методы — по байту на метод, строго по возрастанию. В
-    /// аргументах список длины один: метод у исполнения ровно один.
+    /// `http.request`: methods, one byte each, strictly ascending. In
+    /// arguments the list has length one: an execution has exactly one method.
     pub const METHODS: u16 = 7;
-    /// `http.request`: префикс пути (в ограничителе) или путь (в аргументах).
+    /// `http.request`: path prefix (constraint) or path (arguments).
     pub const PATH_PREFIX: u16 = 8;
-    /// `http.request`: имя ссылки на секрет в окружении двери. Только в
-    /// ограничителе; в аргументах его нет — секрет выбирает грант, не агент.
+    /// `http.request`: secret reference name in the door environment. Constraint
+    /// only, absent from arguments: the grant selects the secret, not the agent.
     pub const SECRET_REF: u16 = 9;
-    /// `http.request`: хеш тела. Только в аргументах. `bytes[32]`.
+    /// `http.request`: body hash. Arguments only. `bytes[32]`.
     pub const BODY_DIGEST: u16 = 10;
-    /// `http.request`: длина тела. Только в аргументах. `u32le`.
+    /// `http.request`: body length. Arguments only. `u32le`.
     pub const BODY_LEN: u16 = 11;
 }
 
-/// Реестр тегов просьбы.
+/// Request tag registry.
 pub mod request_tag {
     pub const GRANT_ID: u16 = 1;
     pub const DOOR_FPR: u16 = 2;
@@ -382,7 +382,7 @@ pub mod request_tag {
     pub const NOTE: u16 = 6;
 }
 
-/// Реестр тегов лизы.
+/// Lease tag registry.
 pub mod lease_tag {
     pub const GRANT_ID: u16 = 1;
     pub const DOOR_FPR: u16 = 2;
@@ -398,38 +398,38 @@ pub mod lease_tag {
 // Отказ проверок аргументов и сужения.
 // ----------------------------------------------------------------------------
 
-/// Почему аргументы не приняты или сужение не состоялось.
+/// Why arguments were rejected or narrowing failed.
 ///
-/// Свой род ошибки, а не вариант [`FormatError`], и довод тот же, что у
-/// [`crate::agent::ChainRefusal`]: «аргумент вне ограничителя» — событие
-/// ОТНОШЕНИЯ между двумя документами, а не поля TLV, и номера тега у него нет.
+/// A separate error type rather than a [`FormatError`] variant, for the same reason as
+/// [`crate::agent::ChainRefusal`]: "argument outside constraint" concerns the
+/// RELATIONSHIP between two documents, not a TLV field, and has no tag number.
 ///
-/// Ограничитель назван ПОИМЁННО: спека требует отказывать «с названием
-/// ограничителя» (§7), а «аргументы вне гранта» без имени не говорит человеку
-/// ничего и не даёт агенту исправить просьбу.
+/// The constraint is identified BY NAME: the specification requires rejection "naming the
+/// constraint" (§7). "Arguments outside grant" without a name tells a person
+/// nothing and prevents the agent from correcting its request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionRefusal {
-    /// Аргументы не того вида, что правило.
+    /// Arguments have a different kind from the rule.
     WrongKind,
-    /// Значение обязано совпадать с названным в гранте, и не совпало.
+    /// The value must match the grant's specified value, but did not.
     NotEqual { limiter: &'static str },
-    /// Путь не лежит под префиксом гранта — сравнение ПО КОМПОНЕНТАМ.
+    /// The path is outside the grant prefix: comparison BY COMPONENTS.
     OutsidePrefix { limiter: &'static str },
-    /// Путь не той формы: `..`, абсолютный, пустой компонент, чужой символ.
+    /// Malformed path: `..`, absolute path, empty component or disallowed character.
     BadPath { limiter: &'static str },
-    /// Метода нет в списке разрешённых.
+    /// The method is absent from the allowed list.
     MethodNotAllowed,
-    /// Тело длиннее [`MAX_BODY_LEN`].
+    /// The body exceeds [`MAX_BODY_LEN`].
     BodyTooLarge { len: u32 },
-    /// Правило требует одобрения владельца и потому не делегируется.
+    /// The rule requires owner approval and therefore cannot be delegated.
     ConfirmNotDelegable,
-    /// Правило не помечено `delegable`.
+    /// The rule is not marked `delegable`.
     NotDelegable,
-    /// Потомку выписано больше исполнений, чем есть у родителя.
+    /// The child is given more executions than the parent has.
     MoreUses,
-    /// Ограничитель потомка ШИРЕ родительского.
+    /// The child's constraint is BROADER than the parent's.
     WiderLimiter { limiter: &'static str },
-    /// Потомок назвал другую ссылку на секрет или добавил её там, где её нет.
+    /// The child names another secret reference, or adds one where none exists.
     SecretRefChanged,
 }
 
@@ -475,14 +475,14 @@ impl core::fmt::Display for ActionRefusal {
 // Проверка аргументов против ограничителя и сужения при делегировании.
 // ----------------------------------------------------------------------------
 
-/// Аргументы лежат в ограничителях правила?
+/// Do the arguments satisfy the rule's constraints?
 ///
-/// Чистая: ни часов, ни состояния. Зовётся ДВАЖДЫ — дверью до сети (чтобы отказ
-/// пришёл словами и не стоил разговора) и сервером перед выдачей лизы (потому
-/// что дверь — чужая сторона, и её проверка сервера не касается).
+/// Pure: no clock or state. Called TWICE, by the door before networking (for a verbal rejection
+/// without a conversation), and by the server before issuing a lease (because
+/// the door is a foreign party and its check is no assurance to the server).
 ///
 /// # Errors
-/// [`ActionRefusal`] с именем ограничителя, на котором проверка разошлась.
+/// [`ActionRefusal`] naming the constraint at which verification failed.
 pub fn args_within(rule: &ActionRule, args: &Args) -> Result<(), ActionRefusal> {
     // Вид сверяется ПЕРВЫМ: без этого дальнейший `match` выбирал бы ветвь по
     // аргументам, а ограничитель брал бы из правила другого вида.
@@ -548,10 +548,10 @@ pub fn args_within(rule: &ActionRule, args: &Args) -> Result<(), ActionRefusal> 
     }
 }
 
-/// Путь внутри дерева: сначала форма, потом префикс.
+/// A path within the tree: shape first, then prefix.
 ///
-/// Порядок именно такой: `"src/../../etc"` формально начинается с компонента
-/// `src`, то есть проверку префикса прошёл бы. Форма обязана идти первой.
+/// Precisely this order: `"src/../../etc"` technically begins with component
+/// `src`, so it would pass the prefix check. Shape must come first.
 fn under_tree_prefix(
     prefix: &str,
     path: &str,
@@ -569,10 +569,10 @@ fn under_tree_prefix(
     }
 }
 
-/// Правило потомка не шире родительского?
+/// Is the child rule no broader than the parent rule?
 ///
 /// # Errors
-/// [`ActionRefusal`] с именем ограничителя, на котором потомок расширил родителя.
+/// [`ActionRefusal`] naming the constraint where the child broadened the parent.
 pub fn narrower(child: &ActionRule, parent: &ActionRule) -> Result<(), ActionRefusal> {
     if child.kind != parent.kind {
         return Err(ActionRefusal::WrongKind);
@@ -651,11 +651,11 @@ pub fn narrower(child: &ActionRule, parent: &ActionRule) -> Result<(), ActionRef
     }
 }
 
-/// Предел потомка не шире родительского, где `0` означает «без предела».
+/// The child limit is no broader than the parent's, where `0` means unlimited.
 ///
-/// Число `0` МЕНЬШЕ любого предела как число и БОЛЬШЕ любого как смысл. Ровно
-/// здесь и жила бы дыра, если сравнивать их напрямую: потомок с `max_uses = 0`
-/// получил бы бесконечность от родителя, у которого её нет.
+/// Numerically `0` is LESS than any limit; semantically it is GREATER. Direct
+/// comparison would create a hole exactly here: a child with `max_uses = 0`
+/// would obtain infinity from a parent that does not have it.
 const fn uses_within(child: u32, parent: u32) -> bool {
     if parent == 0 {
         return true;
@@ -663,7 +663,7 @@ const fn uses_within(child: u32, parent: u32) -> bool {
     child != 0 && child <= parent
 }
 
-/// Префикс потомка лежит под родительским — по компонентам.
+/// The child prefix lies under the parent prefix, by components.
 fn narrower_prefix(
     parent: &str,
     child: &str,
@@ -680,18 +680,18 @@ fn narrower_prefix(
 // Форма текстовых полей.
 // ----------------------------------------------------------------------------
 
-/// Символы, из которых состоит имя remote: буквы, цифры, `-`, `_`, `.`.
+/// Remote name characters: letters, digits, `-`, `_`, `.`.
 fn name_char_ok(c: u8) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.')
 }
 
-/// Короткое имя с проводной формой: `remote`, и по тем же правилам — часть
-/// прочих.
+/// A short name with a wire representation: `remote`, and some other fields under
+/// the same rules.
 ///
-/// Отказ — [`FormatError::BadAddressByte`], а не [`FormatError::BadNoteChar`], и
-/// это выбор, а не случайность: записка — фраза на любом языке, и запрещены в
-/// ней только опасные категории, а здесь поле имеет ПРОВОДНУЮ ФОРМУ и обязано
-/// быть печатным ASCII. Ровно так спека и описывает разницу двух отказов.
+/// Rejection is [`FormatError::BadAddressByte`], not [`FormatError::BadNoteChar`],
+/// by choice: a note is a phrase in any language, excluding only dangerous
+/// categories; this field has a WIRE REPRESENTATION and must
+/// be printable ASCII. The specification describes this precise distinction.
 fn check_name(text: &str, tag: u16) -> Result<(), FormatError> {
     if text.is_empty() || text.len() > MAX_ACTION_NAME {
         return Err(FormatError::BadFieldLength { tag, len: text.len() });
@@ -709,10 +709,10 @@ fn check_name(text: &str, tag: u16) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Имя хоста: строчные буквы, цифры, `-`, точки между метками.
+/// Hostname: lowercase letters, digits, `-`, dots between labels.
 ///
-/// Маска здесь невыразима по построению: `*` не входит в набор, поэтому
-/// «поддомены» не запрещены правилом, а просто не записываются.
+/// Wildcards are unrepresentable by construction: `*` is excluded, so
+/// "subdomains" are not forbidden by a rule; they simply cannot be encoded.
 fn check_host(text: &str, tag: u16) -> Result<(), FormatError> {
     if text.is_empty() || text.len() > MAX_ACTION_NAME {
         return Err(FormatError::BadFieldLength { tag, len: text.len() });
@@ -732,11 +732,11 @@ fn check_host(text: &str, tag: u16) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Имя ссылки на секрет: прописные буквы, цифры, `_`.
+/// Secret reference name: uppercase letters, digits, `_`.
 ///
-/// Набор узкий потому, что имя идёт в имя переменной окружения двери
-/// (`CC_DOOR_SECRET_<REF>`): всё, что туда не годится, лучше отвергнуть здесь,
-/// чем узнать на исполнении.
+/// The alphabet is narrow because the name becomes a door environment variable name
+/// (`CC_DOOR_SECRET_<REF>`): anything unsuitable there should be rejected here,
+/// rather than discovered during execution.
 fn check_secret_ref(text: &str, tag: u16) -> Result<(), FormatError> {
     if text.is_empty() || text.len() > MAX_ACTION_NAME {
         return Err(FormatError::BadFieldLength { tag, len: text.len() });
@@ -749,20 +749,20 @@ fn check_secret_ref(text: &str, tag: u16) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Компоненты пути: куски между `/`, пустые отброшены.
+/// Path components: pieces between `/`, dropping empty ones.
 fn components(path: &str) -> impl Iterator<Item = &str> {
     path.split('/').filter(|part| !part.is_empty())
 }
 
-/// Путь внутри дерева: относительный, без `..`, без `.`, без пустых компонентов.
+/// Tree path: relative, no `..`, no `.`, no empty components.
 ///
-/// # Почему набор символов такой узкий
+/// # Why the character set is so narrow
 ///
-/// Потому что путь отсюда попадает в файловую систему, и всё, что в нём
-/// невыразимо, дверь не сделает никогда. Обратного ската нет: путь, который
-/// грант записать не может, — это путь, по которому действие не исполнится.
-/// Запрет обратной косой и двоеточия снимает разом диски Windows, потоки NTFS и
-/// UNC-пути; запрет `..` — выход из дерева.
+/// Because this path reaches the filesystem, and whatever it cannot express
+/// the door can never do. There is no fallback: a path the
+/// grant cannot encode is a path on which no action will execute.
+/// Forbidding backslash and colon removes Windows drives, NTFS streams and
+/// UNC paths at once; forbidding `..` prevents escaping the tree.
 fn check_tree_path(text: &str, tag: u16) -> Result<(), FormatError> {
     if text.is_empty() || text.len() > MAX_ACTION_PATH {
         return Err(FormatError::BadFieldLength { tag, len: text.len() });
@@ -776,12 +776,12 @@ fn check_tree_path(text: &str, tag: u16) -> Result<(), FormatError> {
     check_path_parts(text, tag)
 }
 
-/// Путь HTTP: начинается с `/`, дальше те же правила о компонентах.
+/// HTTP path: begins with `/`, then follows the same component rules.
 ///
-/// Запроса и якоря в нём нет вовсе: `?` и `#` не входят в набор. Разреши мы их —
-/// «путь под префиксом» перестало бы значить «адрес под префиксом»: всё, что
-/// после `?`, к префиксу не относится, а на сервере назначения значит не меньше
-/// самого пути.
+/// No query or fragment: `?` and `#` are excluded. Allowing them would make
+/// "path under prefix" cease to mean "address under prefix": everything
+/// after `?` is outside the prefix but can matter as much as
+/// the path itself to the destination server.
 fn check_http_path(text: &str, tag: u16) -> Result<(), FormatError> {
     if text.is_empty() || text.len() > MAX_ACTION_PATH {
         return Err(FormatError::BadFieldLength { tag, len: text.len() });
@@ -801,7 +801,7 @@ fn check_http_path(text: &str, tag: u16) -> Result<(), FormatError> {
     check_path_parts(rest, tag)
 }
 
-/// Общее правило компонентов: непустые, не `.`, не `..`.
+/// Shared component rule: nonempty, not `.`, not `..`.
 fn check_path_parts(text: &str, tag: u16) -> Result<(), FormatError> {
     for part in text.split('/') {
         if part.is_empty() || part == "." || part == ".." {
@@ -811,15 +811,15 @@ fn check_path_parts(text: &str, tag: u16) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Лежит ли `path` под `prefix` — ПО КОМПОНЕНТАМ, а не по строке.
+/// Whether `path` lies under `prefix`, BY COMPONENTS, not string prefix.
 ///
-/// По строке `"src2/x"` начинался бы с `"src"`, и грант на `src` отдавал бы
-/// соседний каталог. Сравнение компонентами этого не допускает: `src2` не равно
-/// `src` целиком.
+/// As strings, `"src2/x"` starts with `"src"`, so a grant for `src` would expose
+/// the neighboring directory. Component comparison prevents this: the whole component `src2`
+/// is not `src`.
 ///
-/// Равенство считается «под»: грант на `docs/notes.md` разрешает действие ровно
-/// над ним самим, и требовать строгого вложения значило бы запретить
-/// однофайловый грант.
+/// Equality counts as "under": a grant for `docs/notes.md` permits acting exactly
+/// on that file; requiring strict nesting would forbid
+/// a single-file grant.
 fn path_under(prefix: &str, path: &str) -> bool {
     let mut got = components(path);
     for want in components(prefix) {
@@ -872,7 +872,7 @@ fn encode_constraint(limit: &Constraint) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Список методов непуст и строго возрастает.
+/// The method list is nonempty and strictly ascending.
 fn check_methods(methods: &[Method], tag: u16) -> Result<(), FormatError> {
     if methods.is_empty() {
         return Err(FormatError::BadFieldLength { tag, len: 0 });
@@ -1091,7 +1091,7 @@ fn check_args_shape(args: &Args) -> Result<(), FormatError> {
     }
 }
 
-/// Значение поля текстом.
+/// Field value as text.
 fn text(field: &oc_format::tlv::Field<'_>, tag: u16) -> Result<String, FormatError> {
     let value = core::str::from_utf8(field.value).map_err(|_| FormatError::NotUtf8 { tag })?;
     Ok(value.to_string())
@@ -1145,11 +1145,11 @@ fn decode_rule(bytes: &[u8]) -> Result<ActionRule, FormatError> {
     Ok(rule)
 }
 
-/// Признак — РОВНО 0 или 1.
+/// A flag is EXACTLY 0 or 1.
 ///
-/// «Всё, что не ноль, истина» здесь недопустимо: у одного смысла было бы 255
-/// представлений, и два документа с разными байтами значили бы одно. То же
-/// правило, по которому теги идут по возрастанию (И-7).
+/// "Anything nonzero is true" is unacceptable: one meaning would have 255
+/// representations, letting documents with different bytes mean the same thing. This is the same
+/// rule that requires ascending tags (I-7).
 fn flag(value: u8, tag: u16) -> Result<bool, FormatError> {
     match value {
         0 => Ok(false),
@@ -1169,10 +1169,10 @@ pub(crate) fn check_rule_shape(rule: &ActionRule) -> Result<(), FormatError> {
     check_constraint_shape(&rule.constraint)
 }
 
-/// Список правил — вложенный TLV с нумерацией ПОЗИЦИЕЙ.
+/// Rule list: nested TLV numbered by POSITION.
 ///
-/// Тот же приём, каким кодируются слоты заголовка и список файлов гранта агента:
-/// своего счётчика нет, потому что он был бы вторым источником истины о длине.
+/// The same technique as header slots and agent-grant file lists:
+/// no separate counter, because it would be a second source of truth for length.
 pub(crate) fn encode_rules(rules: &[ActionRule]) -> Result<Vec<u8>, FormatError> {
     if rules.len() > MAX_ACTION_RULES {
         return Err(FormatError::BadFieldLength { tag: grant_tag::RULES, len: rules.len() });
@@ -1202,10 +1202,10 @@ pub(crate) fn decode_rules(bytes: &[u8]) -> Result<Vec<ActionRule>, FormatError>
 // Грант действий.
 // ----------------------------------------------------------------------------
 
-/// Байты гранта действий БЕЗ подписи — то, что подписывается и проверяется.
+/// Action grant bytes WITHOUT the signature: what is signed and verified.
 ///
 /// # Errors
-/// [`FormatError`], если грант не той формы, которую примет наш же читатель.
+/// [`FormatError`] if the grant has a shape our own reader would reject.
 pub fn grant_body(grant: &ActionGrant) -> Result<Vec<u8>, FormatError> {
     check_grant_shape(grant)?;
     let mut w = TlvWriter::new();
@@ -1217,7 +1217,7 @@ pub fn grant_body(grant: &ActionGrant) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Транскрипт подписи гранта действий.
+/// Action grant signature transcript.
 #[must_use]
 pub fn grant_transcript(body: &[u8]) -> oc_crypto::Transcript {
     let mut t = oc_crypto::Transcript::new(oc_crypto::label::ACTION_GRANT);
@@ -1225,10 +1225,10 @@ pub fn grant_transcript(body: &[u8]) -> oc_crypto::Transcript {
     t
 }
 
-/// Закодировать грант целиком: `подпись(64) ‖ тело`.
+/// Encode the complete grant: `signature(64) ‖ body`.
 ///
 /// # Errors
-/// [`FormatError`], если тело не собирается — см. [`grant_body`].
+/// [`FormatError`] if the body cannot be built; see [`grant_body`].
 pub fn encode_grant(grant: &ActionGrant) -> Result<Vec<u8>, FormatError> {
     let body = grant_body(grant)?;
     let mut out = Vec::with_capacity(SIGNATURE_LEN.saturating_add(body.len()));
@@ -1237,16 +1237,16 @@ pub fn encode_grant(grant: &ActionGrant) -> Result<Vec<u8>, FormatError> {
     Ok(out)
 }
 
-/// Проверить подпись автора, потом разобрать — в этом порядке, и только в нём.
+/// Verify the author's signature, then parse: in this order only.
 ///
-/// `author_key` передаёт ВЫЗЫВАЮЩИЙ — из записи сервера о файловом гранте, а не
-/// из принесённого документа. Ключ внутри сверяется с переданным константным
-/// временем (И-13): он часть подписанного тела, то есть утверждение «грант
-/// выпущен этим автором», а не источник истины.
+/// The CALLER supplies `author_key` from the server's file-grant record, not
+/// from the submitted document. The embedded key is compared with it in constant
+/// time (I-13): it belongs to the signed body, asserting "grant
+/// issued by this author", not serving as a source of truth.
 ///
 /// # Errors
-/// [`FormatError::BadHeaderSignature`] при коротком документе и при несошедшейся
-/// подписи; иначе — ошибки разбора и проверки формы.
+/// [`FormatError::BadHeaderSignature`] for a short document or failed
+/// signature; otherwise parsing and shape-validation errors.
 pub fn decode_grant(bytes: &[u8], author_key: &[u8; 32]) -> Result<ActionGrant, FormatError> {
     let (signature, body) = split_signature(bytes)?;
     oc_crypto::sign::verify(author_key, &grant_transcript(body), &signature)
@@ -1259,18 +1259,18 @@ pub fn decode_grant(bytes: &[u8], author_key: &[u8; 32]) -> Result<ActionGrant, 
     Ok(grant)
 }
 
-/// Тело гранта действий БЕЗ проверки подписи.
+/// Action grant body WITHOUT signature verification.
 ///
-/// Тот же довод, что у [`crate::agent::peek_grant`]: ключ проверки сервер ищет
-/// ПО СОДЕРЖИМОМУ — по `grant_id`, у записи которого записан ключ автора, — а
-/// прочесть `grant_id`, не разобрав тело, нечем. Исполнять по этому значению
-/// нельзя ничего: подпись не проверена.
+/// The same rationale as [`crate::agent::peek_grant`]: the server looks up the verification key
+/// BY CONTENTS, using `grant_id` whose record stores the author key;
+/// reading `grant_id` requires parsing the body. Nothing may be executed based on this
+/// value: the signature is unverified.
 ///
-/// Форма проверяется полностью: И-9 запрещает выпускать из крейта байты,
-/// которых мы не проверили.
+/// Shape is fully checked: I-9 forbids releasing bytes from the crate
+/// that have not been checked.
 ///
 /// # Errors
-/// [`FormatError`], если байты короче подписи или тело не разбирается.
+/// [`FormatError`] if bytes are shorter than the signature or the body cannot be parsed.
 pub fn peek_grant(bytes: &[u8]) -> Result<ActionGrant, FormatError> {
     let (signature, body) = split_signature(bytes)?;
     let mut grant = decode_grant_body(body)?;
@@ -1323,10 +1323,10 @@ fn check_grant_shape(grant: &ActionGrant) -> Result<(), FormatError> {
 // Просьба.
 // ----------------------------------------------------------------------------
 
-/// Закодировать просьбу. Подписи у неё нет — см. докстроку модуля.
+/// Encode a request. It has no signature; see the module documentation.
 ///
 /// # Errors
-/// [`FormatError`], если аргументы или записка не той формы.
+/// [`FormatError`] if arguments or note have invalid shape.
 pub fn encode_request(ask: &ActionRequest) -> Result<Vec<u8>, FormatError> {
     check_request_shape(ask)?;
     let mut w = TlvWriter::new();
@@ -1339,11 +1339,11 @@ pub fn encode_request(ask: &ActionRequest) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать просьбу.
+/// Parse a request.
 ///
 /// # Errors
-/// [`FormatError`] при нехватке полей, неверных длинах, незнакомом виде или
-/// негодной записке.
+/// [`FormatError`] for missing fields, invalid lengths, unknown kind or
+/// invalid note.
 pub fn decode_request(bytes: &[u8]) -> Result<ActionRequest, FormatError> {
     let mut reader = TlvReader::new(bytes);
     let (mut grant_id, mut door_fpr, mut kind, mut raw_args) = (None, None, None, None);
@@ -1389,10 +1389,10 @@ fn check_request_shape(ask: &ActionRequest) -> Result<(), FormatError> {
 // Лиза.
 // ----------------------------------------------------------------------------
 
-/// Байты лизы БЕЗ подписи — то, что подписывается и проверяется.
+/// Lease bytes WITHOUT the signature: what is signed and verified.
 ///
 /// # Errors
-/// [`FormatError`], если лиза не той формы, которую примет наш же читатель.
+/// [`FormatError`] if the lease has a shape our own reader would reject.
 pub fn lease_body(lease: &ActionLease) -> Result<Vec<u8>, FormatError> {
     check_lease_shape(lease)?;
     let mut w = TlvWriter::new();
@@ -1407,11 +1407,11 @@ pub fn lease_body(lease: &ActionLease) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Транскрипт подписи лизы действия.
+/// Action lease signature transcript.
 ///
-/// Метка своя, а не [`oc_crypto::label::LEASE`]: ключ подписи у сервера один и
-/// тот же, и без разных доменов разрешение ОТКРЫТЬ файл годилось бы разрешением
-/// ИСПОЛНИТЬ действие.
+/// Its own label, not [`oc_crypto::label::LEASE`]: the server uses the same
+/// signing key, so without separate domains permission to OPEN a file could serve as permission
+/// to EXECUTE an action.
 #[must_use]
 pub fn lease_transcript(body: &[u8]) -> oc_crypto::Transcript {
     let mut t = oc_crypto::Transcript::new(oc_crypto::label::ACTION_LEASE);
@@ -1419,10 +1419,10 @@ pub fn lease_transcript(body: &[u8]) -> oc_crypto::Transcript {
     t
 }
 
-/// Закодировать лизу целиком: `подпись(64) ‖ тело`.
+/// Encode the complete lease: `signature(64) ‖ body`.
 ///
 /// # Errors
-/// [`FormatError`], если тело не собирается — см. [`lease_body`].
+/// [`FormatError`] if the body cannot be built; see [`lease_body`].
 pub fn encode_lease(lease: &ActionLease) -> Result<Vec<u8>, FormatError> {
     let body = lease_body(lease)?;
     let mut out = Vec::with_capacity(SIGNATURE_LEN.saturating_add(body.len()));
@@ -1431,15 +1431,15 @@ pub fn encode_lease(lease: &ActionLease) -> Result<Vec<u8>, FormatError> {
     Ok(out)
 }
 
-/// Проверить подпись сервера, потом разобрать — в этом порядке, и только в нём.
+/// Verify the server signature, then parse: in this order only.
 ///
-/// `lease_verify_key` — `authority.lease_verify_key`, закреплённый автором в
-/// заголовке любого файла гранта; для двери без файлов сервер отдаёт его в
-/// ответе `FetchChain`. Из самой лизы ключ не берётся никогда.
+/// `lease_verify_key` is `authority.lease_verify_key`, pinned by the author in the
+/// header of any grant file; for a door without files, the server returns it in
+/// `FetchChain`. The key never comes from the lease itself.
 ///
 /// # Errors
-/// [`FormatError::BadHeaderSignature`] при коротком документе и при несошедшейся
-/// подписи; иначе — ошибки разбора и проверки формы.
+/// [`FormatError::BadHeaderSignature`] for a short document or failed
+/// signature; otherwise parsing and shape-validation errors.
 pub fn decode_lease(
     bytes: &[u8],
     lease_verify_key: &[u8; 32],
@@ -1508,30 +1508,30 @@ fn check_lease_shape(lease: &ActionLease) -> Result<(), FormatError> {
 // Очередь `confirm` и решение владельца.
 // ----------------------------------------------------------------------------
 
-/// Сколько записей очереди `confirm` сервер отдаёт владельцу за раз — ОКНО.
+/// Number of `confirm` queue entries returned to the owner at once: the WINDOW.
 ///
-/// Величина провода: ответ на `ActionRequests` несёт не больше стольких
-/// записей, и клиент больший ответ отвергает — длину называет чужая сторона.
+/// A wire quantity: an `ActionRequests` response carries at most this many
+/// entries; the client rejects larger responses because a foreign party supplies the length.
 ///
-/// Шестнадцать, столько же, сколько у окна просьб о доступе
-/// ([`crate::access::MAX_PENDING_PER_FILE`]), и по той же причине: столько
-/// человек в состоянии просмотреть глазами за один раз. Решённые уходят из
-/// окна, и в него встают следующие по номеру.
+/// Sixteen, matching the access-request window
+/// ([`crate::access::MAX_PENDING_PER_FILE`]), for the same reason: this many
+/// entries can be reviewed visually at once. Resolved entries leave
+/// the window and the next numbered entries enter it.
 pub const MAX_PENDING_ACTION_WINDOW: usize = 16;
 
-/// Наибольшая длина причины отказа на проводе.
+/// Maximum rejection reason length on the wire.
 ///
-/// Длиннее записки ([`crate::access::MAX_NOTE`]) намеренно: записку пишет
-/// человек фразой, а причину отказа составляет программа из названия
-/// ограничителя, имени вида и величин, и урезать её до фразы значило бы терять
-/// ровно то, ради чего отказ и несёт слова.
+/// Deliberately longer than a note ([`crate::access::MAX_NOTE`]): a person writes
+/// a note as a phrase, but software constructs a rejection reason from a constraint
+/// name, kind name and quantities; shortening it to a phrase would lose
+/// precisely why rejections carry words.
 pub const MAX_REFUSAL: usize = 1024;
 
-/// Одна просьба, ждущая живого «да» владельца. Так он её видит.
+/// One request awaiting a live owner "yes", as seen by the owner.
 ///
-/// Поля те же, что у просьбы, плюс номер и время приёма по часам СЕРВЕРА:
-/// время, названное просителем, ничем не подтверждено, а владельцу оно нужно,
-/// чтобы отличить «просят прямо сейчас» от «просили неделю назад».
+/// The same fields as a request, plus its number and acceptance time by the SERVER clock:
+/// the requester's claimed time is unauthenticated, while the owner needs it
+/// to distinguish "requesting now" from "requested a week ago".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingAction {
     pub seq: u64,
@@ -1544,28 +1544,28 @@ pub struct PendingAction {
     pub at: i64,
 }
 
-/// Решение владельца по одной просьбе об исполнении.
+/// Owner decision on one execution request.
 ///
-/// Подписано ключом АВТОРА файлового гранта — тем, что лежит в заголовке файла
-/// и записан сервером при регистрации. Подпись покрывает `seq`, `grant_id` и
-/// `door_fpr` вместе: одобрение, выписанное одной двери, нельзя переадресовать
-/// другой, а одобрение одной просьбы — предъявить за другую.
+/// Signed by the file grant's AUTHOR key, held in the file header
+/// and recorded on registration. The signature jointly covers `seq`, `grant_id` and
+/// `door_fpr`: approval for one door cannot be redirected
+/// to another, nor approval for one request presented for another.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionDecision {
     pub seq: u64,
     pub grant_id: [u8; 16],
-    /// Кому. Дублирует то, что лежит в очереди, и это не избыточность: подпись
-    /// покрывает отпечаток, поэтому одобрение не переадресуется.
+    /// Recipient. Deliberately duplicates queue data: the signature
+    /// covers the fingerprint, preventing redirection of approval.
     pub door_fpr: [u8; 32],
     pub approve: bool,
-    /// Записка владельца. При отказе она и есть причина, которую увидит агент,
-    /// — правило записки то же, что у просьбы.
+    /// Owner note. On denial, this is the reason shown to the agent,
+    /// under the same note rule as requests.
     pub note: String,
     pub author_key: [u8; 32],
     pub signature: [u8; SIGNATURE_LEN],
 }
 
-/// Теги записи очереди `confirm`.
+/// Tags for a `confirm` queue entry.
 pub mod pending_tag {
     pub const SEQ: u16 = 1;
     pub const GRANT_ID: u16 = 2;
@@ -1577,7 +1577,7 @@ pub mod pending_tag {
     pub const AT: u16 = 8;
 }
 
-/// Теги решения владельца.
+/// Owner decision tags.
 pub mod decision_tag {
     pub const GRANT_ID: u16 = 1;
     pub const DOOR_FPR: u16 = 2;
@@ -1587,18 +1587,18 @@ pub mod decision_tag {
     pub const AUTHOR_KEY: u16 = 6;
 }
 
-/// Ключ правила для счёта исполнений: вид и ограничитель БАЙТАМИ.
+/// Rule key for counting executions: kind and constraint BYTES.
 ///
-/// Счёт `max_uses` сервер ведёт по паре «держатель — правило», и «то же
-/// правило» обязано значить «те же байты ограничителя», а не «похоже
-/// выглядит»: два правила `tree.remove` на два поддерева — обычный грант, и
-/// спутав их, сервер списывал бы исполнение не с того предела.
+/// The server counts `max_uses` per "holder, rule" pair; "the same
+/// rule" must mean "identical constraint bytes", not "looks
+/// similar": two `tree.remove` rules for two subtrees are ordinary, and
+/// confusing them would charge execution against the wrong allowance.
 ///
-/// Байты те же, что уходят в подписанное тело гранта, — отдельной сборки здесь
-/// нет намеренно: вторая разошлась бы с первой на ближайшей правке кодека.
+/// These are the same bytes sent in the signed grant body; deliberately no separate
+/// construction, which would diverge at the next codec edit.
 ///
 /// # Errors
-/// [`FormatError`], если ограничитель не той формы, которую примет наш читатель.
+/// [`FormatError`] if the constraint has a shape our reader would reject.
 pub fn limiter_key(rule: &ActionRule) -> Result<Vec<u8>, FormatError> {
     let constraint = encode_constraint(&rule.constraint)?;
     let mut out = Vec::with_capacity(2usize.saturating_add(constraint.len()));
@@ -1607,10 +1607,10 @@ pub fn limiter_key(rule: &ActionRule) -> Result<Vec<u8>, FormatError> {
     Ok(out)
 }
 
-/// Закодировать запись очереди.
+/// Encode a queue entry.
 ///
 /// # Errors
-/// [`FormatError`], если аргументы или записка не той формы.
+/// [`FormatError`] if arguments or note have invalid shape.
 pub fn encode_pending(p: &PendingAction) -> Result<Vec<u8>, FormatError> {
     check_pending_shape(p)?;
     let mut w = TlvWriter::new();
@@ -1625,11 +1625,11 @@ pub fn encode_pending(p: &PendingAction) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать запись очереди.
+/// Parse a queue entry.
 ///
 /// # Errors
-/// [`FormatError`] при нехватке полей, неверных длинах, незнакомом виде или
-/// негодной записке.
+/// [`FormatError`] for missing fields, invalid lengths, unknown kind or
+/// invalid note.
 pub fn decode_pending(bytes: &[u8]) -> Result<PendingAction, FormatError> {
     let mut reader = TlvReader::new(bytes);
     let (mut seq, mut grant_id, mut door_fpr, mut kind) = (None, None, None, None);
@@ -1675,16 +1675,16 @@ fn check_pending_shape(p: &PendingAction) -> Result<(), FormatError> {
     check_args_shape(&p.args)
 }
 
-/// Разобрать очередь: записи подряд, каждая со своей длиной.
+/// Parse a queue: consecutive entries, each with its own length.
 ///
-/// Длина у каждой записи, а не одна на всё тело, потому что записи разной
-/// длины: записка и аргументы переменные. Общего счётчика записей нет
-/// намеренно — он был бы вторым источником истины о том, сколько их, и
-/// разошёлся бы с телом.
+/// Each entry has a length rather than one length for the whole body, because entries vary:
+/// notes and arguments are variable-length. There is deliberately no total entry
+/// counter: it would be a second source of truth for their number
+/// and could diverge from the body.
 ///
 /// # Errors
-/// [`crate::access::QueueError`], если тело оборвано, запись не разбирается или
-/// записей больше окна [`MAX_PENDING_ACTION_WINDOW`].
+/// [`crate::access::QueueError`] for a truncated body, unparseable entry or
+/// more entries than the [`MAX_PENDING_ACTION_WINDOW`] window.
 pub fn split_action_queue(
     mut rest: &[u8],
 ) -> Result<Vec<PendingAction>, crate::access::QueueError> {
@@ -1712,10 +1712,10 @@ pub fn split_action_queue(
     Ok(out)
 }
 
-/// Байты решения БЕЗ подписи — то, что подписывается и проверяется.
+/// Decision bytes WITHOUT the signature: what is signed and verified.
 ///
 /// # Errors
-/// [`FormatError`], если записка не той формы.
+/// [`FormatError`] if the note has invalid shape.
 pub fn decision_body(d: &ActionDecision) -> Result<Vec<u8>, FormatError> {
     crate::access::check_note(&d.note, decision_tag::NOTE)?;
     let mut w = TlvWriter::new();
@@ -1728,11 +1728,11 @@ pub fn decision_body(d: &ActionDecision) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Транскрипт подписи решения владельца.
+/// Owner decision signature transcript.
 ///
-/// Метка своя ([`oc_crypto::label::ACTION_DECISION`]), а не
-/// [`oc_crypto::label::GRANT`], которой подписано решение по просьбе о доступе:
-/// ключ у обоих один, и домены разводит только метка.
+/// Its own label ([`oc_crypto::label::ACTION_DECISION`]), not
+/// [`oc_crypto::label::GRANT`], which signs access-request decisions:
+/// both use the same key, and only the label separates the domains.
 #[must_use]
 pub fn decision_transcript(body: &[u8]) -> oc_crypto::Transcript {
     let mut t = oc_crypto::Transcript::new(oc_crypto::label::ACTION_DECISION);
@@ -1740,15 +1740,15 @@ pub fn decision_transcript(body: &[u8]) -> oc_crypto::Transcript {
     t
 }
 
-/// Закодировать решение целиком: `подпись(64) ‖ тело`.
+/// Encode the complete decision: `signature(64) ‖ body`.
 ///
-/// Раскладка та же, что у гранта и лизы этого модуля, — в отличие от решения о
-/// доступе, где подпись идёт ХВОСТОВЫМ тегом. Разная раскладка у соседей стоила
-/// бы второго правила «где искать подпись», а правило здесь одно: первые
-/// шестьдесят четыре байта.
+/// The same layout as grants and leases in this module, unlike an access
+/// decision where the signature is a TRAILING tag. Different neighboring layouts would
+/// require a second "where to find the signature" rule; here there is one: the first
+/// sixty-four bytes.
 ///
 /// # Errors
-/// [`FormatError`], если тело не собирается.
+/// [`FormatError`] if the body cannot be built.
 pub fn encode_decision(d: &ActionDecision) -> Result<Vec<u8>, FormatError> {
     let body = decision_body(d)?;
     let mut out = Vec::with_capacity(SIGNATURE_LEN.saturating_add(body.len()));
@@ -1757,15 +1757,15 @@ pub fn encode_decision(d: &ActionDecision) -> Result<Vec<u8>, FormatError> {
     Ok(out)
 }
 
-/// Проверить подпись автора, потом разобрать — в этом порядке, и только в нём.
+/// Verify the author's signature, then parse: in this order only.
 ///
-/// `author_key` передаёт ВЫЗЫВАЮЩИЙ — из записи сервера о файловом гранте, а не
-/// из принесённого документа; ключ внутри сверяется с переданным константным
-/// временем (И-13).
+/// The CALLER supplies `author_key` from the server's file-grant record, not
+/// from the submitted document; the embedded key is compared with it in constant
+/// time (I-13).
 ///
 /// # Errors
-/// [`FormatError::BadHeaderSignature`] при коротком документе и при
-/// несошедшейся подписи; иначе — ошибки разбора.
+/// [`FormatError::BadHeaderSignature`] for a short document or a
+/// failed signature; otherwise parsing errors.
 pub fn decode_decision(
     bytes: &[u8],
     author_key: &[u8; 32],
@@ -1781,14 +1781,14 @@ pub fn decode_decision(
     Ok(decision)
 }
 
-/// Тело решения БЕЗ проверки подписи — чтобы найти, чьим ключом его проверять.
+/// Decision body WITHOUT signature verification, to locate its verification key.
 ///
-/// Тот же довод, что у [`peek_grant`]: ключ проверки сервер ищет по `grant_id`,
-/// а прочесть `grant_id`, не разобрав тело, нечем. Исполнять по результату
-/// нельзя ничего.
+/// The same rationale as [`peek_grant`]: the server looks up the verification key by `grant_id`,
+/// but reading `grant_id` requires parsing the body. Nothing may be executed based on
+/// the result.
 ///
 /// # Errors
-/// [`FormatError`], если байты короче подписи или тело не разбирается.
+/// [`FormatError`] if bytes are shorter than the signature or the body cannot be parsed.
 pub fn peek_decision(bytes: &[u8]) -> Result<ActionDecision, FormatError> {
     let (signature, body) = split_signature(bytes)?;
     let mut decision = decode_decision_body(body)?;
@@ -1872,7 +1872,7 @@ mod tests {
         Ed25519Signer::from_seed(&[0x77; 32])
     }
 
-    /// Ключ подписи лиз — им сервер заверяет и лизинги файлов, и лизы действий.
+    /// Lease-signing key: the server uses it for both file and action leases.
     fn server() -> Ed25519Signer {
         Ed25519Signer::from_seed(&[0x5e; 32])
     }
@@ -1992,7 +1992,7 @@ mod tests {
         }
     }
 
-    /// Поля тела — парами «тег, значение», для пересборки руками.
+    /// Body fields as "tag, value" pairs for manual reconstruction.
     fn fields_of(body: &[u8]) -> Vec<(u16, Vec<u8>)> {
         let mut reader = TlvReader::new(body);
         let mut out = Vec::new();
@@ -2055,12 +2055,12 @@ mod tests {
         assert_eq!(decode_lease(&bytes, &server().public_key()).unwrap(), l);
     }
 
-    /// ПОДПИСЬ ГРАНТА ПРОВЕРЯЕТСЯ ДО РАЗБОРА ТЕЛА.
+    /// THE GRANT SIGNATURE IS VERIFIED BEFORE BODY PARSING.
     ///
-    /// Тело здесь заведомо неразбираемо, и проба различает порядок двумя
-    /// прогонами: со своей подписью ответ обязан быть РАЗБОРНЫМ, с чужой —
-    /// ПОДПИСНЫМ. Один прогон этого не показал бы: `is_err()` истинно у обоих
-    /// порядков.
+    /// The body is deliberately unparseable; two runs distinguish
+    /// ordering: the correct signature must yield a PARSING error, a wrong one
+    /// a SIGNATURE error. One run would not show this: `is_err()` is true for both
+    /// orders.
     #[test]
     fn a_broken_grant_body_fails_the_signature_before_parsing() {
         let good = grant_body(&grant()).unwrap();
@@ -2091,7 +2091,7 @@ mod tests {
         }
     }
 
-    /// ТО ЖЕ ДЛЯ ЛИЗЫ: подпись сервера — раньше разбора.
+    /// THE SAME FOR LEASES: server signature before parsing.
     #[test]
     fn a_broken_lease_body_fails_the_signature_before_parsing() {
         let good = lease_body(&lease()).unwrap();
@@ -2124,7 +2124,7 @@ mod tests {
         );
     }
 
-    /// Подпись гранта не годится подписью лизы, и наоборот: домены разные.
+    /// A grant signature cannot serve as a lease signature, or vice versa: distinct domains.
     #[test]
     fn the_two_documents_do_not_share_a_signing_domain() {
         let body = lease_body(&lease()).unwrap();
@@ -2151,7 +2151,7 @@ mod tests {
         ));
     }
 
-    /// Подпись СХОДИТСЯ, а имя автора внутри другое — грант всё равно отвергнут.
+    /// The signature VERIFIES but the embedded author name differs: the grant is still rejected.
     #[test]
     fn the_author_key_inside_must_match_the_one_supplied() {
         let mut g = grant();
@@ -2166,7 +2166,7 @@ mod tests {
         }
     }
 
-    /// ВЗГЛЯД БЕЗ ПОДПИСИ ОТДАЁТ ТО ЖЕ ТЕЛО — И НЕ ЗАМЕНЯЕТ ПРОВЕРКИ.
+    /// PEEKING WITHOUT A SIGNATURE RETURNS THE SAME BODY AND DOES NOT REPLACE VERIFICATION.
     #[test]
     fn peeking_reads_the_same_body_but_never_stands_in_for_the_signature() {
         let g = grant();
@@ -2205,7 +2205,7 @@ mod tests {
         );
     }
 
-    /// НЕЗНАКОМЫЙ ВИД ДЕЙСТВИЯ ОТВЕРГАЕТСЯ НА РАЗБОРЕ.
+    /// AN UNKNOWN ACTION KIND IS REJECTED DURING PARSING.
     #[test]
     fn an_unknown_action_kind_is_refused_on_parse() {
         let bytes = encode_request(&request()).unwrap();
@@ -2219,11 +2219,11 @@ mod tests {
         );
     }
 
-    /// `force` НЕВЫРАЗИМ: лишний критичный тег в аргументах — отказ.
+    /// `force` IS UNREPRESENTABLE: an extra critical tag in arguments is rejected.
     ///
-    /// Проба стережёт не строку кода, а СВОЙСТВО: поля под `--force` нет, и
-    /// дописать его в подписанные аргументы не выйдет — разбор отвергнет тег до
-    /// того, как исполнитель увидит структуру.
+    /// The test guards a PROPERTY, not a line of code: no field exists for `--force`,
+    /// and it cannot be appended to signed arguments; parsing rejects the tag before
+    /// the executor sees the structure.
     #[test]
     fn an_extra_critical_tag_in_the_arguments_is_refused() {
         let ask = request();
@@ -2250,8 +2250,8 @@ mod tests {
         );
     }
 
-    /// Вид и вариант аргументов — два утверждения об одном, и расходиться им
-    /// нельзя.
+    /// Kind and argument variant are two assertions about the same thing and must not
+    /// disagree.
     #[test]
     fn the_kind_must_agree_with_the_arguments() {
         let mut ask = request();
@@ -2329,7 +2329,7 @@ mod tests {
         }
     }
 
-    /// ФОРМА ПУТИ: `..`, абсолютный путь и чужие символы отвергаются.
+    /// PATH SHAPE: `..`, absolute paths and disallowed characters are rejected.
     #[test]
     fn a_path_that_escapes_the_tree_is_refused_by_the_codec() {
         for bad in ["../etc/passwd", "/etc/passwd", "src/../../x", "C:/windows", "src\\x", "src//x", "src/./x", ""]
@@ -2425,17 +2425,17 @@ mod tests {
         );
     }
 
-    /// ПРАВИЛО, ЧЕЙ НОМЕР ВИДА ЛЖЁТ ОБ ОГРАНИЧИТЕЛЕ, НЕ ИСПОЛНЯЕТСЯ.
+    /// A RULE WHOSE KIND NUMBER MISREPRESENTS ITS CONSTRAINT IS NOT EXECUTED.
     ///
-    /// Заведена по итогу мутации: снятие сверки видов в начале [`crate::action::args_within`]
-    /// не покраснило НИ ОДНОЙ пробы — отказ приходил от последней ветви `match`,
-    /// и выглядело это как сторож. Сторожем оно не было: `match` смотрит на
-    /// ВАРИАНТ ограничителя, а не на объявленный номер вида, и правило, где эти
-    /// двое расходятся, исполнялось бы по ограничителю.
+    /// Added after mutation testing: removing the initial kind check in [`crate::action::args_within`]
+    /// failed NOT ONE test; the final `match` branch rejected the input,
+    /// appearing to guard it. It did not: `match` examines the constraint
+    /// VARIANT, not the declared kind number, so a rule where these
+    /// differ would execute according to its constraint.
     ///
-    /// Документ такой формы наш разбор не выпустит (`check_rule_shape`), и
-    /// именно поэтому проба нужна здесь: [`crate::action::args_within`] — функция ЧИСТАЯ, её
-    /// зовут на структуре, собранной в памяти двери, а не только на разобранной.
+    /// Our parser never emits such a document (`check_rule_shape`), which is
+    /// exactly why this test is needed here: [`crate::action::args_within`] is PURE, called
+    /// on structures built in the door's memory, not only parsed structures.
     #[test]
     fn a_rule_whose_kind_contradicts_its_limiter_is_refused() {
         let mut liar = remove_rule();
@@ -2468,11 +2468,11 @@ mod tests {
         );
     }
 
-    /// `src2` НЕ ПОД `src` — сравнение по компонентам, а не по строке.
+    /// `src2` IS NOT UNDER `src`: component comparison, not string comparison.
     ///
-    /// Проба за правилом, ради которого сравнение и написано компонентами: по
-    /// строке `"src2/x"` начинается с `"src"`, и грант на один каталог отдавал
-    /// бы соседний.
+    /// This test guards the reason for comparing components: as a string,
+    /// `"src2/x"` starts with `"src"`, so a grant for one directory would expose
+    /// its neighbor.
     #[test]
     fn a_sibling_directory_is_not_under_the_prefix() {
         assert_eq!(
@@ -2599,7 +2599,7 @@ mod tests {
         assert_eq!(narrower(&rename_rule(), &parent), Err(ActionRefusal::NotDelegable));
     }
 
-    /// `delegable` ТОЛЬКО СНИМАЕТСЯ: поднять его потомок не вправе.
+    /// `delegable` CAN ONLY BE REMOVED: a child cannot enable it.
     #[test]
     fn delegable_can_only_be_dropped() {
         let mut parent = remove_rule();
@@ -2744,7 +2744,7 @@ mod tests {
         );
     }
 
-    /// Ссылку на секрет нельзя ДОБАВИТЬ там, где родитель её не назвал.
+    /// A secret reference cannot be ADDED where the parent named none.
     #[test]
     fn a_child_cannot_invent_a_secret_reference() {
         let mut parent = http_rule();
@@ -2764,10 +2764,10 @@ mod tests {
         assert_eq!(narrower(&child, &parent), Err(ActionRefusal::SecretRefChanged));
     }
 
-    /// У КАЖДОГО ОТКАЗА ЕСТЬ ПРИЧИНА СЛОВАМИ.
+    /// EVERY REJECTION HAS A REASON IN WORDS.
     ///
-    /// Проба против мутации «причина → пустая строка»: отказ без объяснения
-    /// проходит любую проверку вида «отказ случился», и ловится он только так.
+    /// A test against "reason → empty string": an unexplained rejection
+    /// passes every "rejected" check and is caught only this way.
     #[test]
     fn every_refusal_names_a_reason() {
         for refusal in [
@@ -2788,7 +2788,7 @@ mod tests {
         }
     }
 
-    /// Разбор произвольных байтов не паникует: всё это приходит с провода.
+    /// Parsing arbitrary bytes does not panic: all of this arrives from the wire.
     #[test]
     fn decoding_arbitrary_bytes_never_panics() {
         let key = author().public_key();
@@ -2847,11 +2847,11 @@ mod tests {
         }
     }
 
-    /// РЕШЕНИЕ ВЛАДЕЛЬЦА ПРОВЕРЯЕТСЯ ПОДПИСЬЮ ДО РАЗБОРА И ТОЛЬКО ЕГО КЛЮЧОМ.
+    /// OWNER DECISION SIGNATURES ARE CHECKED BEFORE PARSING AND ONLY WITH THE OWNER'S KEY.
     ///
-    /// Три половины: круговой проход; чужой ключ — отказ; правка любого байта
-    /// тела — отказ. Взгляд без подписи при этом тело читает: по нему сервер и
-    /// ищет, чьим ключом проверять.
+    /// Three parts: round trip; wrong key rejected; changing any body byte
+    /// rejected. Peeking without signature verification still reads the body, which is how
+    /// the server finds the verification key.
     #[test]
     fn an_owner_decision_verifies_with_the_author_key_and_nothing_else_passes() {
         let d = decision();
@@ -2874,12 +2874,12 @@ mod tests {
         }
     }
 
-    /// ПОЛЕ `author_key` В РЕШЕНИИ СВЕРЯЕТСЯ С ПЕРЕДАННЫМ КЛЮЧОМ.
+    /// THE DECISION'S `author_key` FIELD IS COMPARED WITH THE SUPPLIED KEY.
     ///
-    /// Оно есть в подписанном теле, и потому это утверждение «решение выпущено
-    /// этим автором», а не источник истины: ключ проверки приходит из записи
-    /// сервера. Подписав тело с чужим ключом внутри СВОИМ ключом, автор получил
-    /// бы документ, который сходится подписью и лжёт полем.
+    /// It is in the signed body, hence asserts "decision issued
+    /// by this author", not a source of truth: the verification key comes from the server
+    /// record. By signing a body containing someone else's key with THEIR OWN key, an author
+    /// could otherwise produce a document whose signature verifies but whose field lies.
     #[test]
     fn the_author_key_inside_the_decision_is_checked_against_the_one_passed_in() {
         let mut d = decision();
@@ -2893,11 +2893,11 @@ mod tests {
         );
     }
 
-    /// ДОМЕНЫ РЕШЕНИЙ РАЗВЕДЕНЫ: ПОДПИСЬ ПО ДОСТУПУ НЕ ГОДИТСЯ ДЛЯ ДЕЙСТВИЯ.
+    /// DECISION DOMAINS ARE SEPARATE: AN ACCESS SIGNATURE CANNOT AUTHORIZE AN ACTION.
     ///
-    /// Ключ у обоих один — автора, — и без разных меток одно подписанное «да»
-    /// годилось бы вместо другого. Проверяется прямо: подпись по транскрипту
-    /// решения о ДОСТУПЕ над тем же телом этим разбором не принимается.
+    /// Both use the author's key; without distinct labels, one signed "yes"
+    /// could substitute for another. Tested directly: a signature over the same body using the
+    /// ACCESS decision transcript is rejected by this parser.
     #[test]
     fn a_decision_signature_from_the_access_domain_does_not_pass_here() {
         let d = decision();
@@ -2911,11 +2911,11 @@ mod tests {
         );
     }
 
-    /// ЗАПИСЬ ОЧЕРЕДИ И САМА ОЧЕРЕДЬ: КРУГОВОЙ ПРОХОД, ОКНО, ОБРЫВ.
+    /// QUEUE ENTRY AND QUEUE: ROUND TRIP, WINDOW, TRUNCATION.
     ///
-    /// Положительный контроль первым: очередь ровно в окно ПРИНИМАЕТСЯ. Без
-    /// него отказ выше окна зеленел бы и на разборщике, который не принимает
-    /// ничего.
+    /// Positive control first: a queue exactly filling the window IS ACCEPTED. Without
+    /// it, rejection beyond the window would pass even for a parser accepting
+    /// nothing.
     #[test]
     fn the_confirm_queue_round_trips_and_refuses_more_than_its_window() {
         let p = pending();
@@ -2942,15 +2942,15 @@ mod tests {
         assert!(split_action_queue(&[]).unwrap().is_empty());
     }
 
-    /// КЛЮЧ ПРАВИЛА РАЗЛИЧАЕТ ДВА ПРАВИЛА ОДНОГО ВИДА.
+    /// THE RULE KEY DISTINGUISHES TWO RULES OF THE SAME KIND.
     ///
-    /// Счёт исполнений сервер ведёт по паре «держатель — правило», и два
-    /// `tree.remove` на два поддерева — обычный грант. Спутай их ключ — и
-    /// исполнение списывалось бы не с того предела.
+    /// The server counts executions per "holder, rule" pair, and two
+    /// `tree.remove` rules for two subtrees are an ordinary grant. Confusing their keys would
+    /// charge execution against the wrong limit.
     ///
-    /// Предел и флаги в ключ НЕ входят намеренно: правило, у которого сменили
-    /// `max_uses`, остаётся тем же правилом, и счёт по нему не должен
-    /// обнуляться.
+    /// The limit and flags are deliberately EXCLUDED from the key: a rule whose
+    /// `max_uses` changed remains the same rule, and its counter must not
+    /// reset.
     #[test]
     fn a_rule_key_tells_two_rules_of_one_kind_apart() {
         let mut a = remove_rule();

@@ -1,89 +1,89 @@
-//! ЭТАЛОН РАСКЛАДКИ АВТОРСКОГО СЛОТА P-256 (`kem_id = 2`) — НА УРОВНЕ ДВИЖКА.
+//! P-256 AUTHOR-SLOT LAYOUT GOLDEN ARTIFACT (`kem_id = 2`), AT ENGINE LEVEL.
 //!
-//! # Зачем заведён
+//! # Why it exists
 //!
-//! Этот слот печатается СЕГОДНЯ и ПО УМОЛЧАНИЮ — на каждой машине, где PCP отдал
-//! ключ устройства (`cc-cli/src/keys.rs`, источник `Auto` и `Hardware`), — и до
-//! сих пор его раскладку не стерегло ничто. Разбор
-//! `docs/review/2026-09-21-p256-slot.md` показал ровно эту дыру: все пробы
-//! клиента идут с `CC_DEVICE_BINDING=software`, то есть ни один тестовый
-//! контейнер этого слота не несёт; заморожены КОНЦЫ (примитив
-//! `tests/kat/seal_p256.kat` и синтетические слоты в пробах таблиц длин) и не
-//! заморожена середина — то, что из них собирает движок.
+//! This slot is written TODAY and BY DEFAULT on every machine where PCP supplies
+//! a device key (`cc-cli/src/keys.rs`, sources `Auto` and `Hardware`), yet
+//! nothing previously guarded its layout. Review
+//! `docs/review/2026-09-21-p256-slot.md` found precisely this gap: all client probes
+//! use `CC_DEVICE_BINDING=software`, so no test container
+//! carries this slot. The ENDS are frozen (the primitive
+//! `tests/kat/seal_p256.kat` and synthetic length-table probe slots),
+//! but the middle, what the engine assembles from them, is not.
 //!
-//! Цена слепоты названа там же и стоит повторения: авторский слот — единственный,
-//! несущий ОБЕ доли разом. Перестань читатель признавать `kem_id = 2` — и автор
-//! получит «ни один ключ не подошёл» на файле, который зашифровал сам, а НИ ОДНА
-//! проба при этом не покраснеет. Красное здесь заводится этим файлом.
+//! The cost of blindness deserves repeating: the author slot is the only one
+//! carrying BOTH shares together. If a reader stopped recognizing `kem_id = 2`, the author
+//! would see "no key matched" for their own encrypted file while NOT ONE
+//! probe failed. This file introduces that failure detection.
 //!
-//! # Почему здесь, а не рядом с контейнерными эталонами
+//! # Why here rather than beside container artifacts
 //!
-//! По той же причине, что у соседа `hardware_hybrid_golden.rs`: контейнерного
-//! эталона через `cc-cli` не бывает, потому что точку P-256 клиент берёт только
-//! из TPM, а у каждого TPM свой ключ — «побайтово тот же контейнер на другой
-//! машине» перестаёт существовать как понятие
-//! (`cc-cli/tests/golden.rs`, `fixed_keys`, поле `device_tpm`).
+//! For the same reason as neighboring `hardware_hybrid_golden.rs`: no container
+//! artifact can be produced through `cc-cli`, which obtains its P-256 point only
+//! from a TPM; every TPM has its own key, making "a byte-identical container on
+//! another machine" cease to be meaningful
+//! (`cc-cli/tests/golden.rs`, `fixed_keys`, field `device_tpm`).
 //!
-//! Движок этого ограничения не имеет и иметь не должен: он чист и принимает
-//! открытую точку ПАРАМЕТРОМ (`PublicKeys::device_tpm`), поэтому ему всё равно,
-//! откуда она пришла — из TPM или из фиксированного скаляра. Ему достаточно 65
-//! байт несжатой точки. Ровно это делает эталон возможным здесь и невозможным
-//! этажом выше.
+//! The engine neither has nor should have this limitation: pure, it accepts
+//! the public point as a PARAMETER (`PublicKeys::device_tpm`), indifferent to
+//! whether it came from a TPM or fixed scalar. It needs only 65
+//! uncompressed-point bytes. This makes an artifact possible here and impossible
+//! one layer above.
 //!
-//! # Что заморожено
+//! # What is frozen
 //!
-//! Байты `Assembled::header` при двух видах получателя, и оба вида выбраны не
-//! ради полноты перебора, а потому, что они СЕГОДНЯШНЕЕ БОЛЬШИНСТВО:
+//! `Assembled::header` bytes for two recipient kinds, chosen not for
+//! exhaustive enumeration but because they are TODAY'S MAJORITY:
 //!
-//! * `p256-author.header` — классический получатель X25519. Это обычный путь:
-//!   при неаппаратном и негибридном получателе и при наличии точки TPM движок
-//!   печатает авторский слот `kem_id = 2` (`oc-engine/src/lib.rs`, ветка
+//! * `p256-author.header`: a classical X25519 recipient. The ordinary path:
+//!   with a nonhardware, nonhybrid recipient and an available TPM point, the engine
+//!   writes an author slot with `kem_id = 2` (`oc-engine/src/lib.rs`, branch
 //!   `(false, _, Some(tpm_public))`).
-//! * `p256-author-none.header` — получателя нет вовсе. Заморожен потому, что
-//!   почти бесплатен и покрывает ДРУГУЮ раскладку: слота получателя в заголовке
-//!   нет, и авторский слот оказывается вторым, а не третьим. Порядок и соседство
-//!   записей — такое же свойство формата, как их содержимое.
+//! * `p256-author-none.header`: no recipient at all. Frozen because it is
+//!   nearly free and covers a DIFFERENT layout: no recipient slot appears in the header,
+//!   putting the author slot second rather than third. Record ordering and adjacency
+//!   are as much format properties as their contents.
 //!
-//! Оба идут по одной ветке движка, и это не дублирование: ветка одна, а
-//! заголовки разные, и разойтись они могут независимо.
+//! Both follow one engine branch, without duplication: the branch is shared,
+//! but the headers differ and can diverge independently.
 //!
-//! # Что НЕ заморожено, и это честно сказать вслух
+//! # What is NOT frozen, stated explicitly
 //!
-//! **Подписи автора здесь нет.** В движке её нет намеренно (И-6): она ставится
-//! ключом автора, покрывает заголовок целиком и приписывается вызывающим
-//! (`cc-cli/src/container.rs`, `write_all(output, &signature)` сразу за
-//! заголовком). Поэтому замороженные байты НЕ являются контейнером и не
-//! проходят `verify::verify_and_parse` — разбирает их `Header::decode`, то есть
-//! тот же разборщик `oc-format`, но без рубежа подписи. Эталон замораживает
-//! раскладку, а не подписанность.
+//! **No author signature here.** The engine deliberately has none (I-6): the author
+//! key signs the entire header and the caller appends the signature
+//! (`cc-cli/src/container.rs`, `write_all(output, &signature)` immediately after
+//! the header). These frozen bytes therefore are NOT a container and do not
+//! pass `verify::verify_and_parse`: `Header::decode` parses them, the same
+//! `oc-format` parser without the signature boundary. The artifact freezes
+//! layout, not signature presence.
 //!
-//! **`Assembled::content_desc` не включён** — по той же причине, что у соседа:
-//! он выводится из `CEK` и `SealedInfo` и при любом виде получателя на том же
-//! семени получается один и тот же, то есть не отличает второй механизм ни от
-//! какого другого.
+//! **`Assembled::content_desc` is excluded**, for the same reason as its neighbor:
+//! it derives from `CEK` and `SealedInfo`, yielding identical bytes for every
+//! recipient kind with the same seed; it cannot distinguish mechanism two from
+//! any other.
 //!
-//! **`Plan::payload_key` не включён.** Он детерминирован, но это КЛЮЧ; секреты в
-//! репозиторий не кладутся ни под каким видом.
+//! **`Plan::payload_key` is excluded.** Deterministic, but a KEY; secrets never
+//! enter the repository in any form.
 //!
-//! **Живого TPM здесь нет.** Скаляр программный, и это сказано прямо: эталон
-//! говорит о РАСКЛАДКЕ слота, а не о том, что ключ действительно неизвлекаем.
-//! Про живой TPM говорят прогоны, записанные в `CLAUDE.md`, а не этот файл.
+//! **No live TPM here.** The scalar is software, explicitly: the artifact
+//! speaks to slot LAYOUT, not actual key non-exportability.
+//! The runs recorded in `CLAUDE.md` address live TPMs; this file does not.
 //!
-//! # Открывается, а не только сверяется
+//! # Opening as well as comparing
 //!
-//! Эталон, который никто не может открыть, замораживает мусор — и замораживает
-//! навсегда. Поэтому рядом со сверкой байтов стоят пробы открытия: авторский
-//! слот открывается ПРОГРАММНОЙ стороной согласования P-256 — тем же
-//! `seal::open_with` и тем же трейтом `KeyAgreement`, каким его откроет
-//! устройство (`cc-cli/src/container.rs`, перебор сторон согласования). В
-//! поставке сторона аппаратная, здесь программная; вывод ключа от этого не
-//! меняется ни на байт, потому что считается по общему секрету, а не по ключу.
+//! An artifact nobody can open freezes garbage, permanently.
+//! Opening probes therefore accompany byte comparison: the author
+//! slot opens using a SOFTWARE P-256 agreement party, through the same
+//! `seal::open_with` and `KeyAgreement` trait the device will use
+//! (`cc-cli/src/container.rs`, agreement-party iteration). The production
+//! party is hardware; here it is software. Key derivation changes by
+//! no bytes, since it depends on the shared secret rather than the key.
 //!
-//! # Когда будет резаться версия 6
+//! # When version 6 is cut
 //!
-//! Свидетеля у этого артефакта, как и у соседнего, НЕТ: он заведён под текущего
-//! писателя и в день нарезки шестой версии потребует того же решения, что и
-//! контейнерные эталоны. Здесь это записано, а не сделано.
+//! Like its neighbor, this artifact has NO witness: created for the current
+//! writer, it will require the same decision as container artifacts when
+//! version six is cut. This is recorded here, not performed.
 
 // Литы отключены только здесь и только те, без которых тест нечитаем:
 // `unwrap`/`expect`/`panic` — потому что провал пробы и есть паника, а
@@ -120,15 +120,15 @@ use oc_format::header::{Header, KeySlot, KnownSlot, P256_PUBLIC_LEN, SlotKind, S
 use oc_format::tlv::TlvReader;
 use oc_policy::{Action, Policy};
 
-/// Детерминированный генератор. Не криптостойкий и не претендует: его работа —
-/// давать одну и ту же последовательность на любой машине.
+/// Deterministic RNG. Not cryptographically strong and makes no such claim: its job is
+/// to emit the same sequence on every machine.
 ///
-/// Устроен дословно как у соседа и у контейнерных эталонов, и это НЕ копипаста
-/// по недосмотру — довод записан в `hardware_hybrid_golden.rs` и здесь он тот
-/// же: эталоны обязаны расходовать генератор ОДИНАКОВО, иначе расхождение байтов
-/// между ними ничего не будет значить. Вынести его в общий `tests/common` было
-/// бы соблазнительно, но это означало бы править файл, чей эталон уже заморожен,
-/// ради удобства соседа; дубль в пробах дешевле риска сдвинуть чужие байты.
+/// Identical to its neighbor and the container-artifact RNG, NOT accidental
+/// copy-paste: `hardware_hybrid_golden.rs` records the same argument:
+/// artifacts must consume randomness IDENTICALLY, or differences
+/// between their bytes mean nothing. Extracting shared `tests/common` code is
+/// tempting, but would edit a file with an already frozen artifact for its neighbor's
+/// convenience; duplication in probes costs less than risking another artifact's bytes.
 struct SeedRng([u8; 32]);
 
 impl SeedRng {
@@ -168,49 +168,49 @@ impl rand_core::TryRng for SeedRng {
 
 impl rand_core::TryCryptoRng for SeedRng {}
 
-/// Скаляр АВТОРСКОЙ стороны P-256.
+/// AUTHOR's P-256 scalar.
 ///
-/// В поставке этих байт не существует: классическая половина автора живёт в TPM
-/// и наружу не выходит. Движку это безразлично по построению — он видит 65
-/// открытых байт и не спрашивает, кто держит вторую половину. Ровно поэтому
-/// эталон здесь возможен, и ровно поэтому он НЕ доказывает работу с настоящим
+/// These bytes do not exist in production: the author's classical half lives in a TPM
+/// without leaving. The engine is indifferent by construction: it sees 65
+/// public bytes and never asks who holds the other half. This is why the
+/// artifact is possible here, and precisely why it does NOT prove operation with a real
 /// TPM.
 ///
-/// Значение отличается от `[0x5e; 32]` из `tests/kat/seal_p256.kat` намеренно:
-/// совпади они, расхождение примитива и расхождение сборки выглядели бы
-/// одинаково, и по упавшей пробе нельзя было бы сказать, что именно сдвинулось.
+/// Deliberately differs from `[0x5e; 32]` in `tests/kat/seal_p256.kat`:
+/// if they matched, primitive divergence and assembly divergence would look
+/// identical, and a failing probe could not identify which changed.
 const AUTHOR_P256_SCALAR: [u8; 32] = [0x0a; 32];
 
-/// Семя ПОЛУЧАТЕЛЯ (X25519). То же значение, что у контейнерного эталона
-/// `recipient.cc` (`cc-cli/tests/golden.rs`, `fixed_recipient_public`): пара там
-/// и здесь одна и та же, и это связывает два утверждения об одном получателе.
+/// RECIPIENT seed (X25519). Same value as container artifact
+/// `recipient.cc` (`cc-cli/tests/golden.rs`, `fixed_recipient_public`): the pair
+/// is identical there and here, linking two claims about one recipient.
 const RECIPIENT_SEED: [u8; 32] = [0x05; 32];
 
-/// Семя ключа запечатывания сервера. Известно пробе целиком, и это осознанно:
-/// эталон собран стендом, а стенд играет обе роли — иначе доля A недостижима.
+/// Server sealing-key seed. Fully known to the probe, deliberately:
+/// the testbed builds the artifact and plays both roles, or share A would be inaccessible.
 const SERVER_SEED: [u8; 32] = [0x03; 32];
 
-/// Семя ПРОГРАММНОГО ключа устройства. Лежит в `PublicKeys::device` и при живой
-/// точке TPM в слот не попадает вовсе — ровно это свойство эталон и стережёт:
-/// второго слота на программный ключ рядом с аппаратным не пишется, иначе
-/// аппаратная привязка осталась бы надписью.
+/// SOFTWARE device-key seed. Resides in `PublicKeys::device`; with a live
+/// TPM point it never enters a slot. Precisely the property this artifact guards:
+/// no second software-key slot is written beside the hardware slot,
+/// or hardware binding would be merely a label.
 const DEVICE_SOFTWARE_SEED: [u8; 32] = [0x02; 32];
 
-/// Семя генератора. То же число, что у соседа и у контейнерных эталонов.
+/// RNG seed. Same number as its neighbor and container artifacts.
 const RNG_SEED: u8 = 42;
 
-/// Что устройство «намерило», прогнав поток.
+/// What the device "measured" while processing the stream.
 ///
-/// Величины взяты руками, а не из настоящего прогона, и это не упрощение: движок
-/// потока НЕ ВИДИТ — он принимает итог параметром, — поэтому настоящий прогон
-/// дал бы ровно те же три числа, только дороже.
+/// Values chosen manually rather than from an actual run, not a simplification: the engine
+/// DOES NOT SEE the stream, accepting results as a parameter; an actual run
+/// would yield precisely the same three numbers at greater cost.
 fn sealed_info() -> SealedInfo {
     SealedInfo { total_len: 13_000, chunk_count: 4, tree_root: [0x3b; 32] }
 }
 
-/// Программная сторона согласования автора. Выводится продуктовым кодом
-/// `oc-crypto`, а не записана байтами: вписанная константой открытая точка стала
-/// бы вторым источником истины о выводе пары и молча разошлась бы с продуктом.
+/// Author's software agreement party. Derived by production `oc-crypto`
+/// code, not stored as bytes: a hardcoded public point would become
+/// a second source of truth for pair derivation and silently diverge from production.
 fn author_p256() -> P256Agreement {
     P256Agreement::from_be_bytes(&AUTHOR_P256_SCALAR)
         .expect("фиксированный скаляр обязан быть годной стороной P-256")
@@ -232,14 +232,14 @@ fn request(recipient: Recipient) -> PackRequest<'static> {
     }
 }
 
-/// Классический получатель — обычный путь, на котором автор с TPM получает слот
-/// `kem_id = 2`.
+/// Classical recipient: the ordinary path where a TPM-backed author receives a
+/// `kem_id = 2` slot.
 fn recipient_identity() -> Recipient {
     Recipient::Identity { public_key: x25519_public(&recipient_secret()) }
 }
 
-/// Собрать заголовок движком. Никакого ввода-вывода, никаких часов, генератор
-/// сидированный — всё, что нужно для побайтовой воспроизводимости.
+/// Assemble a header with the engine. No I/O, no clocks, a seeded
+/// RNG: everything needed for byte-for-byte reproducibility.
 fn build_header(recipient: Recipient) -> Vec<u8> {
     let author_tpm = author_p256();
     let tpm_public = author_tpm.public_key();
@@ -350,23 +350,23 @@ fn compare(name: &str, produced: &[u8]) {
     }
 }
 
-/// ЗАГОЛОВОК С АВТОРСКИМ СЛОТОМ `kem_id = 2` ПОБАЙТНО СОВПАДАЕТ С ЗАМОРОЖЕННЫМ.
+/// A HEADER WITH A `kem_id = 2` AUTHOR SLOT MATCHES THE FROZEN BYTES EXACTLY.
 ///
-/// Сверяется свежесобранный заголовок с ФАЙЛОМ, а не сам с собой: это же и есть
-/// проверка детерминизма между ПРОЦЕССАМИ, которую внутри одного прогона
-/// подделать нечем.
+/// Compares a freshly assembled header with a FILE, not with itself: this tests
+/// determinism across PROCESSES, which cannot be faked inside
+/// one run.
 #[test]
 fn the_p256_author_headers_are_byte_identical_to_the_frozen_goldens() {
     compare(GOLDEN_WITH_RECIPIENT, &build_header(recipient_identity()));
     compare(GOLDEN_WITHOUT_RECIPIENT, &build_header(Recipient::None));
 }
 
-/// ДВА ПРОГОНА СБОРКИ ДАЮТ ОДНИ И ТЕ ЖЕ БАЙТЫ.
+/// TWO ASSEMBLY RUNS PRODUCE IDENTICAL BYTES.
 ///
-/// Отдельно от сверки с файлом, и это не дублирование. Сверка с файлом молчит о
-/// причине расхождения: «не сошлось» одинаково значит «сдвинулась раскладка» и
-/// «сборка вообще недетерминирована». Здесь проверяется второе, и проверяется
-/// дёшево — внутри одного прогона, без файла.
+/// Separate from file comparison, without duplication. File comparison does not explain
+/// divergence: "mismatch" can mean either "layout shifted" or
+/// "assembly is nondeterministic". This checks the latter,
+/// cheaply, within one run, without a file.
 #[test]
 fn the_p256_author_header_is_the_same_bytes_twice() {
     assert_eq!(
@@ -381,11 +381,11 @@ fn the_p256_author_header_is_the_same_bytes_twice() {
     );
 }
 
-/// Разобрать эталон и убедиться, что авторский слот — ТОТ САМЫЙ механизм и той
-/// самой формы. Общая часть обеих проб открытия.
+/// Parse the artifact and confirm its author slot uses EXACTLY the expected mechanism
+/// and shape. Shared part of both opening probes.
 ///
-/// Длины сверяются через `P256_PUBLIC_LEN` из `oc-format`, а не числом 65: число
-/// в пробе стало бы вторым источником истины о раскладке и разошлось бы молча.
+/// Lengths use `P256_PUBLIC_LEN` from `oc-format`, not the number 65:
+/// a number in the probe would become a second layout authority and silently diverge.
 fn parsed_author_slot(bytes: &[u8]) -> (oc_format::header::ParsedHeader, KnownSlot) {
     let parsed = Header::decode(bytes).expect("эталон обязан разбираться разборщиком oc-format");
     let slot = slot_of(&parsed.header, SlotKind::AuthorDevice);
@@ -423,9 +423,9 @@ fn parsed_author_slot(bytes: &[u8]) -> (oc_format::header::ParsedHeader, KnownSl
     (parsed, slot)
 }
 
-/// Открыть авторский слот и дойти до ОТКРЫТОГО ТЕКСТА приватных метаданных.
+/// Open the author slot through to private-metadata PLAINTEXT.
 ///
-/// Возвращает `CEK`, чтобы вызывающий мог сличить его со вторым путём.
+/// Returns `CEK` for the caller to compare against the second path.
 fn open_author_path(bytes: &[u8]) -> oc_crypto::secret::Cek {
     let (parsed, slot) = parsed_author_slot(bytes);
     let header = &parsed.header;
@@ -486,16 +486,16 @@ fn open_author_path(bytes: &[u8]) -> oc_crypto::secret::Cek {
     cek
 }
 
-/// АВТОРСКИЙ СЛОТ P-256 ОТКРЫВАЕТСЯ, И ВТОРОЙ ПУТЬ ВЕДЁТ К ТОМУ ЖЕ КЛЮЧУ.
+/// THE P-256 AUTHOR SLOT OPENS; THE SECOND PATH REACHES THE SAME KEY.
 ///
-/// Положительный контроль, без которого сверка байтов слепа: она доказывает
-/// постоянство байтов и молчит об их пригодности. Здесь проверяется обратное —
-/// что замороженное годно, и годно по ОБОИМ путям.
+/// A positive control without which byte comparison is blind: it proves
+/// byte stability while saying nothing about usability. This checks the converse:
+/// the frozen artifact is usable by BOTH paths.
 ///
-/// Путь автора: обе доли разом из одного слота, сервер не нужен. Путь
-/// получателя: доля B из своего слота, доля A из слота сервера. Разойдись они —
-/// файл открывался бы двумя РАЗНЫМИ путями к разным ключам, и схема «2 из 2»
-/// перестала бы ею быть.
+/// Author path: both shares from one slot, no server required. Recipient
+/// path: share B from its slot, share A from the server slot. Divergence would
+/// make the file's two DIFFERENT opening paths reach different keys,
+/// so "2 of 2" would cease to be that scheme.
 #[test]
 fn the_frozen_p256_author_slot_opens_and_agrees_with_the_recipient_path() {
     let bytes = read_golden(GOLDEN_WITH_RECIPIENT);
@@ -544,11 +544,11 @@ fn the_frozen_p256_author_slot_opens_and_agrees_with_the_recipient_path() {
     );
 }
 
-/// БЕЗ ПОЛУЧАТЕЛЯ АВТОРСКИЙ СЛОТ ОСТАЁТСЯ ЕДИНСТВЕННОЙ ДОРОГОЙ — И ОНА ЦЕЛА.
+/// WITH NO RECIPIENT, THE AUTHOR SLOT REMAINS THE ONLY PATH, AND IT WORKS.
 ///
-/// Здесь второго пути нет по построению, и именно поэтому проба заведена
-/// отдельно: на таком файле потеря авторского слота означает потерю файла
-/// навсегда, без всякого «зато откроет получатель».
+/// There is no second path by construction, precisely why this probe is
+/// separate: losing the author slot on such a file means losing the file
+/// forever, without "at least the recipient can open it".
 #[test]
 fn the_frozen_recipientless_p256_author_slot_is_the_only_way_in_and_it_opens() {
     let bytes = read_golden(GOLDEN_WITHOUT_RECIPIENT);
@@ -566,14 +566,14 @@ fn the_frozen_recipientless_p256_author_slot_is_the_only_way_in_and_it_opens() {
     open_author_path(&bytes);
 }
 
-/// Дописать эталоны движка ОДИН раз. Существующие файлы не перезаписываются.
+/// Add engine golden artifacts ONCE. Never overwrite existing files.
 ///
-/// Тем же приёмом, что у соседа, и по той же причине: перевыпуск и ДОБАВЛЕНИЕ —
-/// разные действия, И-14 запрещает первое и разрешает второе. Инструмент,
-/// умеющий только дописать, не может сделать запрещённого даже по ошибке. Одного
-/// `#[ignore]` для этого мало: он не защищает от
-/// `cargo test --workspace -- --ignored`, поэтому рядом стоит переменная
-/// окружения, а поверх неё — отказ писать в существующий файл.
+/// Same technique as its neighbor, for the same reason: reissuance and ADDITION
+/// are different actions; I-14 forbids the former and permits the latter. A tool
+/// that only adds cannot perform the forbidden action even by mistake. `#[ignore]`
+/// alone is insufficient: it does not protect against
+/// `cargo test --workspace -- --ignored`, so an environment variable is required
+/// too, followed by refusal to write existing files.
 #[test]
 #[ignore = "инструмент добавления нового эталона, а не проверка"]
 fn write_the_p256_author_engine_goldens_once() {

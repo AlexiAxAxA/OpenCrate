@@ -1,13 +1,13 @@
-//! Устойчивость разборщиков к враждебному вводу.
+//! Parser robustness against hostile input.
 //!
-//! Настоящий фаззер с `cargo-fuzz` требует nightly и отдельной установки, и он
-//! появится в проекте отдельно. Этот тест закрывает тот же класс ошибок в
-//! обычном `cargo test`, поэтому проверка идёт на каждой сборке, а не когда о ней
-//! вспомнят: разбор обязан быть тотальным — либо структура, либо ошибка, но
-//! никогда паника, зацикливание или чтение чужой памяти.
+//! A real `cargo-fuzz` fuzzer requires nightly and separate installation and will
+//! be introduced separately. This test covers the same class of bugs in
+//! ordinary `cargo test`, running at every build rather than whenever someone
+//! remembers: parsing must be total, yielding a structure or an error,
+//! never a panic, infinite loop, or read of unrelated memory.
 //!
-//! Генератор детерминирован намеренно. Падение обязано воспроизводиться по
-//! номеру итерации, иначе отладка превращается в гадание.
+//! The generator is deliberately deterministic. A failure must reproduce from
+//! its iteration number, or debugging becomes guesswork.
 
 #![allow(
     clippy::indexing_slicing,
@@ -19,7 +19,7 @@
 use oc_format::tlv::{TlvReader, TlvWriter};
 use oc_format::{FormatError, Layout, MAGIC, Prologue};
 
-/// SplitMix64: короткий, воспроизводимый, хорошо перемешивающий.
+/// SplitMix64: compact, reproducible, with good mixing.
 struct Rng(u64);
 
 impl Rng {

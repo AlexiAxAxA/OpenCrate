@@ -13,11 +13,11 @@
     clippy::disallowed_methods,
     clippy::disallowed_types
 )]
-//! Зонд направления 5: исполнение политики и правило «неизвестное — запрещено».
+//! Area 5 probe: policy enforcement and the "unknown means denied" rule.
 //!
-//! Файл создан аудитом. Рабочий код по его находкам с тех пор ИЗМЕНЁН —
-//! `oc-policy` читает `unknown_actions`, умалчивание о водяном знаке трактует
-//! как требование, а длительность лизинга сверяет с политикой автора.
+//! Created during an audit. Production code has since CHANGED in response to its findings:
+//! `oc-policy` reads `unknown_actions`, treats an omitted watermark field
+//! as a requirement, and checks lease duration against author policy.
 
 
 use oc_format::policy_codec::{self, tag};
@@ -36,10 +36,10 @@ const ALL_ACTIONS: [Action; 6] = [
     Action::Screenshot,
 ];
 
-/// Числовые константы кодека продублированы здесь намеренно: они приватны в
-/// `policy_codec`, а зонд обязан собирать байты сам, как это сделал бы противник.
+/// Numeric codec constants are deliberately duplicated here: they are private in
+/// `policy_codec`, and the probe must assemble bytes itself, as an attacker would.
 const ACTION_VIEW: u16 = 1;
-/// Действие из будущей версии формата (`ai_ingest` по §4 спецификации).
+/// Action from a future format version (`ai_ingest` per specification §4).
 const ACTION_FUTURE: u16 = 7;
 const RULE_ALLOW: u8 = 1;
 const VALIDITY_ALWAYS: u8 = 1;
@@ -93,13 +93,13 @@ fn network_lease_body(seconds: i64, max_offline: i64) -> Vec<u8> {
 // заполняется декодером.
 // ---------------------------------------------------------------------------
 
-/// Файл, записанный будущей версией, содержит действие `ai_ingest` (тег 7).
-/// Старый клиент его не знает и обязан отказаться исполнять правила, которые
-/// понял не целиком (И-10).
+/// A file written by a future version contains `ai_ingest` (tag 7).
+/// An old client does not recognize it and must refuse to enforce rules it
+/// has not fully understood (I-10).
 ///
-/// Проба заводилась на обратном: декодер честно складывал непонятый тег в
-/// `unknown_actions`, а `evaluate` в это поле не заглядывал ни разу — и файл
-/// открывался так, будто прочтён целиком.
+/// The probe originated in the opposite behavior: the decoder faithfully placed the unknown tag in
+/// `unknown_actions`, but `evaluate` never inspected that field, and the file
+/// opened as if fully understood.
 #[test]
 fn probe1_an_unknown_action_does_not_reach_the_decision() {
     let mut actions = TlvWriter::new();
@@ -128,8 +128,8 @@ fn probe1_an_unknown_action_does_not_reach_the_decision() {
     );
 }
 
-/// То же свойство в общем виде: никакой контекст и никакое действие не должны
-/// давать `Allow`, пока в политике остался тег, которого клиент не понял.
+/// The same property generally: no context and no action may
+/// yield `Allow` while a tag the client did not understand remains in the policy.
 #[test]
 fn probe1b_no_action_is_allowed_while_the_policy_is_not_fully_understood() {
     let mut actions = TlvWriter::new();
@@ -158,8 +158,8 @@ fn probe1b_no_action_is_allowed_while_the_policy_is_not_fully_understood() {
 // НАХОДКА 2. Исчерпывающий перебор присутствия/отсутствия полей политики.
 // ---------------------------------------------------------------------------
 
-/// Что написал автор: разрешён только просмотр, водяной знак обязателен,
-/// открытий не больше одного.
+/// What the author specified: view only, watermark required,
+/// at most one open.
 struct AuthorIntent;
 
 impl AuthorIntent {
@@ -168,7 +168,7 @@ impl AuthorIntent {
     const MAX_OPENS: u32 = 1;
 }
 
-/// Все шесть полей политики. Индекс бита — позиция в этом массиве.
+/// All six policy fields. The bit index is the position in this array.
 const FIELD_TAGS: [u16; 6] = [
     tag::ACTIONS,
     tag::VALIDITY,
@@ -194,12 +194,12 @@ fn field_body(tag_id: u16) -> Vec<u8> {
     }
 }
 
-/// Перебираем ВСЕ 64 комбинации присутствия полей и все шесть действий.
+/// Iterate ALL 64 combinations of field presence and all six actions.
 ///
-/// Утверждение: `Allow` не возникает нигде, где его не написал автор, и
-/// обязанности при `Allow` не слабее написанных автором. Отсутствующее поле
-/// обязано вести к отказу разбора или к более строгому решению — но не к более
-/// мягкому (§4 и §2.1 п.5 спецификации).
+/// Claim: `Allow` never appears where the author did not grant it, and
+/// obligations under `Allow` are no weaker than the author's. An absent field
+/// must cause a parse failure or a stricter decision, never a more
+/// permissive one (specification §4 and §2.1 item 5).
 #[test]
 fn probe2_no_combination_of_missing_fields_ever_relaxes_the_authors_rules() {
     let mut violations: Vec<String> = Vec::new();
@@ -256,16 +256,16 @@ fn probe2_no_combination_of_missing_fields_ever_relaxes_the_authors_rules() {
     );
 }
 
-/// Минимальная форма того же свойства: политика без поля водяного знака
-/// принимается декодером, и знак всё равно ставится.
+/// Minimal form of the same property: a policy without a watermark field
+/// is accepted by the decoder, and the watermark is still applied.
 ///
-/// Поле необязательно, поэтому его отсутствие обязано читаться как «знак
-/// нужен», а не как «знак не нужен» (И-10). Проба заводилась на обратном:
-/// декодер отдавал `watermark = false`, и автор, чей текст требовал знака,
-/// получал файл без него — достаточно было вырезать один необязательный TLV.
-/// Имя теста при этом описывало ДЕФЕКТ («принимается и ничего не ставит»), хотя
-/// ассерт с самого начала требовал знак, — то есть говорило прямо обратное тому,
-/// что проверяло.
+/// The field is optional, so absence must mean "watermark
+/// required", not "watermark unnecessary" (I-10). The probe originated in the reverse:
+/// the decoder returned `watermark = false`, and an author whose text required a watermark
+/// received a file without it after just one optional TLV was removed.
+/// The test name described the DEFECT ("accepted and applies nothing") even though
+/// the assertion required a watermark from the outset, saying precisely the opposite
+/// of what it checked.
 #[test]
 fn probe2b_a_missing_watermark_field_reads_as_watermark_required() {
     let mut w = TlvWriter::new();
@@ -290,17 +290,17 @@ fn probe2b_a_missing_watermark_field_reads_as_watermark_required() {
 // НАХОДКА 3. Длительность лизинга ограничена политикой автора.
 // ---------------------------------------------------------------------------
 
-/// Автор разрешил оффлайн на час. Сервер выдаёт лизинг на десять лет — и это
-/// не должно расширять окно, написанное автором: `intersect` монотонна только в
-/// сторону ужесточения (И-10), и выданный лизинг обязан подчиняться тому же
-/// правилу.
+/// The author allowed offline access for one hour. The server issues a ten-year lease;
+/// that must not expand the author's window: `intersect` is monotonic only
+/// toward stricter policy (I-10), and the issued lease must follow the same
+/// rule.
 ///
-/// Проба заводилась на обратном: `evaluate` сверял только `lease.expires_at` и
-/// ни разу не смотрел на `Network::Lease { seconds, max_offline_seconds }` из
-/// политики автора, так что сервер выдавал себе любой срок. Теперь у отказа два
-/// имени — `Deny::LeaseOutlivesPolicy` и `Deny::OfflineTooLong`, — и они
-/// разные: первое ловит слишком длинный лизинг на предъявлении, второе — слишком
-/// долгий уход в оффлайн под лизингом законной длины.
+/// The probe originated in the reverse: `evaluate` checked only `lease.expires_at`,
+/// never inspecting `Network::Lease { seconds, max_offline_seconds }` in
+/// author policy, so the server could grant any duration. There are now two denial
+/// names, `Deny::LeaseOutlivesPolicy` and `Deny::OfflineTooLong`, and they
+/// differ: the former catches an excessive lease on presentation, the latter an excessive
+/// offline period under a lease of valid duration.
 #[test]
 fn probe3_the_server_cannot_extend_the_authors_offline_window() {
     let hour = 3600;
@@ -324,13 +324,13 @@ fn probe3_the_server_cannot_extend_the_authors_offline_window() {
     );
 }
 
-/// То же свойство в чистом виде, без хода времени: `seconds` из политики
-/// автора связывает `expires_at` предъявленного лизинга, и связывает уже при
-/// предъявлении.
+/// The same property in isolation, without time passing: `seconds` in author policy
+/// binds the presented lease's `expires_at`, already at the point of
+/// presentation.
 ///
-/// Отдельно от [`probe3_the_server_cannot_extend_the_authors_offline_window`]
-/// именно поэтому: там отказ можно было бы объяснить истёкшим сроком, здесь
-/// объяснить его нечем, кроме самой сверки длительностей.
+/// Separate from [`probe3_the_server_cannot_extend_the_authors_offline_window`]
+/// for this reason: there, expiry could explain rejection; here,
+/// only the duration comparison can explain it.
 #[test]
 fn probe3b_lease_duration_is_bound_by_the_policy_at_presentation() {
     let policy = Policy {
@@ -348,9 +348,9 @@ fn probe3b_lease_duration_is_bound_by_the_policy_at_presentation() {
 // ПРОВЕРЕНО И ЦЕЛО. Тесты ниже обязаны проходить на нынешнем коде.
 // ---------------------------------------------------------------------------
 
-/// Монотонность `intersect` по всем полям, которые он трогает: перебор всех
-/// подмножеств действий у автора и у сервера плюс все привязки, водяные знаки,
-/// лимиты и режимы сети.
+/// Monotonicity of `intersect` for every field it touches: enumerate all
+/// author and server action subsets, plus all binding levels, watermark flags,
+/// limits, and network modes.
 #[test]
 fn sound_intersect_never_widens_anything() {
     let bindings = [Binding::Software, Binding::Hardware, Binding::HardwareAttested];
@@ -432,8 +432,8 @@ fn sound_intersect_never_widens_anything() {
     }
 }
 
-/// Ни одна из проверок `evaluate` не обходится: включаем каждое условие отказа
-/// по отдельности на политике, которая иначе разрешала бы просмотр.
+/// No `evaluate` check is bypassed: trigger each denial condition
+/// individually in a policy that would otherwise allow viewing.
 #[test]
 fn sound_every_denying_condition_wins_over_a_permitting_policy() {
     let policy = Policy {
@@ -469,8 +469,8 @@ fn sound_every_denying_condition_wins_over_a_permitting_policy() {
     assert!(!evaluate(&policy, Some(&lease()), Action::View, &ctx(9 * 3600)).is_allowed());
 }
 
-/// Байты политики нельзя подобрать так, чтобы `Deny` автора стал `Allow`:
-/// разрешением считается ровно один байт, и любое иное значение — запрет.
+/// Policy bytes cannot turn the author's `Deny` into `Allow`:
+/// exactly one byte means permission, and every other value means denial.
 #[test]
 fn sound_no_rule_byte_other_than_one_reads_as_allow() {
     for byte in 0u16..=255 {
@@ -489,8 +489,8 @@ fn sound_no_rule_byte_other_than_one_reads_as_allow() {
     }
 }
 
-/// Обязанности по умолчанию: если снимок экрана не разрешён, захват обязан
-/// блокироваться, а дампы подавляться.
+/// Default obligations: if screenshots are not allowed, capture must
+/// be blocked and dumps suppressed.
 #[test]
 fn sound_default_obligations_are_the_strict_ones() {
     assert_eq!(

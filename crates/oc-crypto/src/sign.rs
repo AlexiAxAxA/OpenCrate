@@ -1,38 +1,38 @@
-//! Подписи.
+//! Signatures.
 //!
-//! Подписать можно только [`Transcript`], а его конструктор требует метку
-//! домена. Поэтому подписать неразделённые по домену байты невозможно —
-//! компилятор не даст.
+//! Only [`Transcript`] can be signed, and its constructor requires a domain
+//! label. Signing bytes without domain separation is therefore impossible:
+//! the compiler prevents it.
 //!
-//! Проверка выполняется `verify_strict`, а не `verify`: иначе наследуется
-//! малleability по кофактору и по неканоническому представлению ключа, и
-//! теряется свойство «одна подпись — один файл».
+//! Verification uses `verify_strict`, not `verify`, to avoid inheriting
+//! malleability from the cofactor and noncanonical key representations,
+//! which would lose the property "one signature, one file".
 //!
-//! Трейт [`Signer`] нужен потому, что ключ автора и ключ устройства в фазе 1
-//! будут жить в TPM и не покидать его: подписывать будет железо, а не этот код.
+//! The [`Signer`] trait exists because author and device keys will reside in TPMs
+//! in phase 1 without leaving them: hardware will sign, not this code.
 
 use crate::transcript::Transcript;
 use crate::{CryptoError, SigAlg};
 use rand_core::CryptoRng;
 use zeroize::Zeroize;
 
-/// Длина подписи Ed25519.
+/// Ed25519 signature length.
 pub const SIGNATURE_LEN: usize = 64;
-/// Длина публичного ключа Ed25519.
+/// Ed25519 public-key length.
 pub const PUBLIC_KEY_LEN: usize = 32;
 
-/// Что-то, чем можно подписать. Реализуется программным ключом сейчас и
-/// TPM-ключом в фазе 1.
+/// Something capable of signing. Implemented by software keys now and
+/// TPM keys in phase 1.
 pub trait Signer {
-    /// Алгоритм, которым подписывает эта реализация.
+    /// Algorithm used by this implementation.
     fn alg(&self) -> SigAlg;
-    /// Публичный ключ для проверки.
+    /// Public verification key.
     fn public_key(&self) -> [u8; PUBLIC_KEY_LEN];
-    /// Подписать транскрипт.
+    /// Sign a transcript.
     fn sign(&self, transcript: &Transcript) -> Result<[u8; SIGNATURE_LEN], CryptoError>;
 }
 
-/// Программный подписант Ed25519.
+/// Software Ed25519 signer.
 pub struct Ed25519Signer {
     key: ed25519_dalek::SigningKey,
 }
@@ -44,21 +44,21 @@ impl core::fmt::Debug for Ed25519Signer {
 }
 
 impl Ed25519Signer {
-    /// Построить из семени.
+    /// Construct from a seed.
     ///
-    /// Вход — именно семя (32 байта до расширения SHA-512), а не готовый скаляр.
-    /// Так ключ хранится во всех форматах сериализации и так же его отдаёт
-    /// железо, поэтому при переезде подписи в TPM в фазе 1 вход этой функции
-    /// останется тем же.
+    /// Input is specifically a seed (32 bytes before SHA-512 expansion), not a ready-made scalar.
+    /// All serialization formats store keys this way, as does the
+    /// hardware's output, so moving signing to a TPM in phase 1 leaves
+    /// this function's input unchanged.
     pub fn from_seed(seed: &[u8; 32]) -> Self {
         Self { key: ed25519_dalek::SigningKey::from_bytes(seed) }
     }
 
-    /// Сгенерировать из переданного генератора.
+    /// Generate using the supplied RNG.
     ///
-    /// Генератор — аргумент, а не `OsRng` из окружения. Иначе тест перестаёт
-    /// быть детерминированным, а место вызова — проверяемым: подмену источника
-    /// энтропии в подписи автора никак нельзя было бы поймать тестом.
+    /// The RNG is an argument, not an environmental `OsRng`. Otherwise tests cease
+    /// to be deterministic and call sites cease to be verifiable: substituting the
+    /// entropy source for an author signature could not be caught by a test.
     pub fn generate<R: CryptoRng + ?Sized>(rng: &mut R) -> Self {
         let mut seed = [0u8; 32];
         rng.fill_bytes(&mut seed);
@@ -97,11 +97,11 @@ impl Signer for Ed25519Signer {
     }
 }
 
-/// Проверить подпись.
+/// Verify a signature.
 ///
-/// Возвращает лишь факт корректности подписи. **Доверие к подписанту — отдельное
-/// решение**, принимаемое выше: подпись, проверенная ключом из того же
-/// заголовка, самоподписана и не доказывает ничего.
+/// Returns only signature validity. **Trust in the signer is a separate
+/// decision** taken above: a signature checked with a key from the same
+/// header is self-signed and proves nothing.
 pub fn verify(
     public_key: &[u8; PUBLIC_KEY_LEN],
     transcript: &Transcript,
@@ -133,8 +133,8 @@ mod tests {
     use super::*;
     use crate::label;
 
-    /// Детерминированный генератор для тестов: SplitMix64. Настоящая энтропия
-    /// здесь не нужна и вредна — тест обязан воспроизводиться байт в байт.
+    /// Deterministic test RNG: SplitMix64. Real entropy is
+    /// unnecessary and harmful here: the test must reproduce byte for byte.
     struct TestRng(u64);
 
     impl TestRng {
@@ -167,8 +167,8 @@ mod tests {
     }
     impl rand_core::TryCryptoRng for TestRng {}
 
-    /// Транскрипт «метка + одно поле данных» — минимальный носитель свойства,
-    /// которое проверяют тесты ниже.
+    /// A "label plus one data field" transcript: the minimal carrier of the property
+    /// checked by the tests below.
     fn transcript_of(domain: crate::label::Label, data: &[u8]) -> Transcript {
         let mut t = Transcript::new(domain);
         t.field(data);
@@ -289,35 +289,35 @@ mod tests {
         );
     }
 
-    /// ПОДПИСЬ ПОД КЛЮЧОМ МАЛОГО ПОРЯДКА ОТВЕРГАЕТСЯ — вот что значит `strict`.
+    /// SIGNATURES UNDER SMALL-ORDER KEYS ARE REJECTED: that is what `strict` means.
     ///
-    /// # Почему без этой пробы `verify_strict` не сторожился ничем
+    /// # Why `verify_strict` was unguarded without this probe
     ///
-    /// Потому что все остальные пробы подают либо честную подпись, либо мусор, а
-    /// то и другое `verify` и `verify_strict` разбирают ОДИНАКОВО. Замена одного
-    /// на другое не роняла ни одной проверки и не ломала ни одного вектора:
-    /// разница между ними видна ровно на одном классе входов — на точках малого
-    /// порядка, а такого входа в репозитории не было.
+    /// Because every other probe supplies either a valid signature or garbage,
+    /// and `verify` and `verify_strict` handle both IDENTICALLY. Replacing one
+    /// with the other broke no test and no vector:
+    /// the difference is visible in exactly one input class, small-order
+    /// points, and the repository had no such input.
     ///
-    /// # Что за вектор
+    /// # The vector
     ///
-    /// Классическая подделка «подпись, годная для любого сообщения»: публичный
-    /// ключ `A` — нейтральный элемент кривой (`01` и 31 ноль), `R` — он же,
-    /// `S = 0`. Уравнение проверки вырождается в `[0]B = R + h·A`, то есть
-    /// `identity = identity`, и сходится при ЛЮБОМ сообщении. `verify_strict`
-    /// отвергает такой вход по малому порядку `A` и `R`, `verify` — нет.
+    /// The classic "signature valid for any message" forgery: public
+    /// key `A` is the curve identity (`01` followed by 31 zeroes), `R` is the same,
+    /// and `S = 0`. The verification equation reduces to `[0]B = R + h·A`, hence
+    /// `identity = identity`, true for ANY message. `verify_strict`
+    /// rejects this input because `A` and `R` have small order; `verify` does not.
     ///
-    /// # Почему в пробе есть половина с `ed25519_dalek`
+    /// # Why the probe includes an `ed25519_dalek` half
     ///
-    /// Без неё проба ничего не доказывала бы: «нестрогая проверка этот вектор
-    /// принимает» — утверждение о зависимости, и проверять его надо фактом, а не
-    /// рассуждением. Заодно это сторож за самой зависимостью: начни `dalek`
-    /// отвергать слабые ключи на нестрогом пути, половина упадёт и скажет, что
-    /// поведенческого различителя больше нет.
+    /// Without it, the probe would prove nothing: "nonstrict verification accepts
+    /// this vector" is a claim about a dependency, to be checked by execution rather than
+    /// reasoning. It also guards the dependency itself: if `dalek` starts
+    /// rejecting weak keys on the nonstrict path, this half fails and reports that
+    /// the behavioral discriminator no longer exists.
     ///
-    /// Цена пропуска — та, что названа в И-6: одна и та же подпись проходит под
-    /// несколькими ключами, «одна подпись — один файл» перестаёт выполняться, и
-    /// отзыв с журналом теряют однозначную привязку к файлу.
+    /// The cost of omission is stated in I-6: one signature verifies under
+    /// multiple keys; "one signature, one file" ceases to hold,
+    /// and revocation and the log lose their unambiguous file binding.
     #[test]
     fn a_small_order_forgery_is_refused_although_the_lax_check_would_take_it() {
         // Нейтральный элемент в сжатом виде: y = 1, то есть `01` и 31 ноль.

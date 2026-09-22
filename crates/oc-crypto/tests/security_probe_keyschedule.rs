@@ -45,8 +45,8 @@ const CORE_HASH: [u8; 32] = [0x0c; 32];
 const SALT: [u8; 32] = [0x21; 32];
 const ORG: &[u8] = b"acme";
 
-/// Детерминированный генератор. Воспроизводимость важнее стойкости: проба
-/// обязана падать одинаково на любой машине.
+/// Deterministic RNG. Reproducibility matters more than strength: the probe
+/// must fail identically on every machine.
 struct SeedRng([u8; 32]);
 
 impl SeedRng {
@@ -97,17 +97,17 @@ fn hmac256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 // 1. Два CEK под одним KEK не делят поток ключей (регрессия)
 // ---------------------------------------------------------------------------
 
-/// ДЕФЕКТ (исправлен): nonce обёртки выводился из KEK, поэтому два разных CEK,
-/// завёрнутых под одним KEK, получали один поток ключей. Тогда
-/// `wrapped₁ ⊕ wrapped₂ = CEK₁ ⊕ CEK₂`: легальный получатель первого файла
-/// восстанавливал ключ содержимого второго, не зная ни одного приватного ключа.
-/// Переупаковка и ротация ключа содержимого — обычные операции, ничто в API не
-/// мешало вызвать `wrap_cek` дважды с одним KEK.
+/// BUG (fixed): the wrapping nonce derived from KEK, so two different CEKs
+/// wrapped under one KEK received one keystream. Then
+/// `wrapped₁ ⊕ wrapped₂ = CEK₁ ⊕ CEK₂`: a legitimate recipient of the first file
+/// could recover the second content key without knowing any private key.
+/// Repacking and content-key rotation are normal operations; nothing in the API
+/// prevented calling `wrap_cek` twice with one KEK.
 ///
-/// Исправлено хранимым случайным nonce (§3.1); номер K2, принадлежавший
-/// выведенному nonce, сожжён и не переиспользуется. Тест оставлен регрессионным:
-/// он проверяет именно XOR-соотношение, а не «nonce различаются», — потому что
-/// сломать это можно и не возвращая вывод nonce.
+/// Fixed by a stored random nonce (§3.1); number K2, formerly assigned to the
+/// derived nonce, is burned and never reused. Retained as a regression test:
+/// it checks the XOR relation itself, not "nonces differ", because
+/// that property can break without restoring nonce derivation.
 #[test]
 fn two_different_ceks_wrapped_under_one_kek_do_not_share_a_keystream() {
     let kek = Kek::from_bytes([0x5e; 32]);
@@ -149,15 +149,15 @@ fn two_different_ceks_wrapped_under_one_kek_do_not_share_a_keystream() {
 // 2. Обязательство слота: одна формула, а не две
 // ---------------------------------------------------------------------------
 
-/// ДЕФЕКТ (исправлен): §3.1 и §3.5 задавали РАЗНЫЕ сообщения HMAC для
-/// обязательства слота — `‖ file_id` и `‖ core_hash`. Обе формулы лежали в одном
-/// документе-контракте, и вторая реализация формата вправе была прочитать любую;
-/// разошлись бы стороны молча — обёртка просто перестала бы открываться, и это
-/// выглядело бы как повреждение файла.
+/// BUG (fixed): §3.1 and §3.5 specified DIFFERENT HMAC messages for the
+/// slot commitment, `‖ file_id` and `‖ core_hash`. Both formulas appeared in one
+/// contract document, and a second implementation could legitimately read either;
+/// the parties would silently diverge, the wrapper simply failing to open,
+/// appearing as file corruption.
 ///
-/// Сейчас обе секции говорят `‖ core_hash`, и привязка строго сильнее: хеш ядра
-/// уже содержит `file_id` и ломается при подмене любого другого подписанного
-/// поля.
+/// Both sections now specify `‖ core_hash`, a strictly stronger binding: the core hash
+/// already includes `file_id` and changes if any other signed
+/// field is substituted.
 #[test]
 fn the_slot_commitment_follows_one_formula_and_not_the_abandoned_one() {
     let kek = Kek::from_bytes([0x5e; 32]);
@@ -183,7 +183,7 @@ fn the_slot_commitment_follows_one_formula_and_not_the_abandoned_one() {
 // 3. MIN_CLAIM_BITS: граница держится сборкой `cc-cli`, а не типом `ClaimSecret`
 // ---------------------------------------------------------------------------
 
-/// Кодировка PIN в 32 байта: ASCII, остальное — нули.
+/// PIN encoding in 32 bytes: ASCII, zero-padded.
 fn claim_from_pin(pin: u32) -> ClaimSecret {
     let text = format!("{pin:04}");
     let mut bytes = [0u8; 32];
@@ -191,31 +191,31 @@ fn claim_from_pin(pin: u32) -> ClaimSecret {
     ClaimSecret::from_bytes(bytes)
 }
 
-/// ИЗВЕСТНОЕ ОГРАНИЧЕНИЕ, зафиксированное тестом, а не спрятанное.
+/// KNOWN LIMITATION, captured by a test rather than concealed.
 ///
-/// `MIN_CLAIM_BITS = 128` объявлена единственной защитой кода-претензии от
-/// оракула разбиения — и никакой тип её не держит: `ClaimSecret::from_bytes`
-/// принимает любые 32 байта. Обязательство слота лежит в контейнере открытым
-/// текстом и работает оффлайн-оракулом: противник, знающий долю сервера
-/// (скомпрометированный сервер лицензий с копией контейнера), перебирает
-/// четырёхзначный код за десять тысяч попыток по несколько HMAC каждая, не
-/// обращаясь к сети. По замыслу §3.4 доли сервера для этого недостаточно.
+/// `MIN_CLAIM_BITS = 128` is declared the claim code's sole defense against a
+/// partitioning oracle, yet no type enforces it: `ClaimSecret::from_bytes`
+/// accepts any 32 bytes. The slot commitment is plaintext in the container
+/// and acts as an offline oracle: an attacker knowing the server share
+/// (a compromised license server holding a container copy) can enumerate
+/// a four-digit code in ten thousand attempts of a few HMACs each, without
+/// network access. Under §3.4's intended design, the server share should not suffice.
 ///
-/// Сегодня продукт в эту дыру не проваливается, но не потому, что она закрыта.
-/// Код-претензия выпускается (`cc protect --claim`), слот `RecipientClaim`
-/// производится и открывается, `secret_b_from_claim` вызывается из
-/// `cc_cli::container` — Ф-3 закрыт. Граница держится ОДНИМ местом:
-/// `cc_cli::claim` порождает ровно 30 символов пятибитного алфавита, то есть
-/// 150 бит, и это закреплено `const _: () = assert!(...)` — короткий код там не
-/// упадёт в тесте, а не скомпилируется.
+/// The product avoids this hole today, but not because it has been closed.
+/// Claim codes are issued (`cc protect --claim`), `RecipientClaim` slots
+/// are created and opened, and `cc_cli::container` calls `secret_b_from_claim`:
+/// F-3 is closed. The boundary rests in ONE place:
+/// `cc_cli::claim` generates exactly 30 characters from a five-bit alphabet, giving
+/// 150 bits, enforced by `const _: () = assert!(...)`: a short code there will
+/// not fail a test; it will not compile.
 ///
-/// Ниже уровнем границы по-прежнему нет: `ClaimSecret::from_bytes` принимает
-/// любые 32 байта и обязан — к этому моменту код уже сжат хешем, и энтропии в
-/// результате не видно. Поэтому тест и оставлен: он показывает, во что обойдётся
-/// второй способ породить `ClaimSecret` в обход `cc_cli::claim` — код,
-/// придуманный человеком, код из чужого поля, код из будущего API. Этот тест
-/// обязан упасть, когда такой способ появится, а `MIN_CLAIM_BITS` перестанет
-/// проверяться на сборке.
+/// The lower-level boundary is still absent: `ClaimSecret::from_bytes` accepts
+/// any 32 bytes and must, because by that point a hash has compressed the code and the result
+/// cannot reveal entropy. The test remains to show the cost of
+/// a second way to create `ClaimSecret` bypassing `cc_cli::claim`: a
+/// human-invented code, one from an external field, or a future API. This test
+/// must fail when such a path appears and `MIN_CLAIM_BITS` ceases
+/// to be checked at build time.
 #[test]
 fn a_low_entropy_claim_code_is_still_brute_forcible_known_limitation() {
     assert_eq!(MIN_CLAIM_BITS, 128);
@@ -257,15 +257,15 @@ fn a_low_entropy_claim_code_is_still_brute_forcible_known_limitation() {
 // 4. Разделение назначений ключей типами
 // ---------------------------------------------------------------------------
 
-/// ДЕФЕКТ (исправлен): K3 и K5 возвращали один тип `PayloadKey`, и ключ
-/// приватных метаданных молча принимался на месте ключа полезной нагрузки —
-/// вопреки обещанию `secret.rs`, что перепутать их «становится ошибкой
-/// компиляции».
+/// BUG (fixed): K3 and K5 returned the same `PayloadKey` type, silently accepting a
+/// private-metadata key where a payload key belonged,
+/// contrary to `secret.rs`'s promise that swapping them "becomes a compile
+/// error".
 ///
-/// Исправлено введением `MetaKey`. Проверить это тестом в обычном смысле нельзя:
-/// код, который проба ловила, теперь просто не компилируется. Поэтому тест
-/// фиксирует наблюдаемую часть — что производные дают разные значения, — а
-/// невозможность перепутать держится типами и закреплена здесь комментарием:
+/// Fixed by introducing `MetaKey`. An ordinary test cannot check this:
+/// the code formerly caught by the probe simply no longer compiles. The test
+/// therefore records the observable part, differing derived values,
+/// while types prevent confusion, documented here:
 ///
 /// ```compile_fail
 /// let meta = derive_private_meta_key(&cek, &SALT, &FILE_ID);

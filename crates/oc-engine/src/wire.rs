@@ -1,43 +1,43 @@
-//! Провод между устройством и движком: байты сообщений, и только они.
+//! Wire between device and engine: message bytes and nothing else.
 //!
-//! # Почему кодек живёт в ЧИСТОМ крейте
+//! # Why the codec lives in a PURE crate
 //!
-//! Потому что это работа с байтами, а не с трубой. Разбор сообщения, пришедшего
-//! из чужого процесса, — тот же разбор враждебного ввода, что и разбор
-//! заголовка: строгие длины, отказ вместо догадки, никаких паник. Всё это уже
-//! обеспечено литами чистых крейтов, и заводить второй такой разбор в крейте с
-//! вводом-выводом значило бы вывести его из-под них.
+//! Because it handles bytes, not a pipe. Parsing a message arriving
+//! from another process is the same hostile-input parsing as parsing
+//! a header: strict lengths, rejection rather than guessing, no panics. Pure-crate
+//! lints already enforce all this; introducing a second parser in an I/O
+//! crate would remove those protections.
 //!
-//! Труба, порождение процесса и генератор живут снаружи — в `cc-engined` и в
-//! клиенте `cc-cli`.
+//! Pipes, process spawning, and RNGs live outside, in `cc-engined` and
+//! the `cc-cli` client.
 //!
-//! # Что пересекает границу, и что НЕ пересекает
+//! # What crosses the boundary and what does NOT
 //!
-//! Пересекает: запрос упаковки (правила, открытые ключи, имя файла), ключ
-//! полезной нагрузки, сведения о запечатанном потоке, готовый заголовок.
+//! Crosses: packing requests (rules, public keys, filename), the payload
+//! key, sealed-stream information, and the completed header.
 //!
-//! **Не пересекает: ни одного байта содержимого документа.** Движок его не
-//! видит и видеть не должен — поток AEAD прогоняет устройство. Это и есть
-//! обещание продукта «байты содержимого машину автора не покидают», и здесь оно
-//! становится проверяемым: достаточно записать всё, что прошло по трубе, и
-//! поискать там канарейку.
+//! **Does not cross: any document-content byte.** The engine neither
+//! sees nor should see content; the device runs streaming AEAD. This is the
+//! product promise "content bytes never leave the author's machine", made
+//! verifiable here: record everything passing through the pipe and
+//! search for a canary.
 //!
-//! Ключ полезной нагрузки границу пересекает, и это осознанно: устройству нечем
-//! шифровать поток без него. `CEK` при этом остаётся внутри движка — из
-//! `payload_key` его не вывести, а из `CEK` выводится всё остальное.
+//! The payload key deliberately crosses: the device cannot encrypt
+//! the stream without it. `CEK` remains inside the engine:
+//! `payload_key` cannot derive it, while `CEK` derives everything else.
 //!
-//! # Почему сообщение собирается в буфере, который НЕ РАСТЁТ
+//! # Why messages are assembled in a buffer that NEVER GROWS
 //!
-//! Потому что через этот провод едут секреты — ключ полезной нагрузки в ответе и
-//! код-претензия в запросе, — а растущий `Vec` отдаёт старый блок аллокатору
-//! **до всякого `Drop`** (И-11). Сборщик, делавший push за push, оставлял в куче
-//! копию сообщения на каждом удвоении ёмкости, и `Zeroizing` здесь бессилен:
-//! уничтожения ещё не было, затирать нечего.
+//! Because secrets travel over this wire, the payload key in responses and
+//! claim code in requests, while a growing `Vec` returns its old block to the allocator
+//! **before any `Drop`** (I-11). An assembler pushing repeatedly left a heap
+//! copy of the message at every capacity doubling, where `Zeroizing` is powerless:
+//! destruction has not happened, leaving nothing it can wipe.
 //!
-//! Поэтому размер сообщения считается ЦЕЛИКОМ до первой записи, буфер
-//! выделяется ровно под него один раз и затирается при уничтожении
-//! ([`Message`]). Расчёт обязан сойтись с записанным до байта: расхождение —
-//! [`WireError::BadSize`], а не дозапись в подросший буфер.
+//! The ENTIRE message size is therefore computed before the first write; the buffer
+//! is allocated exactly once to that size and wiped on destruction
+//! ([`Message`]). The calculation must match written bytes exactly: a mismatch means
+//! [`WireError::BadSize`], not appending into a grown buffer.
 
 use core::ops::Deref;
 
@@ -47,57 +47,57 @@ use oc_policy::Policy;
 
 use crate::{Recipient, SealedInfo};
 
-/// Наибольший размер одного сообщения.
+/// Maximum size of one message.
 ///
-/// Не «на всякий случай»: длина приходит из чужого процесса, и без потолка она
-/// становится указанием сколько памяти выделить. Мегабайта хватает с запасом —
-/// самое крупное сообщение несёт заголовок контейнера, а тот ограничен
-/// собственным пределом формата.
+/// Not "just in case": the length comes from another process; without a ceiling
+/// it becomes an instruction for how much memory to allocate. A megabyte leaves ample room:
+/// the largest message carries a container header, itself bounded
+/// by the format's own limit.
 pub const MAX_MESSAGE: usize = 1 << 20;
 
-/// Заголовок кадра для тела длиной `len`.
+/// Frame header for a body of length `len`.
 ///
-/// Тонкая обёртка над [`oc_format::frame::header`], и это не лишний слой:
-/// реализация переехала туда, когда у кадрирования появился ТРЕТИЙ потребитель —
-/// сервер за сокетом. Здесь остаётся только перевод ошибки в свою, чтобы
-/// вызывающему движка не приходилось знать про ошибки формата.
+/// A thin wrapper around [`oc_format::frame::header`], not a redundant layer:
+/// implementation moved there when framing gained a THIRD consumer,
+/// a socket-based server. Only error conversion remains here, so engine
+/// callers need not know format errors.
 ///
 /// # Errors
-/// Отдаёт [`WireError::TooLarge`], если тело длиннее `max`.
+/// Returns [`WireError::TooLarge`] when the body exceeds `max`.
 pub fn frame_header(len: usize, max: usize) -> Result<[u8; 4], WireError> {
     oc_format::frame::header(len, max).map_err(|_| WireError::TooLarge)
 }
 
-/// Длина тела из заголовка кадра, с потолком.
+/// Body length from the frame header, with a ceiling.
 ///
 /// # Errors
-/// Отдаёт [`WireError::TooLarge`], если объявленная длина больше `max`.
+/// Returns [`WireError::TooLarge`] when the declared length exceeds `max`.
 pub fn frame_len(head: [u8; 4], max: usize) -> Result<usize, WireError> {
     oc_format::frame::body_len(head, max).map_err(|_| WireError::TooLarge)
 }
 
-/// Отказ разбора провода.
+/// Wire-parsing failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WireError {
-    /// Сообщение кончилось раньше, чем разбор.
+    /// The message ended before parsing did.
     Truncated,
-    /// После разобранного сообщения остались байты.
+    /// Bytes remain after the parsed message.
     ///
-    /// Отдельный отказ, а не молчание: хвост означает, что отправитель и
-    /// получатель понимают раскладку по-разному, и продолжать нельзя.
+    /// A distinct rejection, not silence: trailing bytes mean sender and
+    /// receiver disagree on layout, so processing cannot continue.
     TrailingBytes,
-    /// Неизвестный вид сообщения.
+    /// Unknown message kind.
     UnknownKind(u8),
-    /// Значение поля не входит в объявленный набор.
+    /// A field value is outside its declared set.
     BadValue(&'static str),
-    /// Длина больше, чем [`MAX_MESSAGE`].
+    /// Length exceeds [`MAX_MESSAGE`].
     TooLarge,
-    /// Размер сообщения посчитан не так, как оно записано.
+    /// Computed message size differs from the written size.
     ///
-    /// Наружу не наблюдаем при верном расчёте — и всё же это отказ, а не паника
-    /// и не дозапись. Паника здесь запрещена литами, а «дописать сколько
-    /// понадобится» означало бы вернуть растущий буфер и вместе с ним копии
-    /// ключа в куче (И-11).
+    /// Not externally observable with correct calculation, yet still rejection rather than a panic
+    /// or extra writes. Lints forbid panics here, while "append as much as
+    /// needed" would restore a growing buffer and heap copies of
+    /// the key (I-11).
     BadSize,
 }
 
@@ -116,12 +116,12 @@ impl core::fmt::Display for WireError {
 
 impl std::error::Error for WireError {}
 
-/// Что упаковать: всё, что движку нужно знать, в собственном владении.
+/// What to pack: everything the engine needs to know, owned.
 ///
-/// Отдельный тип, а не [`crate::PackRequest`] с заимствованиями: через процесс
-/// заимствовать нечего. Превращается в пару «запрос + открытые ключи» методами
-/// ниже, чтобы у движка не появилось второго набора полей, который разойдётся с
-/// первым.
+/// A separate type, not a borrowing [`crate::PackRequest`]: borrowing across processes
+/// is impossible. The methods below turn it into a "request plus public keys" pair,
+/// preventing a second set of engine fields that would diverge from
+/// the first.
 #[derive(Debug, Clone)]
 pub struct PlanArgs {
     pub original_name: String,
@@ -134,28 +134,28 @@ pub struct PlanArgs {
     pub authority_sealing: [u8; 32],
     pub authority_lease_verify: [u8; 32],
     pub device: [u8; 32],
-    /// Гибридная открытая половина автора, 1216 байт. Есть только когда
-    /// получатель гибридный — иначе движку она не нужна и по трубе не едет.
+    /// Author hybrid public half, 1216 bytes. Present only for a
+    /// hybrid recipient; otherwise the engine does not need it and it does not traverse the pipe.
     pub device_hybrid: Option<Vec<u8>>,
-    /// Аппаратная гибридная половина автора, 1249 байт. Тем же правилом.
+    /// Author hardware-hybrid half, 1249 bytes. The same rule applies.
     pub device_hardware_hybrid: Option<Vec<u8>>,
     pub device_tpm: Option<Vec<u8>>,
-    /// Состав соавторов для тега `0x8001`. Едет открытыми ключами подписи —
-    /// ни одного секрета в нём нет.
+    /// Coauthor roster for tag `0x8001`. Travels as public signing keys,
+    /// containing no secrets.
     pub coauthors: Option<oc_format::header::Coauthors>,
 }
 
 impl PlanArgs {
-    /// Собрать владеющий запрос из заимствованных половин.
+    /// Construct an owned request from borrowed halves.
     ///
-    /// Нужен ровно одному вызывающему — тому, кто отправляет запрос в ЧУЖОЙ
-    /// процесс. Там имя файла и правила и так обязаны пересечь границу, и копия
-    /// неизбежна; путь внутри одного процесса за неё платить не должен.
+    /// Needed by exactly one caller: the one sending a request to ANOTHER
+    /// process. Filename and rules must cross that boundary anyway, making copying
+    /// unavoidable; the in-process path should not pay that cost.
     ///
-    /// Это не стилистика. Копия несёт НАСТОЯЩЕЕ ИМЯ ФАЙЛА, которое лежит в
-    /// приватных метаданных именно затем, чтобы его не было видно, — и лишняя
-    /// строка, освобождённая без затирания, остаётся в куче. Проба
-    /// `security_probe_secret_hygiene_second_pass` это поймала.
+    /// Not a style issue. The copy contains the REAL FILENAME, placed in
+    /// private metadata precisely to hide it; an extra string
+    /// freed without wiping remains in the heap. The probe
+    /// `security_probe_secret_hygiene_second_pass` caught this.
     #[must_use]
     pub fn from_parts(request: &crate::PackRequest<'_>, keys: &crate::PublicKeys<'_>) -> Self {
         Self {
@@ -176,7 +176,7 @@ impl PlanArgs {
         }
     }
 
-    /// Взгляд на эти же поля как на запрос упаковки.
+    /// View these fields as a packing request.
     #[must_use]
     pub fn request(&self) -> crate::PackRequest<'_> {
         crate::PackRequest {
@@ -200,7 +200,7 @@ impl PlanArgs {
         }
     }
 
-    /// Взгляд на эти же поля как на набор открытых ключей.
+    /// View these fields as a public-key set.
     #[must_use]
     pub fn keys(&self) -> crate::PublicKeys<'_> {
         crate::PublicKeys {
@@ -215,7 +215,7 @@ impl PlanArgs {
     }
 }
 
-/// Что движок отвечает на запрос плана.
+/// Engine response to a planning request.
 #[derive(Debug)]
 pub struct Planned {
     pub file_id: [u8; 16],
@@ -224,31 +224,31 @@ pub struct Planned {
     pub aead: AeadAlg,
 }
 
-/// Что движок отвечает на запрос сборки.
+/// Engine response to an assembly request.
 #[derive(Debug)]
 pub struct Done {
     pub header: Vec<u8>,
     pub content_desc: Vec<u8>,
 }
 
-/// Сообщение устройства движку.
+/// Device-to-engine message.
 #[derive(Debug)]
 pub enum Request {
     Plan(Box<PlanArgs>),
     Assemble(SealedInfo),
 }
 
-/// Сообщение движка устройству.
+/// Engine-to-device message.
 #[derive(Debug)]
 pub enum Response {
     Planned(Planned),
     Done(Done),
-    /// Отказ, уже превращённый в текст.
+    /// Failure already converted to text.
     ///
-    /// Текстом, а не кодом: у движка своя таксономия ошибок, и переносить её
-    /// через провод значило бы завести второй реестр номеров, который разойдётся
-    /// с первым. Человеку нужен текст, а машине здесь решать нечего — любой отказ
-    /// движка означает «файл не упакован».
+    /// Text rather than a code: the engine has its own error taxonomy; transporting it
+    /// over the wire would create a second numeric registry that would diverge
+    /// from the first. Humans need text; the machine has no decision here: any engine
+    /// failure means "file not packed".
     Failed(String),
 }
 
@@ -264,16 +264,16 @@ const KIND_FAILED: u8 = 5;
 const RECIPIENT_NONE: u8 = 0;
 const RECIPIENT_IDENTITY: u8 = 1;
 const RECIPIENT_CLAIM: u8 = 2;
-/// Гибридный ключ получателя — X-Wing, версия 4 формата.
+/// Recipient hybrid key: X-Wing, format version 4.
 const RECIPIENT_HYBRID: u8 = 3;
-/// Аппаратный гибрид получателя — MLKEM768-P256, версия 5.
+/// Recipient hardware hybrid: MLKEM768-P256, version 5.
 const RECIPIENT_HARDWARE_HYBRID: u8 = 4;
 
-/// Идентификаторы AEAD на проводе.
+/// AEAD identifiers on the wire.
 ///
-/// Match БЕЗ `_`: появление нового алгоритма обязано ломать сборку здесь, а не
-/// молча уезжать в неизвестное число. Это тот же приём, которым в формате
-/// держатся реестры идентификаторов.
+/// Match WITHOUT `_`: a new algorithm must break the build here rather than
+/// silently become an unknown number. The format's identifier registries
+/// use the same technique.
 fn aead_to_wire(alg: AeadAlg) -> u8 {
     match alg {
         AeadAlg::XChaCha20Poly1305 => 1,
@@ -291,31 +291,31 @@ fn aead_from_wire(value: u8) -> Result<AeadAlg, WireError> {
     }
 }
 
-/// Байты одного сообщения провода — в буфере фиксированной ёмкости.
+/// One wire message's bytes in a fixed-capacity buffer.
 ///
-/// Тип заведён не ради вкуса. Через провод едут ключ полезной нагрузки и
-/// код-претензия, а `Vec`, в который дописывают, отдаёт аллокатору старый блок
-/// при каждом перевыделении — с секретом внутри и до всякого `Drop` (И-11).
-/// Здесь ёмкость задаётся один раз, а содержимое затирается при уничтожении:
-/// это [`SecretBuf`], и все его гарантии распространяются на сообщение целиком,
-/// а не на одно «секретное» поле — раскладка провода не делит байты на важные и
-/// неважные.
+/// Not introduced for taste. The payload key and claim code travel over this
+/// wire, while an appended-to `Vec` returns its old block to the allocator
+/// on every reallocation, with secrets inside and before any `Drop` (I-11).
+/// Here capacity is set once and contents wiped on destruction:
+/// this is [`SecretBuf`], whose guarantees cover the entire message,
+/// not one "secret" field; the wire layout does not divide bytes into important
+/// and unimportant ones.
 ///
-/// Один тип на обе стороны намеренно. Приём из трубы — та же задача: длина
-/// известна заранее из кадра, и читать её в обычный вектор значило бы завести
-/// вторую, незатираемую копию того же сообщения.
+/// One type for both sides, deliberately. Pipe reception is the same problem: frame
+/// length is known in advance, and reading it into an ordinary vector would create
+/// a second, unwiped copy of the same message.
 ///
-/// [`Deref`] до `[u8]` — осознанная выдача байтов: их назначение — уехать в
-/// трубу, и обещание типа не в том, что их не прочитать, а в том, что буфер не
-/// перевыделяется и не переживает себя.
+/// [`Deref`] to `[u8]` deliberately exposes bytes: they are meant to enter
+/// a pipe. The type promises not unreadability but a buffer that
+/// never reallocates or outlives itself.
 pub struct Message(SecretBuf);
 
 impl Message {
-    /// Место под сообщение известной длины.
+    /// Storage for a message of known length.
     ///
-    /// Длина объявляется сразу и равна ёмкости: так [`Message::as_mut_slice`]
-    /// отдаёт всё место без затирания уже записанного, а хвоста за границей
-    /// значимых байт попросту не существует.
+    /// Length is declared immediately and equals capacity, so [`Message::as_mut_slice`]
+    /// returns all storage without wiping existing data; no tail beyond
+    /// meaningful bytes exists at all.
     #[must_use]
     pub fn with_len(len: usize) -> Self {
         let mut buf = SecretBuf::with_capacity(len);
@@ -326,18 +326,18 @@ impl Message {
         Self(buf)
     }
 
-    /// Байты сообщения.
+    /// Message bytes.
     #[must_use]
     pub fn as_slice(&self) -> &[u8] {
         self.0.as_slice()
     }
 
-    /// Всё место сообщения на запись — под приём из трубы или под сборку.
+    /// All message storage for writing, for pipe reception or assembly.
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         self.0.as_declared_mut()
     }
 
-    /// Ёмкость, заданная при создании. Она же длина: буфер не растёт.
+    /// Capacity set at creation, also its length: the buffer never grows.
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.0.capacity()
@@ -358,28 +358,28 @@ impl AsRef<[u8]> for Message {
 }
 
 impl core::fmt::Debug for Message {
-    /// Содержимое скрыто: в сообщении лежит ключ, а секрет в логе утекает так же,
-    /// как записанный на диск.
+    /// Contents hidden: messages contain a key, and a secret in a log leaks just like
+    /// one written to disk.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Message({} байт, содержимое скрыто)", self.capacity())
     }
 }
 
-/// Сложение размеров с отказом вместо переполнения.
+/// Add sizes with rejection rather than overflow.
 fn add(a: usize, b: usize) -> Result<usize, WireError> {
     a.checked_add(b).ok_or(WireError::TooLarge)
 }
 
-/// Размер куска с длиной впереди.
+/// Size of a length-prefixed piece.
 fn blob_size(len: usize) -> Result<usize, WireError> {
     add(4, len)
 }
 
-/// Сборщик байтов сообщения в буфере, который не растёт.
+/// Message-byte assembler using a nongrowing buffer.
 ///
-/// Ёмкость приходит извне посчитанной: это единственный способ не перевыделять
-/// буфер по дороге. Расхождение расчёта с записанным ловится в
-/// [`Writer::finish`] — молча дописать некуда.
+/// Capacity is calculated externally, the only way to avoid reallocating
+/// the buffer in flight. [`Writer::finish`] catches discrepancies between
+/// calculated and written sizes: there is nowhere to append silently.
 struct Writer {
     message: Message,
     at: usize,
@@ -412,19 +412,19 @@ impl Writer {
     fn u64(&mut self, v: u64) -> Result<(), WireError> {
         self.raw(&v.to_le_bytes())
     }
-    /// Кусок с длиной впереди.
+    /// A length-prefixed piece.
     fn blob(&mut self, v: &[u8]) -> Result<(), WireError> {
         let len = u32::try_from(v.len()).map_err(|_| WireError::TooLarge)?;
         self.u32(len)?;
         self.raw(v)
     }
-    /// Сообщение готово — и записано ровно столько, сколько обещал расчёт.
+    /// Message complete: exactly as many bytes written as calculation promised.
     fn finish(self) -> Result<Message, WireError> {
         if self.at == self.message.capacity() { Ok(self.message) } else { Err(WireError::BadSize) }
     }
 }
 
-/// Разборщик байтов сообщения.
+/// Message-byte parser.
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
@@ -463,27 +463,27 @@ impl<'a> Reader<'a> {
         let bytes = self.blob()?;
         String::from_utf8(bytes.to_vec()).map_err(|_| WireError::BadValue("не текст"))
     }
-    /// Разбор окончен, и байтов больше нет.
+    /// Parsing finished with no bytes remaining.
     ///
-    /// Хвост — это отказ, а не мелочь: он означает, что стороны понимают
-    /// раскладку по-разному. Молча его проглотив, мы позволили бы отправителю
-    /// дописывать в сообщение что угодно.
+    /// Trailing bytes mean rejection, not a minor detail: the parties disagree
+    /// on layout. Silently swallowing them would allow the sender to
+    /// append arbitrary data to the message.
     fn finish(self) -> Result<(), WireError> {
         if self.at == self.bytes.len() { Ok(()) } else { Err(WireError::TrailingBytes) }
     }
 }
 
-/// Размер запроса сборки: вид, длина, число чанков, корень дерева.
+/// Assembly-request size: kind, length, chunk count, tree root.
 const ASSEMBLE_SIZE: usize = 1 + 8 + 4 + 32;
 
-/// Закодировать сообщение устройства.
+/// Encode a device message.
 ///
-/// Запрос плана несёт код-претензию, поэтому собирается он ровно так же, как
-/// ответ с ключом: точный размер, буфер без роста, затирание при уничтожении.
+/// A planning request carries the claim code, so it is assembled exactly like
+/// the key-bearing response: exact size, nongrowing buffer, wiping on destruction.
 ///
 /// # Errors
-/// Отдаёт [`WireError`], если поле не помещается в объявленную длину, правила не
-/// кодируются или сообщение целиком не помещается в [`MAX_MESSAGE`].
+/// Returns [`WireError`] when a field exceeds its declared length, rules cannot
+/// be encoded, or the whole message exceeds [`MAX_MESSAGE`].
 pub fn encode_request(request: &Request) -> Result<Message, WireError> {
     match request {
         Request::Plan(args) => {
@@ -621,11 +621,11 @@ pub fn encode_request(request: &Request) -> Result<Message, WireError> {
     }
 }
 
-/// Разобрать сообщение устройства.
+/// Parse a device message.
 ///
 /// # Errors
-/// Отдаёт [`WireError`] при обрезанном сообщении, неизвестном виде, недопустимом
-/// значении поля или лишних байтах в хвосте.
+/// Returns [`WireError`] for truncation, unknown kind, invalid
+/// field values, or trailing bytes.
 pub fn decode_request(bytes: &[u8]) -> Result<Request, WireError> {
     let mut r = Reader::new(bytes);
     let kind = r.u8()?;
@@ -732,21 +732,21 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, WireError> {
     }
 }
 
-/// Размер ответа с планом: вид, `file_id`, ключ, размер чанка, номер AEAD.
+/// Plan-response size: kind, `file_id`, key, chunk size, AEAD number.
 ///
-/// Состав полей фиксирован, поэтому и размер фиксирован — считать его по месту
-/// нечего. Записан выражением, а не числом: при добавлении поля число разошлось
-/// бы с раскладкой молча, а выражение придётся править вместе с ней.
+/// Fields are fixed, so size is fixed: there is no reason to compute it locally.
+/// Written as an expression, not a number: adding a field would silently make a number diverge
+/// from layout, while the expression must change alongside it.
 const PLANNED_SIZE: usize = 1 + 16 + SECRET_LEN + 4 + 1;
 
-/// Закодировать ответ движка.
+/// Encode an engine response.
 ///
-/// Ответ с планом несёт ключ полезной нагрузки. Буфер под него выделяется точно
-/// по размеру и затирается при уничтожении — см. [`Message`].
+/// A plan response carries the payload key. Its buffer is allocated to exactly
+/// the required size and wiped on destruction; see [`Message`].
 ///
 /// # Errors
-/// Отдаёт [`WireError`], если поле не помещается в объявленную длину или
-/// сообщение целиком не помещается в [`MAX_MESSAGE`].
+/// Returns [`WireError`] when a field exceeds its declared length or
+/// the whole message exceeds [`MAX_MESSAGE`].
 pub fn encode_response(response: &Response) -> Result<Message, WireError> {
     match response {
         Response::Planned(planned) => {
@@ -775,11 +775,11 @@ pub fn encode_response(response: &Response) -> Result<Message, WireError> {
     }
 }
 
-/// Разобрать ответ движка.
+/// Parse an engine response.
 ///
 /// # Errors
-/// Отдаёт [`WireError`] при обрезанном сообщении, неизвестном виде, недопустимом
-/// значении поля или лишних байтах в хвосте.
+/// Returns [`WireError`] for truncation, unknown kind, invalid
+/// field values, or trailing bytes.
 pub fn decode_response(bytes: &[u8]) -> Result<Response, WireError> {
     let mut r = Reader::new(bytes);
     let kind = r.u8()?;
@@ -836,7 +836,7 @@ mod tests {
         }
     }
 
-    /// Запрос переживает провод без потерь во всех трёх видах получателя.
+    /// Requests survive the wire losslessly for all three recipient kinds.
     #[test]
     fn a_request_survives_the_wire_in_every_recipient_mode() {
         for recipient in [
@@ -857,12 +857,12 @@ mod tests {
         }
     }
 
-    /// СОСТАВ СОАВТОРОВ ПЕРЕЖИВАЕТ ПРОВОД, А НЕИСПОЛНИМЫЙ ОТВЕРГАЕТСЯ НА РАЗБОРЕ.
+    /// COAUTHOR ROSTERS SURVIVE THE WIRE; UNEXECUTABLE ROSTERS FAIL AT PARSING.
     ///
-    /// Молчаливая потеря состава на трубе дала бы контейнер без тега при
-    /// названных флагах — сервер не закрепил бы состав, и автор узнал бы это
-    /// только когда единоличная смена прошла бы. Поэтому состав едет полностью, а
-    /// сообщение с неисполнимым составом не разбирается вовсе.
+    /// Silently losing a roster in the pipe would produce a container with flags
+    /// but no tag; the server would not pin the roster, and the author would learn only
+    /// when a unilateral change succeeded. Thus the roster travels in full,
+    /// and a message with an unexecutable roster cannot parse at all.
     #[test]
     fn a_coauthor_roster_survives_the_wire_and_a_broken_one_is_refused() {
         let roster = oc_format::header::Coauthors { threshold: 2, keys: vec![[1u8; 32], [0x42; 32]] };
@@ -907,7 +907,7 @@ mod tests {
         assert!(decode_request(truncated).is_err(), "обрезанный состав разобран");
     }
 
-    /// Сведения о запечатанном потоке переживают провод.
+    /// Sealed-stream information survives the wire.
     #[test]
     fn the_sealed_info_survives_the_wire() {
         let sealed = SealedInfo { total_len: 1 << 40, chunk_count: 7, tree_root: [5u8; 32] };
@@ -920,7 +920,7 @@ mod tests {
         assert_eq!(back.tree_root, sealed.tree_root);
     }
 
-    /// Ответы переживают провод, включая ключ полезной нагрузки.
+    /// Responses survive the wire, including the payload key.
     #[test]
     fn the_responses_survive_the_wire() {
         let planned = Response::Planned(Planned {
@@ -946,13 +946,13 @@ mod tests {
         assert_eq!(back.content_desc, vec![4, 5]);
     }
 
-    /// ОБРЕЗАННОЕ, ЛИШНЕЕ И НЕИЗВЕСТНОЕ ОТВЕРГАЮТСЯ, А НЕ ДОГАДЫВАЮТСЯ.
+    /// TRUNCATED, EXTRA, AND UNKNOWN DATA ARE REJECTED, NOT GUESSED.
     ///
-    /// Сообщение приходит из другого процесса, то есть это разбор враждебного
-    /// ввода со всеми вытекающими. Хвост здесь — отдельная проверка, и она не
-    /// педантизм: лишние байты означают, что стороны понимают раскладку
-    /// по-разному, а молчаливое проглатывание позволило бы отправителю дописывать
-    /// в сообщение что угодно.
+    /// Messages arrive from another process, hence hostile-input
+    /// parsing with all its consequences. Trailing bytes receive a separate check,
+    /// for good reason: extra bytes mean the parties disagree on layout,
+    /// and swallowing them silently would let the sender append
+    /// arbitrary data to the message.
     #[test]
     fn a_damaged_message_is_refused_rather_than_guessed() {
         let bytes = encode_request(&Request::Plan(Box::new(args()))).unwrap();
@@ -970,11 +970,11 @@ mod tests {
         assert_eq!(decode_request(&[]).unwrap_err(), WireError::Truncated);
     }
 
-    /// ПОТОЛОК КАДРА ПРОВЕРЯЕТСЯ В ОБЕ СТОРОНЫ И ДО ВЫДЕЛЕНИЯ.
+    /// FRAME LIMITS ARE CHECKED IN BOTH DIRECTIONS BEFORE ALLOCATION.
     ///
-    /// Правило жило в двух копиях — у движка и у клиента, — и обе повторяли его
-    /// словами. Третий потребитель дал бы третью копию, а расхождение копий тут
-    /// означает разночтение длины между процессами.
+    /// This rule lived in two copies, engine and client, each repeating it
+    /// in words. A third consumer would add a third copy; divergence here
+    /// means processes disagreeing on length.
     #[test]
     fn the_frame_ceiling_holds_in_both_directions() {
         assert_eq!(frame_header(3, 10).unwrap(), 3u32.to_le_bytes());
@@ -990,14 +990,14 @@ mod tests {
         assert_eq!(frame_len(u32::MAX.to_le_bytes(), MAX_MESSAGE).unwrap_err(), WireError::TooLarge);
     }
 
-    /// СООБЩЕНИЕ С СЕКРЕТОМ СОБИРАЕТСЯ В БУФЕРЕ ТОЧНОГО РАЗМЕРА.
+    /// SECRET-BEARING MESSAGES ARE ASSEMBLED IN EXACT-SIZE BUFFERS.
     ///
-    /// Проверяется не «красиво посчитано», а И-11: буфер, у которого ёмкость
-    /// равна длине, не перевыделялся по дороге — а значит, не отдал аллокатору
-    /// промежуточную копию ключа полезной нагрузки и кода-претензии до всякого
-    /// `Drop`. Ошибка расчёта в любую сторону видна здесь же: посчитали меньше —
-    /// [`Writer::raw`] откажет, посчитали больше — не сойдётся `finish`, и оба
-    /// случая дают [`WireError::BadSize`], а не подросший буфер.
+    /// Tests I-11, not "nice arithmetic": a buffer whose capacity
+    /// equals length never reallocated in flight, hence never returned an intermediate
+    /// copy of the payload key or claim code to the allocator before
+    /// `Drop`. Either calculation error is visible here: underestimate and
+    /// [`Writer::raw`] rejects; overestimate and `finish` fails. Both
+    /// return [`WireError::BadSize`], not a grown buffer.
     #[test]
     fn a_message_carrying_a_secret_is_built_in_a_buffer_of_the_exact_size() {
         let planned = Response::Planned(Planned {
@@ -1038,10 +1038,10 @@ mod tests {
         assert_eq!(message.len(), message.capacity(), "буфер с кодом-претензией не должен расти");
     }
 
-    /// Сообщение не выдаёт своё содержимое в `Debug`.
+    /// Messages do not disclose their contents through `Debug`.
     ///
-    /// В нём лежит ключ полезной нагрузки, а секрет в логе или в отчёте о панике
-    /// утекает ровно так же, как записанный на диск.
+    /// They contain a payload key, and a secret in a log or panic report
+    /// leaks exactly like one written to disk.
     #[test]
     fn a_message_never_prints_its_bytes() {
         let planned = Response::Planned(Planned {

@@ -1,8 +1,8 @@
-//! Правка на уровне байтов: сертификат, подпись редактора, голова сеанса и
-//! решение `verify_edition` (`docs/format.md`, «ПРАВКА ИСПОЛНИМА»).
+//! Editing at byte level: certificate, editor signature, session head, and
+//! the `verify_edition` decision (`docs/format.md`, "EDITING IS EXECUTABLE").
 //!
-//! Подпись — программным подписантом проб (`oc_crypto::rsa_test_signer`):
-//! соль параметром, поэтому вектор воспроизводим. Продуктовый ключ — в TPM.
+//! Signed with the software test signer (`oc_crypto::rsa_test_signer`):
+//! salt is a parameter, making the vector reproducible. The product key lives in the TPM.
 
 // Пробы вправе паниковать и считать без проверок; чтение вектора с диска —
 // единственный ввод-вывод, и он в пробе, а не в крейте.
@@ -82,7 +82,7 @@ fn cert_by(signer: &Ed25519Signer, file_id: [u8; 16], key: [u8; 256], not_after:
     EditorCert::issue(signer, file_id, DEVICE, key, not_after).unwrap()
 }
 
-/// Подписанная правка: описание, заверенное тело, сумма.
+/// Signed edit: description, authenticated body, digest.
 fn signed_edit(
     cert: Vec<u8>,
     key: &oc_crypto::rsa_test_signer::TestRsaKey,
@@ -107,7 +107,7 @@ fn signed_edit(
     (desc, body)
 }
 
-/// Через MAC и обратно — так, как читатель получает тело.
+/// Through the MAC and back: the way the reader obtains the body.
 fn round_trip(desc: &ContentDesc) -> (ContentDesc, Vec<u8>) {
     let key = MacKey::from_bytes([9; 32]);
     let bytes = desc.encode(&key, &FILE_ID, CONTAINER_VERSION).unwrap();
@@ -298,7 +298,7 @@ fn unhex(text: &str) -> Vec<u8> {
     (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect()
 }
 
-/// Значения вектора `tests/kat/edit.kat`, как их производит этот код.
+/// Values of `tests/kat/edit.kat` as produced by this code.
 fn kat_values() -> Vec<(&'static str, Vec<u8>)> {
     let cert = cert_by(&author(), FILE_ID, TEST_KEY_A.modulus(), NOW + 60);
     let start = session_start(&FILE_ID, 0, &[0x33; 32]);
@@ -320,7 +320,7 @@ fn kat_values() -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
-/// Печать вектора — для перевыпуска ВМЕСТЕ с решением в `docs/format.md`.
+/// Print the vector for reissuance TOGETHER with a decision in `docs/format.md`.
 #[test]
 #[ignore = "печать вектора, не проба"]
 fn print_edit_kat() {
@@ -329,10 +329,10 @@ fn print_edit_kat() {
     }
 }
 
-/// ЗАМОРОЖЕННЫЙ ВЕКТОР ПРАВКИ.
+/// FROZEN EDIT VECTOR.
 ///
-/// Упал — значит изменились байты сертификата, транскрипта или цепочки сеанса,
-/// обещанные неизменными (И-14): чинить код, а не вектор.
+/// A failure means certificate, transcript, or session chain bytes have changed,
+/// despite their immutability promise (I-14): fix the code, not the vector.
 #[test]
 fn the_frozen_edit_vector_still_holds() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/kat/edit.kat");

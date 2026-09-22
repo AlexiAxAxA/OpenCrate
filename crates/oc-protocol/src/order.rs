@@ -1,224 +1,224 @@
-//! Распоряжение автора серверу: что сделать с файлом.
+//! An author's order to the server: what to do with a file.
 //!
-//! До 2026-09-03 регистрация и отзыв были операторскими командами `cca` на
-//! машине сервера, и «кто для сервера автор» решалось тем, у кого есть доступ к
-//! этой машине. По проводу так нельзя: `file_id` лежит в заголовке открытым, и
-//! без подписи любой, кому файл переслали, зарегистрировал бы его на своих
-//! условиях или отозвал у всех (`docs/protocol.md` §9.3).
+//! Before 2026-09-03, registration and revocation were operator `cca` commands on
+//! the server machine, so who counted as the author depended on who had access to
+//! that machine. This cannot work over the wire: `file_id` is public in the header,
+//! and without a signature anyone receiving the file could register it under their own
+//! terms or revoke it for everyone (`docs/protocol.md` §9.3).
 //!
-//! Распоряжение — TLV-документ за подписью КЛЮЧА АВТОРА, того самого, что
-//! подписал заголовок контейнера. Регистрация несёт рядом заголовок целиком:
-//! сервер проверяет подпись заголовка, берёт из него ключ автора и им
-//! проверяет распоряжение — ключ автора сервер узнаёт не со слов просителя, а
-//! из документа, который получатель изменить не может. Отзыв проверяется
-//! ключом, запомненным при регистрации.
+//! An order is a TLV document signed by the AUTHOR KEY, the same key that
+//! signed the container header. Registration carries the entire header alongside it:
+//! the server verifies the header signature, extracts the author key and uses it
+//! to verify the order. The server learns the author key not from the requester's claims but
+//! from a document the recipient cannot modify. Revocation is verified using
+//! the key remembered during registration.
 //!
-//! Раскладка та же, что у отзывной и у лизинга: `подпись(64) ‖ тело`. Подпись
-//! идёт первой, чтобы обрубок документа не разбирался «почти успешно».
+//! The layout matches revocations and leases: `signature(64) ‖ body`. The signature
+//! comes first so that a truncated document cannot parse "almost successfully".
 //!
-//! Момент выписки — часть тела и часть подписи: сервер принимает только
-//! свежее распоряжение (допуск перекоса часов), так что документ, пролежавший
-//! где-то и всплывший, не исполняется.
+//! Issuance time is part of the body and signature: the server accepts only
+//! fresh orders (allowing clock skew), so a document resurfacing
+//! after lying somewhere is not executed.
 //!
-//! Свежести мало, и здесь стояло, что её и довольно: «обе операции идемпотентны,
-//! повтор ничего не даёт». Написано это было о двух видах — регистрации и
-//! отзыве; видов теперь восемь, и повтор голоса, состава или оттепели меняет
-//! состояние. Порядок МЕЖДУ распоряжениями держит сервер барьером по виду
-//! (`docs/protocol.md` §11.11), а не эта проверка.
+//! Freshness is insufficient, although this documentation formerly claimed otherwise: "both operations are idempotent,
+//! replay does nothing". That described two kinds, registration and
+//! revocation; there are now eight, and replaying a vote, roster or thaw changes
+//! state. Order BETWEEN commands is maintained by the server using a per-kind barrier
+//! (`docs/protocol.md` §11.11), not by this check.
 
-//! Видов распоряжений больше двух: к регистрации и отзыву добавились признак
-//! жизни автора и назначение наследника (`docs/protocol.md` §11). Раскладка,
-//! подпись и правило свежести у всех общие — различается только состав полей.
-//! Состав проверяется по виду в ОБЕ стороны, одной функцией `check`: разойдись
-//! проверка записи с проверкой разбора хоть на одно поле — и распоряжение,
-//! которое мы отказываемся выписать, мы всё же исполнили бы, придя оно со
-//! стороны.
+//! There are more than two order kinds: author proof of life and heir appointment
+//! joined registration and revocation (`docs/protocol.md` §11). Layout,
+//! signature and freshness rule are shared; only the field set differs.
+//! The field set is checked against the kind in BOTH directions by one `check` function:
+//! if encoding and decoding checks differed by even one field, an order
+//! we refuse to issue could nevertheless be executed if received
+//! from outside.
 
 use oc_crypto::CryptoError;
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
 
-/// Версия тела распоряжения.
+/// Order body version.
 pub const ORDER_VERSION: u16 = 1;
 
-/// Длина подписи Ed25519 перед телом.
+/// Length of the Ed25519 signature preceding the body.
 pub const SIGNATURE_LEN: usize = 64;
 
-/// Сколько наследников принимает одно распоряжение.
+/// Maximum heirs accepted by one order.
 ///
-/// Шестнадцать — тот же предел, что у состава, и по той же причине: список
-/// читает человек, и тот, в котором он не находит нужное глазами, ничем не лучше
-/// отсутствующего. Предел стоит и до выделения памяти: поток в мегабайт иначе
-/// заставил бы собрать тысячи решений, чтобы затем их отвергнуть.
+/// Sixteen, the same limit as the roster and for the same reason: a human
+/// reads the list, and one where they cannot find an entry visually is no better
+/// than no list. The limit is also checked before allocation: otherwise a megabyte stream
+/// would force collection of thousands of decisions only to reject them afterward.
 pub const MAX_HEIRS: usize = 16;
 
-/// Сколько ключей принимает один состав — соавторов или одобряющих.
+/// Maximum keys in one coauthor or approver roster.
 ///
-/// Шестнадцать: столько же, сколько адресов сервера в заголовке и запросов в
-/// очереди, и по той же причине — величина, которую человек в состоянии
-/// просмотреть глазами. Предел делят обе стороны: он часть формата документа, а
-/// не вкус сервера.
+/// Sixteen, the same as server addresses in the header and requests in the
+/// queue, for the same reason: a quantity a person can
+/// review visually. Both parties share this limit: it belongs to the document format,
+/// not server preference.
 pub const MAX_KEYS: usize = 16;
 
-/// Сколько имён одного устройства называет замена.
+/// Number of names for one device in a replacement.
 ///
-/// Четыре — столько механизмов у устройства бывает сразу: X25519, X-Wing, P-256
-/// в TPM и аппаратный гибрид. Больше означало бы уже не одно устройство.
+/// Four: the mechanisms one device may have simultaneously are X25519, X-Wing, P-256
+/// in a TPM and a hardware hybrid. More would no longer represent a single device.
 pub const MAX_DEVICE_NAMES: usize = 4;
 
-/// Теги тела. Все критичные: незнакомый тег — отказ (И-7).
+/// Body tags. All critical: an unknown tag is rejected (I-7).
 pub mod tag {
     pub const VERSION: u16 = 1;
     pub const FILE_ID: u16 = 2;
     pub const KIND: u16 = 3;
     pub const AT: u16 = 4;
-    /// Только для регистрации: предел устройств.
+    /// Registration only: device limit.
     pub const MAX_DEVICES: u16 = 5;
-    /// Только для регистрации: предел выдач.
+    /// Registration only: issuance limit.
     pub const MAX_GRANTS: u16 = 6;
-    /// Только у `SetCoauthors`/`SetApprovers`: ключи подряд по 32 байта.
+    /// `SetCoauthors`/`SetApprovers` only: consecutive 32-byte keys.
     ///
-    /// Потоком без нумерации, а не тегом на ключ: номер тегом упирается в
-    /// потолок 65536 (И-7), а здесь он не нужен вовсе — длина элемента
-    /// постоянна, и порядок задаётся положением.
+    /// An unnumbered stream rather than one tag per key: numbering by tag hits the
+    /// 65536 ceiling (I-7), and is unnecessary here because element length
+    /// is constant and position determines order.
     pub const KEYS: u16 = 7;
-    /// Только у `SetCoauthors`/`SetApprovers`: сколько подписей из состава
-    /// требуется. Ноль при пустом составе означает «кворума нет».
+    /// `SetCoauthors`/`SetApprovers` only: required signatures from the
+    /// roster. Zero with an empty roster means "no quorum".
     pub const THRESHOLD: u16 = 8;
-    /// Только у `ApproveDevice`: за какое устройство голос.
+    /// `ApproveDevice` only: the device being voted on.
     pub const DEVICE_FPR: u16 = 9;
-    /// Только у `ApproveDevice`: за или против.
+    /// `ApproveDevice` only: for or against.
     pub const APPROVE: u16 = 10;
-    /// Только у `SetHeir{Open|Close}`: сколько секунд молчания автора считать
-    /// событием.
+    /// `SetHeir{Open|Close}` only: seconds of author silence that constitute
+    /// an event.
     pub const SILENCE_SECONDS: u16 = 11;
-    /// Только у `SetHeir`: что делать после тишины.
+    /// `SetHeir` only: what to do after silence.
     pub const HEIR_MODE: u16 = 12;
-    /// Только у `SetHeir{Open}`: готовые решения автора наследникам, потоком.
+    /// `SetHeir{Open}` only: completed author decisions for heirs, as a stream.
     ///
-    /// # Почему поток, и почему номер не сожжён
+    /// # Why a stream, and why the number was not retired
     ///
-    /// Заводился тег под ОДНО решение. Наследников оказалось несколько (решение
-    /// заказчика 2026-09-05), и содержимое расширено до потока
-    /// `u32le длина ‖ Decision`, повторяющегося до `MAX_HEIRS` раз.
+    /// The tag was created for ONE decision. Multiple heirs were needed (customer decision
+    /// of 2026-09-05), so the contents became a stream of
+    /// `u32le length ‖ Decision`, repeated up to `MAX_HEIRS` times.
     ///
-    /// Номер при этом не переиспользован под другой смысл, а тот же смысл выражен
-    /// точнее: «кому и что достаётся после тишины». И-7 запрещает первое, но не
-    /// второе. Сжигать номер было бы не осторожностью, а суеверием: ни один
-    /// сервер с назначенным наследником не выпущен, а документы протокола, кроме
-    /// лизинга, не заморожены (`docs/protocol.md` §0). Один наследник —
-    /// по-прежнему законный случай: поток из одной записи.
+    /// The number was not repurposed for a different meaning; the same meaning was expressed
+    /// more precisely: "who gets what after silence". I-7 forbids the former, not
+    /// the latter. Retiring the number would be superstition rather than caution: no
+    /// server with an appointed heir has shipped, and protocol documents other than
+    /// leases are not frozen (`docs/protocol.md` §0). A single heir remains
+    /// a valid case: a one-entry stream.
     pub const BEQUEST: u16 = 13;
-    /// Чей ключ проверяет подпись, когда взять его по файлу нельзя.
+    /// Whose key verifies the signature when it cannot be obtained from the file.
     ///
-    /// # Почему имя сменилось, а номер нет
+    /// # Why the name changed but the number did not
     ///
-    /// Тег заводился как `AUTHOR_KEY` — «чьё присутствие отмечено» у признака
-    /// жизни за все файлы сразу. С голосом одобряющего выяснилось, что смысл у
-    /// поля ШИРЕ: подписывает не автор, а член состава, и его ключ по файлу тоже
-    /// не найти — сервер помнит у файла ключ АВТОРА. Имя `author_key` при этом
-    /// стало бы ложью с видом истины: под ним лежал бы ключ постороннего.
+    /// The tag began as `AUTHOR_KEY`, "whose presence is recorded" in proof of life
+    /// for all files. Approver voting revealed the field's broader
+    /// meaning: a roster member signs, not the author, and that key also cannot be
+    /// found from the file: the server remembers the AUTHOR's key. The name `author_key`
+    /// would then be a lie presented as truth, containing someone else's key.
     ///
-    /// Номер остался прежним намеренно. И-7 запрещает переиспользовать номера
-    /// под ДРУГИМ смыслом, а смысл здесь тот же самый и всегда был им: «ключ,
-    /// которым проверять этот документ». Менять номер значило бы сжечь его ради
-    /// уточнения формулировки.
+    /// The number deliberately remained unchanged. I-7 prohibits reusing numbers
+    /// with a DIFFERENT meaning; this meaning is and always was "the key
+    /// used to verify this document". Changing the number would retire it merely
+    /// to refine the wording.
     ///
-    /// Обязателен у `Alive` с нулевым `file_id` и у `ApproveDevice`; запрещён
-    /// везде ещё.
+    /// Required for `Alive` with zero `file_id` and for `ApproveDevice`; forbidden
+    /// everywhere else.
     pub const SIGNER_KEY: u16 = 14;
-    /// Только у `SetCoauthors`: сколько живёт предложение, не набравшее подписей.
+    /// `SetCoauthors` only: lifetime of a proposal lacking enough signatures.
     ///
-    /// Необязателен: отсутствие означает «умолчание сервера», а не «ноль». Файл,
-    /// у которого срок не назван, ведёт себя как вёл.
+    /// Optional: absence means "server default", not "zero". A file
+    /// with no specified lifetime behaves as before.
     pub const PROPOSAL_TTL: u16 = 15;
-    /// Только у `Freeze`: 1 — заморозить выдачи по всем файлам ключа, 0 — снять.
+    /// `Freeze` only: 1 freezes issuance for all files under the key, 0 unfreezes it.
     ///
-    /// Направление — часть подписанного распоряжения, как режим у наследника:
-    /// «остановить всё» и «пустить всё» — противоположные веления, и выбирать
-    /// между ними обязан автор, а не тот, у кого есть доступ к серверу.
+    /// Direction belongs to the signed order, like heir mode:
+    /// "stop everything" and "allow everything" are opposite commands, and the author
+    /// must choose, not whoever has server access.
     pub const FROZEN: u16 = 16;
-    /// Только у `ReplaceDevice`: имена ПРЕЖНЕГО устройства (K27) подряд по 32 байта,
-    /// от одного до [`super::MAX_DEVICE_NAMES`]. Имён несколько, потому что у
-    /// одного устройства их несколько — классическое, X-Wing, аппаратные.
+    /// `ReplaceDevice` only: OLD device names (K27), consecutive 32-byte entries,
+    /// from one to [`super::MAX_DEVICE_NAMES`]. Multiple names because one
+    /// device has several: classical, X-Wing and hardware.
     pub const OLD_DEVICES: u16 = 17;
-    /// Только у `ReplaceDevice`: имена НОВОГО устройства (K27), тем же потоком.
+    /// `ReplaceDevice` only: NEW device names (K27), in the same stream format.
     pub const NEW_DEVICES: u16 = 18;
-    /// Только у `SetRule` и обязателен в нём: правило файла по атрибутам,
-    /// кодек [`crate::attribute_rule`]. Пустое правило законно и снимает прежнее.
+    /// Required and exclusive to `SetRule`: file attribute rule,
+    /// using [`crate::attribute_rule`]. An empty rule is valid and clears the previous one.
     pub const RULE: u16 = 19;
-    /// Только у `WatchAuthor` и обязателен в нём: ключ подписи лизингов сервера,
-    /// которому адресовано доказательство. Привязывает его к серверу и к
-    /// арендатору: у размещённого профиля ключ свой у каждого.
+    /// Required and exclusive to `WatchAuthor`: the lease-signing key of the server
+    /// to which the proof is addressed. Binds it to the server and
+    /// tenant: each has its own key in the hosted profile.
     pub const AUTHORITY_KEY: u16 = 20;
-    /// Только у `RevokeGrant` и обязателен в нём: имя гранта агента, который
-    /// гасится (`crate::agent::AgentGrant::grant_id`).
+    /// Required and exclusive to `RevokeGrant`: the agent grant name being
+    /// revoked (`crate::agent::AgentGrant::grant_id`).
     ///
-    /// Гранта, а не файла: грант выдан на ПОДДЕРЕВО, и погасить его — одно
-    /// веление, а не N велений по числу файлов. Отзыв по файлу оставил бы
-    /// цепочку наполовину живой ровно тогда, когда автор хочет её погасить.
+    /// Grant, not file: a grant covers a SUBTREE, so revoking it is one
+    /// command rather than N commands for N files. Per-file revocation would leave
+    /// the chain half alive precisely when the author wants to disable it.
     pub const GRANT_ID: u16 = 21;
 }
 
-/// Что велено сделать.
+/// What to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Kind {
-    /// Зарегистрировать файл с названными пределами.
+    /// Register the file with the specified limits.
     Register = 1,
-    /// Отозвать доступ к файлу.
+    /// Revoke file access.
     Revoke = 2,
-    /// Сменить пределы устройств и выдач у уже занятого файла.
+    /// Change device and issuance limits for an already registered file.
     SetLimits = 3,
-    /// Назначить состав соавторов и порог их подписей.
+    /// Set the coauthor roster and signature threshold.
     SetCoauthors = 4,
-    /// Назначить состав одобряющих открытие и порог их голосов.
+    /// Set the opening approver roster and vote threshold.
     SetApprovers = 5,
-    /// Голос одобряющего за конкретное устройство.
+    /// An approver's vote on a specific device.
     ApproveDevice = 6,
-    /// Автор здесь: отодвинуть срок тишины.
+    /// The author is here: postpone the silence deadline.
     Alive = 7,
-    /// Назначить наследника, закрыть по тишине или снять и то и другое.
+    /// Appoint an heir, close after silence, or clear both.
     SetHeir = 8,
-    /// Кнопка паники: остановить выдачи по ВСЕМ файлам ключа — либо пустить их.
+    /// Panic button: stop issuance for ALL files under the key, or resume it.
     ///
-    /// За все файлы сразу и без файла вовсе, как признак жизни: утечка ключа
-    /// или инцидент — свойство автора, а не документа, и останавливать
-    /// документы по одному значило бы дать противнику время, которого у него не
-    /// должно быть.
+    /// All files at once, with no file required, like proof of life: a key leak
+    /// or incident concerns the author, not a document; stopping files one by
+    /// one would give the adversary time they should not
+    /// have.
     Freeze = 9,
-    /// Заменить потерянное устройство новым: освободить имена прежнего и
-    /// занять место за именами нового одной записью (Ф-26, B3b).
+    /// Replace a lost device with a new one: release the old names and
+    /// reserve their place for the new names in one write (F-26, B3b).
     ///
-    /// Подписывает автор — дверью распоряжений §9.3, под кворумом соавторов,
-    /// если он назначен. Код доступа и код-претензия права замены не дают:
-    /// кто держит код, тот держит ОДНУ выдачу, а не право вытеснить чужое место.
+    /// Signed by the author through the §9.3 order interface, under a coauthor quorum
+    /// when configured. Access and claim codes grant no replacement authority:
+    /// whoever holds a code holds ONE issuance, not the right to displace someone else's place.
     ReplaceDevice = 10,
-    /// Задать правило файла по атрибутам держателя: ворота выдачи, потолок
-    /// срока, ужесточения действий (Ф-27, B4b).
+    /// Set a file rule based on holder attributes: issuance gate, lifetime
+    /// cap and action restrictions (F-27, B4b).
     ///
-    /// Правило — про ФАЙЛ, и задаёт его хозяин файла: подписью автора или
-    /// кворумом соавторов, той же дверью, что пределы. Словарь и держания — про
-    /// организацию, и их этой дверью не задать: подпись одного автора, меняющая
-    /// держания, меняла бы доступ к файлам других авторов.
+    /// The rule concerns a FILE and is set by its owner: author signature or
+    /// coauthor quorum through the same interface as limits. The dictionary and attribute holdings concern
+    /// the organization and cannot be set through this interface: one author's signature changing
+    /// holdings would change access to other authors' files.
     SetRule = 11,
-    /// Доказательство владения ключом автора для подписки на события ВСЕХ его
-    /// файлов (`docs/protocol.md` §9.9, B5).
+    /// Proof of possession of the author key for subscribing to events for ALL their
+    /// files (`docs/protocol.md` §9.9, B5).
     ///
-    /// Не веление: дверь распоряжений его не исполняет, а подписка не
-    /// принимает другие виды. Документ тот же, что у распоряжений, — второй
-    /// формат со своей меткой завёл бы второе определение того, «что автор
-    /// подписал»; домены разводит этот байт вида внутри подписанного тела.
+    /// Not a command: the order interface does not execute it, and subscriptions do not
+    /// accept other kinds. It uses the same document as orders; a second
+    /// format with its own label would create a second definition of "what the author
+    /// signed". This kind byte inside the signed body separates the domains.
     WatchAuthor = 12,
-    /// Погасить грант агента: сервер перестаёт выписывать лизы всей цепочке
-    /// (Agent Protocol, этап 1, §4 шаг 6).
+    /// Revoke an agent grant: the server stops issuing leases for the entire chain
+    /// (Agent Protocol, stage 1, §4 step 6).
     ///
-    /// Без файла и МИМО КВОРУМА — как кнопка паники, и по тому же доводу:
-    /// погашение есть безопасное направление (И-10), а грант выдан на поддерево,
-    /// то есть ни одному файлу в отдельности не принадлежит. Кворум соавторов
-    /// здесь и вовсе не при чём: грант выпущен подписью автора единолично, и
-    /// гасит его тот же ключ.
+    /// Without a file and BYPASSING QUORUM, like the panic button, for the same reason:
+    /// revocation is the safe direction (I-10), and the grant covers a subtree,
+    /// so belongs to no individual file. A coauthor quorum
+    /// is irrelevant here: the author issued the grant alone,
+    /// and the same key revokes it.
     RevokeGrant = 13,
 }
 
@@ -243,24 +243,24 @@ impl Kind {
     }
 }
 
-/// Что делать, когда автор замолчал дольше срока.
+/// What to do when the author's silence exceeds the interval.
 ///
-/// Режим — часть подписанного распоряжения, а не состояние сервера: «открыть
-/// наследнику» и «закрыть всем» — противоположные судьбы документа, и выбирать
-/// между ними обязан автор. Живи режим только на сервере, судьбу выбирал бы
-/// тот, у кого есть доступ к серверу.
+/// Mode is part of the signed order, not server state: "open for
+/// the heir" and "close for everyone" are opposite document outcomes, and the author
+/// must choose. If mode lived only on the server, the outcome would be chosen by
+/// whoever had server access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum HeirMode {
-    /// Снять наследника и срок вовсе.
+    /// Clear the heir and interval entirely.
     ///
-    /// Отдельным ЗНАЧЕНИЕМ, а не отсутствием поля: «снять» — распоряжение,
-    /// которое сервер обязан исполнить и записать в журнал, и отличить его от
-    /// «поле забыли» надо на разборе, а не догадкой.
+    /// A separate VALUE rather than an absent field: "clear" is an order
+    /// the server must execute and journal; parsing must distinguish it from
+    /// "field forgotten", without guessing.
     Off = 0,
-    /// Открыть наследнику завещание.
+    /// Open the bequest for the heir.
     Open = 1,
-    /// Закрыть файл всем.
+    /// Close the file for everyone.
     Close = 2,
 }
 
@@ -275,66 +275,66 @@ impl HeirMode {
     }
 }
 
-/// Распоряжение, как его видят обе стороны.
+/// The order as seen by both parties.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Order {
     pub file_id: [u8; 16],
     pub kind: Kind,
-    /// Момент выписки по часам автора, секунды UTC.
+    /// Issuance time by the author's clock, UTC seconds.
     pub at: i64,
-    /// Пределы — у регистрации и у смены пределов; у прочих видов их быть не
-    /// должно.
+    /// Limits belong to registration and limit changes; they must not appear
+    /// in other kinds.
     pub max_devices: Option<u32>,
     pub max_grants: Option<u32>,
-    /// Состав — у назначения соавторов и одобряющих.
+    /// Roster for assigning coauthors and approvers.
     ///
-    /// Порядок ключей значения не имеет и на исполнение не влияет; сохраняется
-    /// он затем, чтобы круг кодирования сходился побайтно, а подпись покрывала
-    /// ровно то, что автор видел.
+    /// Key order has no semantic or execution effect; it is preserved
+    /// so encoding round trips match byte for byte and the signature covers
+    /// exactly what the author saw.
     pub keys: Option<Vec<[u8; 32]>>,
-    /// Порог — вместе с составом и только с ним.
+    /// Threshold accompanies the roster, and only the roster.
     pub threshold: Option<u8>,
-    /// За какое устройство голос — только у `ApproveDevice`.
+    /// Device being voted on: `ApproveDevice` only.
     pub device_fpr: Option<[u8; 32]>,
-    /// За или против — только у `ApproveDevice`.
+    /// For or against: `ApproveDevice` only.
     pub approve: Option<bool>,
-    /// Срок тишины — у назначения наследника и у закрытия по тишине.
+    /// Silence interval for heir appointment and closing after silence.
     pub silence_seconds: Option<u64>,
-    /// Что делать после тишины — только у `SetHeir`.
+    /// Action after silence: `SetHeir` only.
     pub heir_mode: Option<HeirMode>,
-    /// Завещания: готовые решения автора наследникам, каждое целиком.
+    /// Bequests: complete ready-made author decisions for heirs.
     ///
-    /// Байтами, а не разобранными структурами, и это не лень: сервер отдаёт их
-    /// наследникам КАК ЕСТЬ, а всякая пересборка разошлась бы с подписью автора,
-    /// которая покрывает решение целиком.
+    /// Bytes rather than parsed structures, deliberately: the server gives heirs
+    /// these bytes AS IS, while any reconstruction could diverge from the author's signature,
+    /// which covers the entire decision.
     ///
-    /// Несколько, потому что наследников бывает несколько; один — поток из одной
-    /// записи, и никакого особого случая для него нет.
+    /// Multiple entries because there may be multiple heirs; one heir is a one-entry
+    /// stream, with no special case.
     pub bequests: Option<Vec<Vec<u8>>>,
-    /// Чей ключ проверяет подпись — у `Alive` за все файлы и у голоса.
+    /// Whose key verifies the signature: `Alive` for all files, and voting.
     pub signer_key: Option<[u8; 32]>,
-    /// Сколько живёт предложение — у назначения соавторов.
+    /// Proposal lifetime: coauthor appointment.
     pub proposal_ttl: Option<u64>,
-    /// Заморозить (`true`) или пустить (`false`) выдачи — только у `Freeze`.
+    /// Freeze (`true`) or resume (`false`) issuance: `Freeze` only.
     pub frozen: Option<bool>,
-    /// Имена прежнего устройства — только у `ReplaceDevice`.
+    /// Old device names: `ReplaceDevice` only.
     pub old_devices: Option<Vec<[u8; 32]>>,
-    /// Имена нового устройства — только у `ReplaceDevice`.
+    /// New device names: `ReplaceDevice` only.
     pub new_devices: Option<Vec<[u8; 32]>>,
-    /// Правило файла по атрибутам — только у `SetRule`.
+    /// File attribute rule: `SetRule` only.
     pub rule: Option<crate::attribute_rule::Rule>,
-    /// Кому адресовано доказательство подписки — только у `WatchAuthor`.
+    /// Subscription proof recipient: `WatchAuthor` only.
     pub authority_key: Option<[u8; 32]>,
-    /// Какой грант агента гасится — только у `RevokeGrant`.
+    /// Agent grant to revoke: `RevokeGrant` only.
     pub grant_id: Option<[u8; 16]>,
 }
 
 impl Order {
-    /// Распоряжение без необязательных полей.
+    /// An order with no optional fields.
     ///
-    /// Полей у распоряжения больше, чем нужно любому одному виду, и заполнять
-    /// нулями всё лишнее на каждой стороне значило бы переписывать этот список
-    /// при каждом новом виде.
+    /// Orders have more fields than any individual kind needs; filling
+    /// all irrelevant fields with zeros on every side would mean rewriting this list
+    /// for each new kind.
     #[must_use]
     pub fn new(file_id: [u8; 16], kind: Kind, at: i64) -> Self {
         Self {
@@ -362,7 +362,7 @@ impl Order {
     }
 }
 
-/// Поле, обязательное ровно при одном условии и запретное при обратном.
+/// A field required under exactly one condition and forbidden otherwise.
 fn required(present: bool, wanted: bool, tag: u16) -> Result<(), FormatError> {
     match (present, wanted) {
         (false, true) => Err(FormatError::MissingField { tag }),
@@ -371,16 +371,16 @@ fn required(present: bool, wanted: bool, tag: u16) -> Result<(), FormatError> {
     }
 }
 
-/// Поле, допустимое лишь у некоторых видов, но и у них необязательное.
+/// A field allowed only for certain kinds, and optional even there.
 fn only_if(present: bool, allowed: bool, tag: u16) -> Result<(), FormatError> {
     if present && !allowed { Err(FormatError::UnknownCriticalField { tag }) } else { Ok(()) }
 }
 
-/// Согласованность состава полей с видом — одним местом для обеих сторон.
+/// One place checks field-set consistency with kind for both sides.
 ///
 /// # Errors
-/// [`FormatError`], если поле стоит не у своего вида, отсутствует у своего или
-/// завещание не годится этому файлу.
+/// [`FormatError`] if a field belongs to another kind, is missing from its own kind, or
+/// the bequest does not fit this file.
 fn check(order: &Order) -> Result<(), FormatError> {
     let register = order.kind == Kind::Register;
     let set_limits = order.kind == Kind::SetLimits;
@@ -492,7 +492,7 @@ fn check(order: &Order) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Имена устройства: от одного до [`MAX_DEVICE_NAMES`], без повторов и без нулевого.
+/// Device names: one to [`MAX_DEVICE_NAMES`], no duplicates and no zero name.
 fn check_names(names: &[[u8; 32]], tag: u16) -> Result<(), FormatError> {
     if names.is_empty() || names.len() > MAX_DEVICE_NAMES {
         return Err(FormatError::BadFieldLength { tag, len: names.len() });
@@ -505,15 +505,15 @@ fn check_names(names: &[[u8; 32]], tag: u16) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Состав исполним, и в нём нет одного человека дважды.
+/// The roster is satisfiable and contains no person twice.
 ///
-/// Порог выше числа ключей — правило, которого никто никогда не исполнит: файл
-/// замирает навсегда, и заметить это можно только тем, что он замер. Повтор
-/// ключа — та же беда с другой стороны: один голос считался бы за два, и порог
-/// «двое из трёх» исполнялся бы одной подписью.
+/// A threshold above the key count is a rule nobody can satisfy: the file
+/// freezes forever, noticeable only once it has frozen. A duplicate
+/// key creates the converse problem: one vote would count twice, allowing a
+/// "two of three" threshold with one signature.
 ///
-/// Пустой состав с нулевым порогом законен и означает «кворума нет»: снять
-/// кворум надо чем-то, и отдельного вида для этого заводить незачем.
+/// An empty roster with zero threshold is valid and means "no quorum": something
+/// must remove a quorum, and no separate kind is needed for that.
 fn check_roster(keys: &[[u8; 32]], threshold: u8) -> Result<(), FormatError> {
     if keys.len() > MAX_KEYS {
         return Err(FormatError::BadFieldLength { tag: tag::KEYS, len: keys.len() });
@@ -528,17 +528,17 @@ fn check_roster(keys: &[[u8; 32]], threshold: u8) -> Result<(), FormatError> {
     if ok { Ok(()) } else { Err(FormatError::UnknownCriticalField { tag: tag::THRESHOLD }) }
 }
 
-/// Завещания — годные решения автора ИМЕННО ОБ ЭТОМ файле, и все разным людям.
+/// Bequests are valid author decisions about THIS file, all for different people.
 ///
-/// Разбираются здесь, а не только на сервере, по И-9: крейт не выпускает наружу
-/// байты, которых не проверил. Сверяется содержимое, а не подпись: подпись автора
-/// покрывает решение целиком, поэтому его же решение о ДРУГОМ файле подписано
-/// верно и от нужного по подписи неотличимо.
+/// Parsed here, not only on the server, under I-9: the crate does not release
+/// bytes it has not checked. Contents are checked, not the signature: the author's signature
+/// covers the complete decision, so their decision about ANOTHER file is correctly
+/// signed and indistinguishable by signature from the required one.
 ///
-/// Пустой список отвергается: «открыть завещание» без завещания есть
-/// распоряжение, которое нечем исполнить. Повтор отпечатка — тоже: два решения
-/// одному устройству означали бы, что сервер должен выбрать между ними, а
-/// выбирать ему нечем.
+/// An empty list is rejected: "open the bequest" without a bequest is
+/// an unexecutable order. Duplicate fingerprints are rejected too: two decisions for
+/// one device would force the server to choose between them,
+/// with no basis for choosing.
 fn check_bequests(all: &[Vec<u8>], file_id: [u8; 16]) -> Result<(), FormatError> {
     if all.is_empty() || all.len() > MAX_HEIRS {
         return Err(FormatError::BadFieldLength { tag: tag::BEQUEST, len: all.len() });
@@ -561,7 +561,7 @@ fn check_bequests(all: &[Vec<u8>], file_id: [u8; 16]) -> Result<(), FormatError>
     Ok(())
 }
 
-/// Транскрипт подписи: метка домена и тело как одно поле.
+/// Signature transcript: domain label and body as one field.
 #[must_use]
 pub fn signing_transcript(body: &[u8]) -> oc_crypto::Transcript {
     let mut t = oc_crypto::Transcript::new(oc_crypto::label::AUTHOR_ORDER);
@@ -569,12 +569,12 @@ pub fn signing_transcript(body: &[u8]) -> oc_crypto::Transcript {
     t
 }
 
-/// Закодировать тело.
+/// Encode the body.
 ///
 /// # Errors
-/// [`FormatError`], если состав полей не сходится с видом (`check`): такой
-/// документ не имеет смысла, и выписать его значило бы завести вторую трактовку
-/// одного тела.
+/// [`FormatError`] if the fields do not match the kind (`check`): such a
+/// document has no meaning, and issuing it would create a second interpretation
+/// of one body.
 pub fn encode(order: &Order) -> Result<Vec<u8>, FormatError> {
     check(order)?;
     let mut w = TlvWriter::new();
@@ -647,11 +647,11 @@ pub fn encode(order: &Order) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать тело — строго: длины точные, версия одна, состав полей по виду.
+/// Parse the body strictly: exact lengths, one version, fields determined by kind.
 ///
 /// # Errors
-/// [`FormatError`] при незнакомом теге, неверной длине, чужой версии,
-/// неизвестном виде или составе полей не по виду (`check`).
+/// [`FormatError`] for an unknown tag, invalid length, wrong version,
+/// unknown kind or fields inconsistent with kind (`check`).
 pub fn decode(body: &[u8]) -> Result<Order, FormatError> {
     let mut reader = TlvReader::new(body);
     let mut version = None;
@@ -763,68 +763,68 @@ pub fn decode(body: &[u8]) -> Result<Order, FormatError> {
     Ok(order)
 }
 
-/// Тело распоряжения из подписанных байтов — БЕЗ проверки подписи.
+/// Order body from signed bytes, WITHOUT signature verification.
 ///
-/// Нужно серверу, чтобы по `file_id` найти, чьим ключом проверять: ключ
-/// автора он помнит по файлу. Всё, что отсюда возвращается, годится только
-/// для поиска ключа; исполнять распоряжение можно после [`verify_signed`].
+/// The server needs this to find the verification key by `file_id`:
+/// it remembers the author key per file. Returned data is suitable only
+/// for key lookup; the order may be executed after [`verify_signed`].
 ///
 /// # Errors
-/// [`FormatError`], если байты короче подписи или тело не разбирается.
+/// [`FormatError`] if bytes are shorter than the signature or the body cannot be parsed.
 pub fn peek(bytes: &[u8]) -> Result<Order, FormatError> {
     let (_, body) = bytes.split_at_checked(SIGNATURE_LEN).ok_or(FormatError::BadHeaderSignature)?;
     decode(body)
 }
 
-/// Отпечаток НАМЕРЕНИЯ: что велено, без «когда выписано» и «кем подписано».
+/// INTENT digest: what was ordered, without "when issued" or "who signed".
 ///
-/// # Зачем он существует
+/// # Why it exists
 ///
-/// Кворум соавторов собирается из подписей РАЗНЫХ людей на РАЗНЫХ машинах, и
-/// каждый подписывает своё: набирает ту же команду, его клиент ставит свой
-/// момент выписки, свой ключ. Опознавай сервер предложение по хешу тела — два
-/// соавтора, набравшие одну и ту же команду в разные секунды, оказались бы
-/// авторами двух разных предложений, и кворум не собрался бы НИКОГДА.
+/// Coauthor quorum collects signatures from DIFFERENT people on DIFFERENT machines,
+/// each signing their own document: they type the same command, their client inserts its own
+/// issuance time and key. If the server identified proposals by body hash, two
+/// coauthors typing the same command in different seconds would create
+/// two different proposals, and quorum would NEVER be reached.
 ///
-/// Отсюда правило: предложение опознаётся тем, ЧТО велено, а не тем, когда об
-/// этом сказали. Совпасть обязаны файл, вид и все параметры; момент выписки и
-/// ключ подписавшего в отпечаток не входят — они принадлежат подписи, а не
-/// намерению.
+/// Hence the rule: a proposal is identified by WHAT is ordered, not when it
+/// was said. File, kind and every parameter must match; issuance time and
+/// signer key are excluded from the digest, because they belong to the signature,
+/// not the intent.
 ///
-/// Считается он тем же самым кодировщиком, что и тело: второй сериализатор ради
-/// хеша был бы вторым определением того, что такое «то же распоряжение», и
-/// разошёлся бы с первым на первой же новой строке.
+/// It is computed using exactly the body encoder: a second serializer for
+/// hashing would create a second definition of "the same order" and
+/// would diverge on the first newly added line.
 ///
 /// # Errors
-/// [`FormatError`], если распоряжение не кодируется.
+/// [`FormatError`] if the order cannot be encoded.
 pub fn intent_digest(order: &Order) -> Result<[u8; 32], FormatError> {
     let canonical = Order { at: 0, signer_key: None, ..order.clone() };
     Ok(oc_crypto::sha256(&encode(&canonical)?))
 }
 
-/// Вид распоряжения из ГОЛОГО ТЕЛА, без подписи впереди.
+/// Order kind from the BARE BODY, without a preceding signature.
 ///
-/// Разбор строгий, как везде: незнакомый вид не угадывается.
+/// Parsing is strict, as everywhere: unknown kinds are not guessed.
 ///
-/// # Кто это зовёт
+/// # Who calls this
 ///
-/// Сегодня — никто, и сказать это здесь честнее, чем промолчать. Писалась
-/// функция для списка предложений соавторов, где вид доставали из ХРАНИМОГО
-/// тела; с Ф-20 п.15 (2026-09-04) тела на сервере не хранятся вовсе —
-/// предложение опознаётся велением (`intent_digest`), а вид лежит полем
-/// записи. Прежняя редакция этой докстроки пережила ту смену устройства и
-/// продолжала обещать хранимые тела.
+/// Nobody today; saying so is more honest than omitting it. The function was
+/// written for the coauthor proposal list, where kind came from the STORED
+/// body; since F-20 item 15 (2026-09-04), the server stores no bodies at all:
+/// a proposal is identified by intent (`intent_digest`), and kind is a record
+/// field. The previous doc comment outlived that architectural change and
+/// continued promising stored bodies.
 ///
 /// # Errors
-/// [`FormatError`], если тело не разбирается.
+/// [`FormatError`] if the body cannot be parsed.
 pub fn peek_kind(body: &[u8]) -> Result<u8, FormatError> {
     Ok(decode(body)?.kind as u8)
 }
 
-/// Проверить подпись над телом ключом автора.
+/// Verify the body signature with the author key.
 ///
 /// # Errors
-/// [`CryptoError`], если подпись не сходится.
+/// [`CryptoError`] if the signature does not verify.
 pub fn verify(
     body: &[u8],
     signature: &[u8; SIGNATURE_LEN],
@@ -833,11 +833,11 @@ pub fn verify(
     oc_crypto::sign::verify(author_key, &signing_transcript(body), signature)
 }
 
-/// Проверить подписанный документ целиком и разобрать его.
+/// Verify and parse the complete signed document.
 ///
 /// # Errors
-/// [`FormatError::BadHeaderSignature`] при короткой или несходящейся подписи;
-/// ошибки разбора тела — как у [`decode`].
+/// [`FormatError::BadHeaderSignature`] for a short or invalid signature;
+/// body parsing errors as in [`decode`].
 pub fn verify_signed(bytes: &[u8], author_key: &[u8; 32]) -> Result<Order, FormatError> {
     let (signature, body) =
         bytes.split_at_checked(SIGNATURE_LEN).ok_or(FormatError::BadHeaderSignature)?;
@@ -851,8 +851,8 @@ fn exact16(tag: u16, value: &[u8]) -> Result<[u8; 16], FormatError> {
     value.try_into().map_err(|_| FormatError::BadFieldLength { tag, len: value.len() })
 }
 
-/// Завещания потоком: у каждого своя длина, потому что решения разной длины —
-/// доля запечатана на разные ключи, а `enc` у механизмов разный.
+/// Bequest stream: each entry has its own length because decisions vary in size:
+/// shares are sealed to different keys, and mechanisms have different `enc` values.
 fn split_bequests(mut rest: &[u8]) -> Result<Vec<Vec<u8>>, FormatError> {
     let bad = |len: usize| FormatError::BadFieldLength { tag: tag::BEQUEST, len };
     let mut out = Vec::new();
@@ -873,13 +873,13 @@ fn split_bequests(mut rest: &[u8]) -> Result<Vec<Vec<u8>>, FormatError> {
     Ok(out)
 }
 
-/// Ключи подряд по тридцать два байта.
+/// Consecutive thirty-two-byte keys.
 ///
-/// Длина проверяется ТОЧНО (И-8): хвост не той длины означает, что противник
-/// управляет тем, какие байты станут ключом. Предел на число ключей стоит здесь
-/// же, до всякого выделения памяти, — иначе поле в мегабайт заставило бы нас
-/// собрать тридцать тысяч ключей, чтобы затем их отвергнуть.
-/// Имена устройства потоком по 32 байта. Предел — до выделения памяти.
+/// Length is checked EXACTLY (I-8): an incorrectly sized tail lets the adversary
+/// control which bytes become a key. The key-count limit is checked here too,
+/// before any allocation; otherwise a megabyte field would force collecting
+/// thirty thousand keys only to reject them afterward.
+/// Device names as a stream of 32-byte entries. Limit checked before allocation.
 fn split_names(tag: u16, value: &[u8]) -> Result<Vec<[u8; 32]>, FormatError> {
     if value.is_empty() || !value.len().is_multiple_of(32) || value.len() > MAX_DEVICE_NAMES.saturating_mul(32) {
         return Err(FormatError::BadFieldLength { tag, len: value.len() });
@@ -951,8 +951,8 @@ mod tests {
         Order { max_devices: Some(3), ..Order::new([0x5a; 16], Kind::Register, 1_756_000_000) }
     }
 
-    /// Подпись автора сходится с его ключом и ни с чьим другим; повреждение
-    /// подписи, тела и обрубок отвергаются.
+    /// The author's signature verifies with their key and no other; corrupt
+    /// signatures, corrupt bodies and truncation are rejected.
     #[test]
     fn a_signed_order_verifies_with_the_author_key_and_nothing_else_passes() {
         let author = Ed25519Signer::from_seed(&[0x41; 32]);
@@ -977,14 +977,14 @@ mod tests {
         assert!(peek(&bytes[..40]).is_err(), "обрубок разобран");
     }
 
-    /// ПОДПИСЬ ПРОВЕРЯЕТСЯ ДО РАЗБОРА ТЕЛА — сторож на порядок двух строк.
+    /// THE SIGNATURE IS VERIFIED BEFORE BODY PARSING: a guard on two lines' order.
     ///
-    /// Проба выше подаёт разбираемое тело, пробы на разбор зовут [`decode`]
-    /// напрямую, и перестановка `decode` перед `verify` внутри [`verify_signed`]
-    /// не роняла ни одной из них. Здесь тело заведомо неразбираемо, а подпись
-    /// заведомо чужая: правильный ответ ровно один — `BadHeaderSignature`. Код
-    /// разбора означал бы, что незаверенные байты уже прочитаны и о них
-    /// отвечают различимо (И-5 для документов).
+    /// The test above supplies a parseable body, while parsing tests call [`decode`]
+    /// directly; moving `decode` before `verify` inside [`verify_signed`]
+    /// broke none of them. Here the body is deliberately unparseable and the signature
+    /// deliberately wrong: the only correct answer is `BadHeaderSignature`. A parsing
+    /// code would mean unauthenticated bytes had already been read and distinguishable
+    /// responses were returned about them (I-5 for documents).
     #[test]
     fn the_signature_is_checked_before_the_body_is_parsed() {
         let author = Ed25519Signer::from_seed(&[0x41; 32]);
@@ -1008,8 +1008,8 @@ mod tests {
         }
     }
 
-    /// Отзыв без пределов проходит; отзыв с пределами — ни закодировать, ни
-    /// разобрать: у одного тела не должно быть двух трактовок.
+    /// Revocation without limits passes; revocation with limits can neither be encoded nor
+    /// parsed: one body must not have two interpretations.
     #[test]
     fn a_revocation_carries_no_limits() {
         let revoke = Order::new([1; 16], Kind::Revoke, 7);
@@ -1027,8 +1027,8 @@ mod tests {
         assert!(decode(&w.finish()).is_err(), "отзыв с пределом разобран");
     }
 
-    /// Тело разбирается строго: короткий идентификатор, чужая версия и
-    /// неизвестный вид отвергаются.
+    /// Body parsing is strict: a short identifier, wrong version and
+    /// unknown kind are rejected.
     #[test]
     fn the_body_is_parsed_strictly() {
         let order = register();
@@ -1056,11 +1056,11 @@ mod tests {
         assert!(decode(&w.finish()).is_err(), "неизвестный вид принят");
     }
 
-    /// Тело в обход проверок — чтобы `decode` было что отвергать.
+    /// A body bypassing checks, giving `decode` something to reject.
     ///
-    /// Без него запретное тело неоткуда взять: `encode` отказывается его
-    /// выписывать, а проверять надо именно РАЗБОР — приди такое тело со стороны,
-    /// от собеседника, который наш писатель не звал.
+    /// Without this helper, there is no source of forbidden bodies: `encode` refuses to
+    /// issue them, but PARSING must be tested for bodies received externally
+    /// from a peer that did not call our writer.
     fn hand_written(order: &Order) -> Vec<u8> {
         let mut w = TlvWriter::new();
         w.put(tag::VERSION, &ORDER_VERSION.to_le_bytes()).unwrap();
@@ -1112,7 +1112,7 @@ mod tests {
         w.finish().to_vec()
     }
 
-    /// Завещание — обычное решение автора с зарезервированным номером.
+    /// A bequest is an ordinary author decision with a reserved number.
     fn bequest_for(file_id: [u8; 16], device_fpr: [u8; 32]) -> Vec<u8> {
         crate::access::encode_decision(&crate::access::Decision {
             seq: crate::access::HEIR_SEQ,
@@ -1146,12 +1146,12 @@ mod tests {
         }
     }
 
-    /// ЗАВЕЩАНИЕ ЕДЕТ ОДНИМ ЗНАЧЕНИЕМ И ВОЗВРАЩАЕТСЯ ТЕМ ЖЕ.
+    /// THE BEQUEST TRAVELS AS ONE VALUE AND RETURNS UNCHANGED.
     ///
-    /// Круг кодирования проверяет здесь не «сериализация работает», а то, что
-    /// решение автора не расползлось по полям распоряжения: сервер обязан
-    /// отдать наследнику ГОТОВЫЕ байты, а не собирать решение заново — собранное
-    /// заново не сойдётся с подписью автора, которая покрывает решение целиком.
+    /// The encoding round trip checks not simply that "serialization works", but that
+    /// the author's decision has not been scattered across order fields: the server must
+    /// give the heir READY-MADE bytes rather than reconstructing the decision; reconstruction
+    /// would not match the author's signature over the entire decision.
     #[test]
     fn a_bequest_travels_whole_inside_the_order() {
         let author = Ed25519Signer::from_seed(&[0x41; 32]);
@@ -1166,12 +1166,12 @@ mod tests {
         }
     }
 
-    /// ЗАВЕЩАНИЕ ПРИНАДЛЕЖИТ ТОЛЬКО ОТКРЫВАЮЩЕМУ РЕЖИМУ.
+    /// BEQUESTS BELONG ONLY TO THE OPENING MODE.
     ///
-    /// Открытие без завещания — распоряжение, которое нечем исполнить; закрытие
-    /// с завещанием — тело с двумя трактовками сразу («закрыть всем» и «открыть
-    /// наследнику»). Оба отвергаются в обе стороны: то, что мы отказываемся
-    /// выписать, мы обязаны отказаться и исполнить.
+    /// Opening without a bequest is unexecutable; closing
+    /// with a bequest gives the body two interpretations at once ("close for everyone" and "open
+    /// for the heir"). Both are rejected in both directions: what we refuse to
+    /// issue, we must also refuse to execute.
     #[test]
     fn a_bequest_belongs_to_an_opening_heir_and_nowhere_else() {
         let file_id = [0x5a; 16];
@@ -1226,12 +1226,12 @@ mod tests {
         assert!(decode(&hand_written(&refusal)).is_err(), "оно же разобрано");
     }
 
-    /// ПРИЗНАК ЖИЗНИ ЗА ВСЕ ФАЙЛЫ СРАЗУ ОБЯЗАН НАЗВАТЬ КЛЮЧ.
+    /// PROOF OF LIFE FOR ALL FILES MUST NAME THE KEY.
     ///
-    /// Нулевой `file_id` означает «все файлы этого ключа», и без ключа в теле
-    /// сервер не знает, чьё присутствие отмечено: подпись он проверяет ключом,
-    /// который берёт ПО ФАЙЛУ, а файла здесь нет. Обратное тоже запрещено —
-    /// ключ при названном файле был бы вторым способом сказать то же самое.
+    /// Zero `file_id` means "all files under this key"; without the key in the body,
+    /// the server cannot know whose presence is recorded: it verifies signatures with a key
+    /// looked up BY FILE, and there is no file here. The converse is also forbidden:
+    /// a key alongside a named file would be a second way to say the same thing.
     #[test]
     fn a_sign_of_life_for_every_file_names_the_key() {
         let alive_all = Order { signer_key: Some([0x41; 32]), ..Order::new([0; 16], Kind::Alive, 9) };
@@ -1268,7 +1268,7 @@ mod tests {
         }
     }
 
-    /// СОСТАВ И ПОРОГ ЕЗДЯТ ВМЕСТЕ И ВОЗВРАЩАЮТСЯ ТЕМИ ЖЕ.
+    /// ROSTER AND THRESHOLD TRAVEL TOGETHER AND ROUND-TRIP UNCHANGED.
     #[test]
     fn a_roster_and_its_threshold_survive_the_round_trip() {
         let author = Ed25519Signer::from_seed(&[0x41; 32]);
@@ -1285,12 +1285,12 @@ mod tests {
         }
     }
 
-    /// ПОРОГ ОБЯЗАН БЫТЬ ИСПОЛНИМ СОСТАВОМ.
+    /// THE ROSTER MUST BE ABLE TO SATISFY THE THRESHOLD.
     ///
-    /// Порог выше числа ключей — правило, которого никто никогда не исполнит:
-    /// файл замирает навсегда, и заметить это можно только тем, что он замер.
-    /// Отвергается в ОБЕ стороны — то, что мы отказываемся выписать, обязаны
-    /// отказаться и исполнить.
+    /// A threshold above the key count is a rule nobody can satisfy:
+    /// the file freezes forever, noticeable only once it has frozen.
+    /// Rejected in BOTH directions: what we refuse to issue, we must
+    /// also refuse to execute.
     #[test]
     fn a_threshold_must_be_reachable_by_its_roster() {
         assert!(encode(&set_keys(Kind::SetCoauthors, 3, 4)).is_err(), "порог 4 из 3 закодирован");
@@ -1326,7 +1326,7 @@ mod tests {
         assert!(decode(&hand_written(&twice)).is_err(), "повторённый ключ разобран");
     }
 
-    /// ГОЛОС ЗА УСТРОЙСТВО НЕСЁТ ОТПЕЧАТОК И РЕШЕНИЕ, И БОЛЬШЕ НИЧЕГО.
+    /// A DEVICE VOTE CARRIES A FINGERPRINT AND DECISION, NOTHING ELSE.
     #[test]
     fn a_vote_carries_a_fingerprint_and_a_verdict() {
         let author = Ed25519Signer::from_seed(&[0x41; 32]);
@@ -1369,11 +1369,11 @@ mod tests {
         assert!(decode(&hand_written(&stray)).is_err(), "он же разобран");
     }
 
-    /// ПРЕДЕЛЫ ЖИВУТ У РЕГИСТРАЦИИ И У СМЕНЫ ПРЕДЕЛОВ, И БОЛЬШЕ НИГДЕ.
+    /// LIMITS BELONG TO REGISTRATION AND LIMIT CHANGES, NOWHERE ELSE.
     ///
-    /// Смена пределов без единого предела — распоряжение, которое ничего не
-    /// велит: исполнить его нельзя, а принять значило бы записать в журнал
-    /// событие, которого не было.
+    /// A limit change without any limit is an order that commands
+    /// nothing: it cannot be executed, and accepting it would journal
+    /// an event that never happened.
     #[test]
     fn limits_belong_to_registration_and_to_the_order_that_changes_them() {
         let change = Order {
@@ -1397,7 +1397,7 @@ mod tests {
         assert!(encode(&on_alive).is_err(), "предел приделан к признаку жизни");
     }
 
-    /// СОСТАВ НЕ ПРИДЕЛЫВАЕТСЯ К ЧУЖОМУ ВИДУ, И ДЛИНА КЛЮЧЕЙ ТОЧНАЯ.
+    /// A ROSTER CANNOT BE ATTACHED TO ANOTHER KIND; KEY LENGTHS ARE EXACT.
     #[test]
     fn a_roster_belongs_only_to_the_orders_that_set_one() {
         let stray = Order {
@@ -1430,10 +1430,10 @@ mod tests {
         assert!(decode(&w.finish()).is_err(), "двухбайтовый порог принят");
     }
 
-    /// КНОПКА ПАНИКИ — РАСПОРЯЖЕНИЕ ЗА ВСЕ ФАЙЛЫ КЛЮЧА, КАК ПРИЗНАК ЖИЗНИ.
+    /// THE PANIC BUTTON ORDERS ALL FILES UNDER A KEY, LIKE PROOF OF LIFE.
     ///
-    /// Нулевой `file_id` и ключ подписавшего обязательны: заморозка — свойство
-    /// автора, а не файла, и файла у неё нет. Поле `frozen` — только у этого вида.
+    /// Zero `file_id` and signer key are required: freezing concerns
+    /// the author, not a file; it has no file. The `frozen` field belongs only to this kind.
     #[test]
     fn a_freeze_covers_every_file_of_the_key_and_carries_its_direction() {
         let freeze = Order {
@@ -1461,16 +1461,16 @@ mod tests {
         assert!(encode(&stray).is_err(), "frozen у отзыва закодирован");
     }
 
-    /// СРОК ПРЕДЛОЖЕНИЯ — НАСТРОЙКА ФАЙЛА, А НЕ КОНСТАНТА ПРОДУКТА.
+    /// PROPOSAL LIFETIME IS A FILE SETTING, NOT A PRODUCT CONSTANT.
     ///
-    /// Решение заказчика 2026-09-05: трое суток умолчанием, автор ставит любой.
-    /// Отсутствие тега означает «умолчание сервера», а не «ноль»: файл, у
-    /// которого срок не назван, ведёт себя как вёл, и старая запись состояния
-    /// читается новой сборкой без оговорок.
+    /// Customer decision of 2026-09-05: three days by default, any duration set by the author.
+    /// An absent tag means "server default", not "zero": a file
+    /// with no specified lifetime behaves as before, and old state records
+    /// are read by a new build without qualifications.
     ///
-    /// Ноль отвергается: снять срок нельзя, можно лишь сменить. Предложение без
-    /// срока копилось бы на сервере вечно и всплывало через месяц уже неуместным
-    /// — ровно та беда, от которой срок и заведён.
+    /// Zero is rejected: the lifetime can be changed, not removed. Proposals without
+    /// expiration would accumulate forever on the server and resurface a month later when irrelevant,
+    /// precisely the problem lifetime limits prevent.
     #[test]
     fn a_proposal_ttl_belongs_to_the_roster_and_cannot_be_zero() {
         let author = Ed25519Signer::from_seed(&[0x41; 32]);
@@ -1503,15 +1503,15 @@ mod tests {
         assert!(decode(&hand_written(&stray)).is_err(), "он же разобран");
     }
 
-    /// НАСЛЕДНИКОВ БЫВАЕТ НЕСКОЛЬКО, И ВСЕ ОНИ РАЗНЫЕ.
+    /// THERE MAY BE MULTIPLE HEIRS, ALL DISTINCT.
     ///
-    /// Решение заказчика 2026-09-05. Один наследник — не особый случай, а поток
-    /// из одной записи; это и проверяется рядом, чтобы расширение не оказалось
-    /// новым видом документа для старого случая.
+    /// Customer decision of 2026-09-05. One heir is not a special case but a
+    /// one-entry stream; the neighboring test ensures that this extension does not become
+    /// a new document kind for the old case.
     ///
-    /// Повтор отпечатка отвергается: два решения одному устройству означали бы,
-    /// что сервер должен выбрать между ними, а выбирать ему нечем. Пустой список
-    /// — тоже: «открыть завещание» без завещания нечем исполнить.
+    /// Duplicate fingerprints are rejected: two decisions for one device would force
+    /// the server to choose between them with no basis. An empty list
+    /// is rejected too: "open the bequest" without a bequest is unexecutable.
     #[test]
     fn several_heirs_travel_together_and_all_of_them_differ() {
         let author = Ed25519Signer::from_seed(&[0x41; 32]);
@@ -1571,7 +1571,7 @@ mod tests {
         assert!(decode(&hand_written(&mixed)).is_err(), "он же разобран");
     }
 
-    /// ЗАМЕНА УСТРОЙСТВА: КРУГ КОДИРОВАНИЯ И СОСТАВ ПОЛЕЙ ПО ВИДУ.
+    /// DEVICE REPLACEMENT: ENCODING ROUND TRIP AND FIELD SET BY KIND.
     #[test]
     fn an_author_scope_proof_names_its_server_and_no_file() {
         let proof = Order {
@@ -1630,11 +1630,11 @@ mod tests {
         assert!(decode(&w.finish()).is_err(), "имена устройства у отзыва разобраны");
     }
 
-    /// ПОГАШЕНИЕ ГРАНТА АГЕНТА: имя гранта обязательно, файла нет, ключ назван.
+    /// AGENT GRANT REVOCATION: grant name required, no file, key named.
     ///
-    /// Состав полей проверяется в ОБЕ стороны — писателем и разборщиком:
-    /// веление, которое мы отказываемся выписать, мы не должны и исполнять,
-    /// придя оно со стороны.
+    /// The field set is checked in BOTH directions, by encoder and parser:
+    /// an order we refuse to issue must not be executed either
+    /// when received externally.
     #[test]
     fn a_grant_revocation_round_trips_and_its_fields_are_checked_by_kind() {
         let at = 1_760_000_000;

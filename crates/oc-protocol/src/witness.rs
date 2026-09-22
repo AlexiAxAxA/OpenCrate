@@ -1,25 +1,25 @@
-//! Свидетельство головы журнала сервера (`docs/protocol.md` §9.13, D3).
+//! Witnessing a server journal head (`docs/protocol.md` §9.13, D3).
 //!
-//! # Что здесь и зачем
+//! # What this contains and why
 //!
-//! Подписанная голова (`размер ‖ корень`) доказывает только то, что сервер
-//! согласен сам с собой: переписав журнал, он перепишет и корень. Ценность
-//! появляется у копии головы ВНЕ сервера — и у того, кто умеет сверить с ней
-//! новую голову, не имея журнала. Это и есть свидетель: он хранит одну голову,
-//! получает от сервера новую вместе с доказательством согласованности
-//! (RFC 9162) и подписывает её следом за сервером — если она продолжает
-//! прежнюю.
+//! A signed head (`size ‖ root`) proves only that the server
+//! agrees with itself: rewriting the journal also rewrites its root. Value
+//! comes from a copy of the head OUTSIDE the server, and someone able to compare a
+//! new head with it without possessing the journal. That is the witness: it stores one head,
+//! receives a new one from the server with a consistency proof
+//! (RFC 9162), and signs it after the server if it extends
+//! the old one.
 //!
-//! Здесь только байты и проверки: голова, вид (голова с доказательством),
-//! засвидетельствованная голова и отношение двух голов. Сеть, диск и часы —
-//! у свидетеля (`cc_authority::witness`).
+//! Only bytes and checks live here: a head, a view (head with proof),
+//! a cosigned head, and the relationship between two heads. Networking, disk and clocks belong
+//! to the witness (`cc_authority::witness`).
 //!
-//! # Чего это НЕ даёт
+//! # What this does NOT provide
 //!
-//! Независимого публичного времени и независимости оператора: свидетель на той
-//! же машине или у того же оператора подписывает то, что ему показали, и
-//! откатывается вместе с ним. Свидетель обнаруживает откат и развилку
-//! ОТНОСИТЕЛЬНО СВОЕЙ ПАМЯТИ — не больше.
+//! Independent public time or operator independence: a witness on the same
+//! machine or under the same operator signs what it is shown and
+//! rolls back with it. The witness detects rollback and forks
+//! RELATIVE TO ITS OWN MEMORY, nothing more.
 
 use oc_format::FormatError;
 use oc_crypto::merkle::MerkleTree;
@@ -27,40 +27,40 @@ use oc_crypto::sign::{PUBLIC_KEY_LEN, SIGNATURE_LEN};
 use oc_crypto::transcript::Transcript;
 use oc_crypto::{digest_eq, label};
 
-/// Длина подписанной головы: `u64le размер ‖ корень(32) ‖ подпись(64)`.
+/// Signed head length: `u64le size ‖ root(32) ‖ signature(64)`.
 ///
-/// Раскладка та же, что у файла `cca checkpoint --out`: голова, снятая
-/// оператором, и голова из вида — одни и те же байты.
+/// The layout matches the `cca checkpoint --out` file: a head captured
+/// by the operator and one from a view are the same bytes.
 pub const SIGNED_HEAD_LEN: usize = 8 + 32 + SIGNATURE_LEN;
 
-/// Длина засвидетельствованной головы:
-/// `голова(104) ‖ i64le момент ‖ ключ свидетеля(32) ‖ подпись свидетеля(64)`.
+/// Cosigned head length:
+/// `head(104) ‖ i64le time ‖ witness key(32) ‖ witness signature(64)`.
 pub const COSIGNED_LEN: usize = SIGNED_HEAD_LEN + 8 + PUBLIC_KEY_LEN + SIGNATURE_LEN;
 
-/// Предел длины пути в виде.
+/// Maximum path length in a view.
 ///
-/// Доказательство согласованности дерева до 2^32 листьев короче 2·32 + 1
-/// узлов; вдвое больше — запас, а не расчёт. Предел нужен разбору, а не
-/// проверке: вид без него был бы буфером произвольной длины.
+/// A consistency proof for a tree of up to 2^32 leaves is shorter than 2·32 + 1
+/// nodes; twice that is headroom, not a calculation. The limit serves parsing, not
+/// verification: without it, a view could be an arbitrarily large buffer.
 pub const MAX_PATH: usize = 128;
 
-/// Какой журнал сервера свидетельствуется.
+/// Which server journal is being witnessed.
 ///
-/// У сервера их два, и головы у них — разные утверждения: журнал событий
-/// (листья — MAC записей) и журнал каталога ключей (листья — хеши записей
-/// каталога, `crate::directory`). Вид журнала — под обеими подписями: голова
-/// одного, подписанная сервером или свидетелем, не годится головой другого.
+/// The server has two journals, whose heads assert different things: the event journal
+/// (leaves are record MACs) and the key directory journal (leaves are directory
+/// record hashes, `crate::directory`). Journal kind is covered by both signatures:
+/// a head of one journal signed by the server or witness cannot serve as a head of the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Log {
-    /// Журнал событий сервера (`cca journal`).
+    /// Server event journal (`cca journal`).
     Journal = 1,
-    /// Журнал каталога ключей (D4).
+    /// Key directory journal (D4).
     Directory = 2,
 }
 
 impl Log {
-    /// Метка подписи головы этого журнала.
+    /// Head signature label for this journal.
     #[must_use]
     pub const fn head_label(self) -> oc_crypto::Label {
         match self {
@@ -69,10 +69,10 @@ impl Log {
         }
     }
 
-    /// Разобрать байт вида. Незнакомый — отказ (реестр с резервом).
+    /// Parse a kind byte. Unknown means rejection (a registry with reserved values).
     ///
     /// # Errors
-    /// [`FormatError::UnknownCriticalField`] — незнакомый вид.
+    /// [`FormatError::UnknownCriticalField`]: unknown kind.
     pub const fn from_u8(v: u8) -> Result<Self, FormatError> {
         match v {
             1 => Ok(Self::Journal),
@@ -81,7 +81,7 @@ impl Log {
         }
     }
 
-    /// Имя для человека и командной строки.
+    /// Name for humans and the command line.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -90,7 +90,7 @@ impl Log {
         }
     }
 
-    /// Разобрать имя.
+    /// Parse a name.
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
         match name {
@@ -101,11 +101,11 @@ impl Log {
     }
 }
 
-/// Транскрипт подписи головы журнала.
+/// Journal head signature transcript.
 ///
-/// Единственное место, где он записан: `cc_authority::journal::Checkpoint`
-/// и каталог сервера зовут эту же функцию. Два места однажды разошлись бы, и
-/// голова, подписанная сервером, перестала бы проверяться свидетелем.
+/// The sole definition: `cc_authority::journal::Checkpoint`
+/// and the server directory call this same function. Two definitions would eventually diverge,
+/// and the witness would stop verifying server-signed heads.
 #[must_use]
 pub fn head_transcript(log: Log, size: u64, root: &[u8; 32]) -> Transcript {
     let mut t = Transcript::new(log.head_label());
@@ -114,7 +114,7 @@ pub fn head_transcript(log: Log, size: u64, root: &[u8; 32]) -> Transcript {
     t
 }
 
-/// Голова журнала с подписью сервера.
+/// Journal head with server signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignedHead {
     pub size: u64,
@@ -123,7 +123,7 @@ pub struct SignedHead {
 }
 
 impl SignedHead {
-    /// Байты головы.
+    /// Head bytes.
     #[must_use]
     pub fn encode(&self) -> [u8; SIGNED_HEAD_LEN] {
         let mut out = [0u8; SIGNED_HEAD_LEN];
@@ -135,10 +135,10 @@ impl SignedHead {
         out
     }
 
-    /// Разобрать голову. Длина точная (И-8).
+    /// Parse a head. Exact length (I-8).
     ///
     /// # Errors
-    /// [`FormatError::BadFieldLength`] — длина не [`SIGNED_HEAD_LEN`].
+    /// [`FormatError::BadFieldLength`]: length is not [`SIGNED_HEAD_LEN`].
     pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
         let exact: &[u8; SIGNED_HEAD_LEN] =
             bytes.try_into().map_err(|_| FormatError::BadFieldLength { tag: 0, len: bytes.len() })?;
@@ -152,18 +152,18 @@ impl SignedHead {
         })
     }
 
-    /// Подписал ли голову этого журнала этот сервер.
+    /// Whether this server signed the head of this journal.
     #[must_use]
     pub fn signed_by(&self, log: Log, server_key: &[u8; PUBLIC_KEY_LEN]) -> bool {
         oc_crypto::sign::verify(server_key, &head_transcript(log, self.size, &self.root), &self.sig).is_ok()
     }
 }
 
-/// Вид журнала: голова сервера и доказательство того, что она продолжает
-/// голову размера `since`.
+/// Journal view: the server head and proof that it extends
+/// a head of size `since`.
 ///
-/// Раскладка: `голова(104) ‖ u64le since ‖ путь(32·N)`. `since = 0` — старой
-/// головы нет, путь пуст.
+/// Layout: `head(104) ‖ u64le since ‖ path(32·N)`. `since = 0` means no old
+/// head; the path is empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct View {
     pub head: SignedHead,
@@ -172,11 +172,11 @@ pub struct View {
 }
 
 impl View {
-    /// Байты вида.
+    /// View bytes.
     ///
     /// # Errors
-    /// [`FormatError::BadFieldLength`] — путь длиннее [`MAX_PATH`] или непуст
-    /// при `since = 0`.
+    /// [`FormatError::BadFieldLength`]: path exceeds [`MAX_PATH`] or is nonempty
+    /// when `since = 0`.
     pub fn encode(&self) -> Result<Vec<u8>, FormatError> {
         self.check()?;
         let mut out = Vec::with_capacity(SIGNED_HEAD_LEN.saturating_add(8).saturating_add(self.path.len().saturating_mul(32)));
@@ -188,10 +188,10 @@ impl View {
         Ok(out)
     }
 
-    /// Разобрать вид — строго: хвост, не кратный 32, и лишние узлы — отказ.
+    /// Parse a view strictly: a tail not divisible by 32, or extra nodes, is rejected.
     ///
     /// # Errors
-    /// [`FormatError::BadFieldLength`] — раскладка не сходится.
+    /// [`FormatError::BadFieldLength`]: inconsistent layout.
     pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
         let bad = FormatError::BadFieldLength { tag: 0, len: bytes.len() };
         let (head, rest) = bytes.split_at_checked(SIGNED_HEAD_LEN).ok_or(bad)?;
@@ -221,26 +221,26 @@ impl View {
     }
 }
 
-/// Как новая голова относится к старой.
+/// How the new head relates to the old one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Relation {
-    /// Та же голова.
+    /// The same head.
     Same,
-    /// Новая продолжает старую: доказательство сошлось.
+    /// The new head extends the old one: the proof verified.
     Extends,
-    /// Новая КОРОЧЕ: журнал только дописывается, и короче он становится лишь
-    /// при восстановлении устаревшего резерва или подмене.
+    /// The new head is SHORTER: the journal is append-only and only becomes shorter
+    /// when a stale backup is restored or tampering occurs.
     Rollback,
-    /// Две истории: та же длина с другим корнем или доказательство не сошлось.
+    /// Two histories: equal length with a different root, or a failed proof.
     Fork,
-    /// Размер вне того, что дерево умеет доказать (больше `u32`).
+    /// Size beyond what the tree can prove (greater than `u32`).
     Unprovable,
 }
 
-/// Сверить новую голову со старой по доказательству согласованности.
+/// Compare the new head with the old one using a consistency proof.
 ///
-/// Подписи здесь не проверяются — это дело вызывающего и делается ДО: голова,
-/// которой не верят, не годится ни для какой сверки.
+/// Signatures are not checked here; the caller must check them BEFOREHAND: an untrusted
+/// head is unsuitable for any comparison.
 #[must_use]
 pub fn relate(old_size: u64, old_root: &[u8; 32], new_size: u64, new_root: &[u8; 32], path: &[[u8; 32]]) -> Relation {
     if new_size < old_size {
@@ -259,14 +259,14 @@ pub fn relate(old_size: u64, old_root: &[u8; 32], new_size: u64, new_root: &[u8;
     }
 }
 
-/// Транскрипт подписи свидетеля.
+/// Witness signature transcript.
 ///
-/// Ключ сервера — под подписью: засвидетельствованная голова относится к
-/// журналу конкретного сервера, и перенести её на другой с тем же
-/// `(размер, корень)` нельзя. Вид журнала — под подписью: свидетельство головы
-/// каталога не годится свидетельством журнала событий. Момент — под подписью:
-/// «свидетель видел это не позже чем» — половина того, что свидетельство
-/// утверждает.
+/// The server key is signed: a cosigned head belongs to a particular
+/// server's journal and cannot be transplanted to another with the same
+/// `(size, root)`. Journal kind is signed: a directory head attestation
+/// cannot attest to the event journal. Time is signed:
+/// "the witness saw this no later than" is half of what the attestation
+/// asserts.
 #[must_use]
 pub fn cosign_transcript(
     log: Log,
@@ -284,29 +284,29 @@ pub fn cosign_transcript(
     t
 }
 
-/// Голова, подписанная сервером и засвидетельствованная.
+/// A server-signed and witnessed head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cosigned {
     pub head: SignedHead,
-    /// Момент, когда свидетель видел голову (секунды Unix, часы свидетеля).
+    /// When the witness saw the head (Unix seconds, witness clock).
     pub at: i64,
     pub witness: [u8; PUBLIC_KEY_LEN],
     pub sig: [u8; SIGNATURE_LEN],
 }
 
-/// Почему засвидетельствованная голова не принята.
+/// Why a cosigned head was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CosignedError {
-    /// Подпись сервера не сошлась с названным ключом.
+    /// The server signature did not verify with the specified key.
     ServerSignature,
-    /// Свидетель не тот, которому верят.
+    /// The witness is not the trusted one.
     OtherWitness,
-    /// Подпись свидетеля не сошлась.
+    /// The witness signature did not verify.
     WitnessSignature,
 }
 
 impl Cosigned {
-    /// Байты засвидетельствованной головы.
+    /// Cosigned head bytes.
     #[must_use]
     pub fn encode(&self) -> [u8; COSIGNED_LEN] {
         let mut out = [0u8; COSIGNED_LEN];
@@ -320,10 +320,10 @@ impl Cosigned {
         out
     }
 
-    /// Разобрать. Длина точная.
+    /// Parse. Exact length.
     ///
     /// # Errors
-    /// [`FormatError::BadFieldLength`] — длина не [`COSIGNED_LEN`].
+    /// [`FormatError::BadFieldLength`]: length is not [`COSIGNED_LEN`].
     pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
         let bad = FormatError::BadFieldLength { tag: 0, len: bytes.len() };
         if bytes.len() != COSIGNED_LEN {
@@ -340,15 +340,15 @@ impl Cosigned {
         })
     }
 
-    /// Проверить обе подписи: сервера — ключом сервера, свидетеля — ключом,
-    /// которому верит проверяющий.
+    /// Verify both signatures: the server's using its key, the witness's using a key
+    /// trusted by the verifier.
     ///
-    /// Ключ свидетеля в самих байтах — подсказка, а не доверие: сверяется он
-    /// с названным, иначе любой подписал бы голову своим ключом и положил его
-    /// рядом.
+    /// The witness key embedded in the bytes is a hint, not a trust source: it is compared
+    /// with the specified key; otherwise anyone could sign a head with their own key and place it
+    /// alongside the signature.
     ///
     /// # Errors
-    /// [`CosignedError`] — какая из проверок не прошла.
+    /// [`CosignedError`]: which check failed.
     pub fn verify(
         &self,
         log: Log,

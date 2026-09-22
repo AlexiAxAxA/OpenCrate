@@ -1,28 +1,28 @@
-//! Шифрование чанков полезной нагрузки.
+//! Payload chunk encryption.
 //!
-//! Кадр на диске: `nonce(24) ‖ шифротекст ‖ тег(16)`.
+//! On-disk frame: `nonce(24) ‖ ciphertext ‖ tag(16)`.
 //!
-//! Nonce **хранится, а не выводится читателем**. Вывод его из `(file_id, номер
-//! чанка)` смертелен: `file_id` обязан оставаться постоянным при правке, поэтому
-//! перезапись чанка тем же ключом дала бы повторное использование nonce с разным
-//! открытым текстом — восстановление обоих текстов через XOR и восстановление
-//! одноразового ключа Poly1305.
+//! The nonce is **stored, never derived by the reader**. Deriving it from `(file_id, chunk
+//! index)` is fatal: `file_id` must remain constant during editing, so
+//! rewriting a chunk under the same key would reuse a nonce with different
+//! plaintexts, recovering both plaintexts through XOR and recovering
+//!  the one-time Poly1305 key.
 //!
-//! Ширины 192 бита достаточно против случайных коллизий, но НЕ против повтора
-//! состояния генератора, поэтому nonce выводится ОТПРАВИТЕЛЕМ через засев (§6.1
-//! и §3.1). Раньше здесь стояло, что ширина существует «именно для того, чтобы
-//! случайные значения были безопасны», — формулировка, противоречившая §3.1 и
-//! пережившая решение С-13.
+//! 192 bits suffice against random collisions, but NOT against repeated
+//! RNG state, so the SENDER derives the nonce through hedging (§6.1
+//! and §3.1). This used to say that the width exists "precisely to make
+//! random values safe", a statement that contradicted §3.1 and
+//! survived decision C-13.
 //!
-//! Из этого следует форма поверхности крейта, и она здесь главная: продуктовые
-//! пути запечатывания принимают ЗАСЕВ, а не nonce, — [`seal_chunk_hedged`] и
-//! [`seal_metadata_hedged`]. Передать готовый nonce им нечем, и это свойство
-//! подписи, а не дисциплины вызывающего. Формы с nonce-аргументом
-//! (`seal_chunk`, `seal_metadata`) остались только под признаком
-//! `explicit-nonce`, которого в продуктовой сборке нет.
+//! This determines the crate's API shape, which is the main point here: production
+//! sealing paths accept a SEED rather than a nonce: [`seal_chunk_hedged`] and
+//! [`seal_metadata_hedged`]. There is no way to pass a ready-made nonce; this is a property
+//! of the signature, not caller discipline. Forms accepting a nonce
+//! (`seal_chunk`, `seal_metadata`) remain only behind the
+//! `explicit-nonce` feature, absent from production builds.
 //!
-//! Правило, нарушать которое нельзя: непроверенные байты не покидают функцию.
-//! При ошибке выходной буфер затирается.
+//! An inviolable rule: unauthenticated bytes never leave the function.
+//! On error, the output buffer is wiped.
 
 use crate::merkle::{leaf_of, Leaf};
 use crate::secret::{MetaKey, PayloadKey, SecretBuf};
@@ -33,23 +33,23 @@ use chacha20poly1305::{
 };
 use zeroize::Zeroizing;
 
-/// Длина хранимого nonce.
+/// Length of the stored nonce.
 pub const NONCE_LEN: usize = 24;
-/// Длина тега аутентификации.
+/// Authentication tag length.
 pub const TAG_LEN: usize = 16;
-/// Длина связанных данных чанка: метка(11) + file_id(16) + номер(4) + алгоритм(1).
+/// Chunk associated-data length: label(11) + file_id(16) + index(4) + algorithm(1).
 pub const CHUNK_AAD_LEN: usize = 32;
 
-/// Длина связанных данных приватных метаданных: метка(18) + file_id(16).
+/// Private-metadata associated-data length: label(18) + file_id(16).
 pub const META_AAD_LEN: usize = label::PRIVATE_META.len().saturating_add(16);
 
-/// Раскладка AAD проверяется на этапе сборки, а не тестом.
+/// The AAD layout is checked at build time, not by a test.
 ///
-/// Иначе правка метки домена (или её версии) тихо разъехалась бы с
-/// [`CHUNK_AAD_LEN`]: буфер заполняется до конца, лишние байты остались бы
-/// нулями, и два разных чанка получили бы одинаковый AAD. Сложение через
-/// `saturating_add` — чтобы выражение не считалось арифметикой с побочным
-/// эффектом.
+/// Otherwise, changing a domain label (or its version) would silently diverge from
+/// [`CHUNK_AAD_LEN`]: the buffer is filled to the end, excess bytes would remain
+/// zero, and two different chunks would receive identical AAD. Addition uses
+/// `saturating_add` so that the expression is not treated as arithmetic with a side
+///  effect.
 const _: () = assert!(
     label::CHUNK
         .len()
@@ -60,15 +60,15 @@ const _: () = assert!(
     "метка \"CC/v1/chunk\" разъехалась с CHUNK_AAD_LEN"
 );
 
-/// Связанные данные чанка: `"CC/v1/chunk" ‖ file_id ‖ u32be(index) ‖ u8(alg)`.
+/// Chunk associated data: `"CC/v1/chunk" ‖ file_id ‖ u32be(index) ‖ u8(alg)`.
 ///
-/// Привязывают чанк к файлу и к его месту в файле, поэтому перестановка чанков и
-/// подстановка чанка из другого файла не расшифровываются.
+/// Binds a chunk to its file and its position, so reordered chunks and
+/// chunks substituted from another file cannot be decrypted.
 ///
-/// `chunk_count` и признак последнего чанка сюда **не входят**: это дало бы
-/// обнаружение обрезания на каждом чанке, но дописывание в конец инвалидировало
-/// бы все существующие чанки, и каждое сохранение превращалось бы в перезапись
-/// файла целиком.
+/// `chunk_count` and the last-chunk flag are **not included**: they would
+/// allow truncation detection on every chunk, but appending would invalidate
+/// all existing chunks, turning every save into a rewrite
+/// of the entire file.
 pub fn chunk_aad(file_id: &[u8; 16], index: u32, alg: AeadAlg) -> [u8; CHUNK_AAD_LEN] {
     // Транскрипт здесь не годится: он ставит после метки нулевой байт, а
     // спецификация (§6.1) задаёт голую конкатенацию ровно в 32 байта.
@@ -89,15 +89,15 @@ pub fn chunk_aad(file_id: &[u8; 16], index: u32, alg: AeadAlg) -> [u8; CHUNK_AAD
     aad
 }
 
-/// Связанные данные приватных метаданных: `"CC/v1/private-meta" ‖ file_id`.
+/// Private-metadata associated data: `"CC/v1/private-meta" ‖ file_id`.
 ///
-/// Метка отличается от чанковой, поэтому блок метаданных нельзя выдать за чанк
-/// нулевого номера и наоборот — даже под одним и тем же ключом.
+/// The label differs from the chunk label, so metadata cannot masquerade as
+/// chunk zero or vice versa, even under the same key.
 ///
-/// Публична по той же причине, что [`chunk_aad`]: это **нормативное значение на
-/// проводе**, его обязана собрать вторая реализация, и оно заморожено вектором.
-/// Пока функция была приватной, AAD метаданных не был ни выписан в спеке, ни
-/// заморожен — при том что AAD чанка рядом имел и строку в §6.1, и вектор.
+/// Public for the same reason as [`chunk_aad`]: this is a **normative wire
+/// value** that a second implementation must construct, and a vector freezes it.
+/// While this function was private, metadata AAD was neither specified nor
+/// frozen, although adjacent chunk AAD had both a line in §6.1 and a vector.
 pub fn metadata_aad(file_id: &[u8; 16]) -> [u8; META_AAD_LEN] {
     let source = label::PRIVATE_META.as_bytes().iter().chain(file_id.iter());
     let mut aad = [0u8; META_AAD_LEN];
@@ -107,21 +107,21 @@ pub fn metadata_aad(file_id: &[u8; 16]) -> [u8; META_AAD_LEN] {
     aad
 }
 
-/// Умеет ли эта сборка шифровать объявленным профилем AEAD.
+/// Whether this build supports encryption with the declared AEAD profile.
 ///
-/// Второй рубеж для `aead_id`, симметричный [`crate::merkle::ensure_supported`]
-/// для хеша дерева. Без него идентификатор в подписанном заголовке разбирался
-/// успешно, а отказ приходил только на первом чанке — то есть уже после проверки
-/// подписи, разбора слота, согласования ключей и разворота CEK. Разобрать номер и
-/// суметь его исполнить — разные вещи, и решаться они должны в одном месте, на
-/// разборе.
+/// A second boundary for `aead_id`, symmetric to [`crate::merkle::ensure_supported`]
+/// for the tree hash. Without it, an identifier in a signed header parsed
+/// successfully, with rejection only at the first chunk, after signature
+/// verification, slot parsing, key agreement, and CEK unwrapping. Parsing a number and
+/// being able to execute it are different things; both must be resolved together,
+/// at parsing time.
 ///
-/// Профили AES заявлены форматом (docs/format.md §6.1), но их крейты в сборку не
-/// подключены: счётчиковый nonce AES-GCM в 24-байтный аргумент не укладывается и
-/// потребует собственного пути, а не ветки в `match`.
+/// AES profiles are declared by the format (docs/format.md §6.1), but their crates are
+/// not included: the AES-GCM counter nonce does not fit a 24-byte argument and
+/// requires its own path, not a branch in `match`.
 ///
-/// `match` намеренно без `_`: добавление члена в [`AeadAlg`] обязано ломать
-/// сборку здесь, рядом с шифром, а не проходить молча.
+/// The `match` deliberately has no `_`: adding a member to [`AeadAlg`] must break
+/// the build here, beside the cipher, rather than pass silently.
 pub fn ensure_supported(alg: AeadAlg) -> Result<(), CryptoError> {
     match alg {
         AeadAlg::XChaCha20Poly1305 => Ok(()),
@@ -129,18 +129,18 @@ pub fn ensure_supported(alg: AeadAlg) -> Result<(), CryptoError> {
     }
 }
 
-/// Единственное место выбора профиля AEAD при шифровании.
+/// The sole AEAD profile selection point for encryption.
 ///
-/// AES-профили заявлены форматом, но их крейты в сборку не подключены, поэтому
-/// клиент честно отвечает «алгоритм не поддерживается» вместо подстановки
-/// другого шифра. Тихая замена профиля — это молчаливое понижение стойкости.
-/// Сверх того, счётчиковый nonce AES-GCM (`N_base ‖ u32be(i)`, §6.1) в
-/// 24-байтный аргумент этой функции не укладывается: его подключение потребует
-/// собственного пути, а не ветки в этом `match`.
-/// Ключ здесь — сырые байты, а не тип назначения: внутренняя функция общая для
-/// полезной нагрузки (K3) и приватных метаданных (K5), а различать назначение
-/// обязана публичная поверхность, где это и делается типами `PayloadKey` и
-/// `MetaKey`.
+/// AES profiles are declared by the format, but their crates are not included, so
+/// the client honestly reports "unsupported algorithm" instead of substituting
+/// another cipher. Silently replacing a profile silently downgrades security.
+/// Moreover, the AES-GCM counter nonce (`N_base ‖ u32be(i)`, §6.1) does not
+/// fit this function's 24-byte argument: supporting it requires
+/// a dedicated path rather than a branch in this `match`.
+/// The key here is raw bytes rather than a purpose-specific type: this internal function serves
+/// both payload (K3) and private metadata (K5), while the public API must
+/// distinguish purposes, as it does through the `PayloadKey` and
+/// `MetaKey` types.
 fn seal_with(
     key: &[u8; 32],
     alg: AeadAlg,
@@ -157,19 +157,19 @@ fn seal_with(
     }
 }
 
-/// Единственное место выбора профиля AEAD при расшифровании ЧАНКА.
+/// The sole AEAD profile selection point for CHUNK decryption.
 ///
-/// Расшифровывает на месте: на входе в `buffer` шифротекст, на выходе — открытый
-/// текст той же длины, тег отдельным аргументом.
+/// Decrypts in place: `buffer` contains ciphertext on input and plaintext
+/// of the same length on output; the tag is a separate argument.
 ///
-/// Существует ради того, чтобы открытый текст не заводил собственной копии в
-/// куче: см. развёрнутое объяснение в [`open_chunk_inner`]. Отказ выглядит
-/// одинаково для подставного чанка, чужого файла и испорченного байта — по той
-/// же причине, что и в [`open_with`].
+/// Exists to prevent plaintext from acquiring its own heap copy:
+/// see the detailed explanation in [`open_chunk_inner`]. Rejection looks
+/// identical for a substituted chunk, another file, and a corrupted byte, for the
+/// same reason as in [`open_with`].
 ///
-/// Что остаётся в `buffer` при отказе, здесь не определено, и полагаться на это
-/// нельзя: реализация вправе оставить там частично расшифрованные байты.
-/// Затирание гарантирует обёртка [`open_chunk`], и гарантирует структурно.
+/// The contents of `buffer` on failure are unspecified and must not be relied
+/// on: an implementation may leave partially decrypted bytes there.
+/// The [`open_chunk`] wrapper guarantees wiping, structurally.
 fn open_in_place(
     key: &[u8; 32],
     alg: AeadAlg,
@@ -186,14 +186,14 @@ fn open_in_place(
     }
 }
 
-/// Расшифрование с выделением вектора — остаток для приватных метаданных.
+/// Decryption allocating a vector: the remaining path for private metadata.
 ///
-/// Чанки через неё больше не идут: их открытый текст обязан оставаться в
-/// буфере вызывающего, чтобы не проходить через незапертую кучу. Метаданные —
-/// это имя файла и справочный размер, десятки байт на весь документ; ради них
-/// перестраивать разбор TLV на чтение из чужого буфера незачем, а размер такой,
-/// что «уехало в подкачку» и «не уехало» одинаково недоказуемы. Разница названа
-/// вслух, чтобы следующий читатель не решил, будто про метаданные забыли.
+/// Chunks no longer pass through it: their plaintext must stay in the
+/// caller's buffer to avoid the unlocked heap. Metadata consists of
+/// a filename and an informational size, tens of bytes per document; restructuring
+/// TLV parsing to read from another buffer is unwarranted for that, and at this size,
+/// "was swapped out" and "was not swapped out" are equally unprovable. This distinction is
+/// explicit so the next reader does not assume metadata was forgotten.
 fn open_with(
     key: &[u8; 32],
     alg: AeadAlg,
@@ -211,30 +211,30 @@ fn open_with(
     }
 }
 
-/// Запечатать чанк, ВЫВЕДЯ nonce внутри, и вернуть его вместе с листом дерева.
+/// Seal a chunk, DERIVING the nonce internally, and return it with the tree leaf.
 ///
-/// # Почему эта функция вообще существует
+/// # Why this function exists at all
 ///
-/// Потому что она физически не даёт передать nonce — а именно это и требуется,
-/// когда чанк ПЕРЕЗАПИСЫВАЕТСЯ. Повтор nonce на одном ключе смертелен (И-1):
-/// два разных открытых текста под одним потоком ключей раскрываются XOR-ом, а
-/// одноразовый ключ Poly1305 позволяет подделать тег. Самый же естественный
-/// приём при правке документа — «сохранить nonce, который уже лежит в кадре» —
-/// ведёт ровно туда.
+/// Because it physically prevents passing a nonce, which is exactly what is required
+/// when a chunk is REWRITTEN. Nonce reuse under one key is fatal (I-1):
+/// two different plaintexts under one keystream are exposed through XOR, and
+/// reuse of the one-time Poly1305 key enables tag forgery. Yet the most natural
+/// approach when editing a document, "keep the nonce already in the frame",
+/// leads directly to that failure.
 ///
-/// Сегодня перезапись безопасна не по замыслу, а по СЛЕДСТВИЮ хеджирования:
-/// nonce выводится из засева и открытого текста, поэтому другой текст даёт
-/// другой nonce сам собой. Свойство настоящее, но держится на том, что вызывающий
-/// не станет умничать. Комментарием такое не удержать — удержать может только
-/// подпись функции, в которой места для nonce нет.
+/// Rewriting is safe today as a CONSEQUENCE of hedging, rather than by API design:
+/// the nonce derives from the seed and plaintext, so a different plaintext
+/// naturally produces a different nonce. The property is real, but depends on the caller
+/// not getting clever. A comment cannot enforce it; only a function
+/// signature with no room for a nonce can.
 ///
-/// Засев приходит параметром: в этом крейте нет генератора и не должно быть
-/// (И-1 требует хранимых nonce, а не выведенных читателем, но выводит их
-/// ОТПРАВИТЕЛЬ — из случайного засева ПЛЮС открытого текста, чтобы повтор
-/// состояния генератора при откате снапшота не повторял nonce).
+/// The seed is a parameter: this crate has no RNG and must not have one
+/// (I-1 requires stored nonces, not reader-derived ones, but the SENDER derives them
+/// from a random seed PLUS plaintext, so that repeating
+/// RNG state after snapshot rollback does not repeat the nonce).
 ///
 /// # Errors
-/// Отдаёт [`CryptoError`] при отказе шифрования или неверной длине результата.
+/// Returns [`CryptoError`] on encryption failure or an incorrect output length.
 pub fn seal_chunk_hedged(
     key: &PayloadKey,
     alg: AeadAlg,
@@ -250,28 +250,28 @@ pub fn seal_chunk_hedged(
     Ok((nonce, leaf))
 }
 
-/// Зашифровать чанк, дописав `шифротекст ‖ тег` в `out`, и вернуть лист дерева.
+/// Encrypt a chunk, appending `ciphertext ‖ tag` to `out`, and return the tree leaf.
 ///
-/// `out` очищается перед записью.
+/// `out` is cleared before writing.
 ///
-/// # Nonce здесь передаётся аргументом, и это ОПАСНАЯ форма
+/// # The nonce is an argument here: this is the DANGEROUS form
 ///
-/// Она оставлена ради замороженных векторов и проб, которым нужен ровно тот
-/// nonce, что записан в артефакте. Продуктовый путь ею не пользуется: там стоит
-/// [`seal_chunk_hedged`], где nonce вывести можно, а передать нельзя.
+/// Retained for frozen vectors and probes needing precisely the
+/// nonce recorded in the artifact. Production paths do not use it: they use
+/// [`seal_chunk_hedged`], where a nonce can be derived but cannot be supplied.
 ///
-/// Если вы пишете новый вызов и он не про KAT — вам нужна не эта функция.
-/// Перезапись чанка с уже лежащим в кадре nonce уничтожает конфиденциальность
-/// обоих текстов сразу (И-1).
+/// If you are writing a new call unrelated to KATs, this is not the function you need.
+/// Rewriting a chunk with the nonce already in its frame destroys confidentiality
+/// of both plaintexts at once (I-1).
 ///
-/// # Почему за признаком, а не просто с предупреждением в докстроке
+/// # Why a feature gate rather than just a doc-comment warning
 ///
-/// Потому что докстрока — не граница. Пока функция видна продукту, «опасная
-/// форма» держится на том, что следующий вызывающий прочитает абзац выше;
-/// признак `explicit-nonce` выключен по умолчанию и включён ТОЛЬКО через
-/// `[dev-dependencies]`, поэтому продуктовая сборка этой функции не видит
-/// вовсе — вызов не компилируется. Границу, видимую компилятору, нельзя
-/// проглядеть в спешке.
+/// Because documentation is not a boundary. While production code can see the function,
+/// the "dangerous form" relies on the next caller reading the paragraph above;
+/// `explicit-nonce` is disabled by default and enabled ONLY through
+/// `[dev-dependencies]`, so a production build cannot see this function
+/// at all: the call does not compile. A boundary visible to the compiler cannot
+/// be overlooked in a hurry.
 #[cfg(any(test, feature = "explicit-nonce"))]
 pub fn seal_chunk(
     key: &PayloadKey,
@@ -311,10 +311,10 @@ fn seal_chunk_with_aad(
     Ok(leaf)
 }
 
-/// Расшифровать чанк в `out` и вернуть лист дерева, вычисленный по тегу.
+/// Decrypt a chunk into `out` and return the tree leaf computed from the tag.
 ///
-/// При любой ошибке `out` очищается и затирается: вызывающий не должен иметь
-/// возможности прочитать непроверенные байты.
+/// On any error, `out` is cleared and wiped: the caller must have no
+/// opportunity to read unauthenticated bytes.
 pub fn open_chunk(
     key: &PayloadKey,
     alg: AeadAlg,
@@ -341,8 +341,8 @@ pub fn open_chunk(
     }
 }
 
-/// Тело расшифрования, вынесенное ради обёртки с затиранием: любая ошибка
-/// возвращается наружу через [`open_chunk`], который гарантированно чистит `out`.
+/// Decryption body extracted for the wiping wrapper: every error
+/// returns through [`open_chunk`], which guarantees clearing `out`.
 fn open_chunk_inner(
     key: &PayloadKey,
     alg: AeadAlg,
@@ -381,26 +381,26 @@ fn open_chunk_inner(
     Ok(leaf_of(index, nonce, tag, ct))
 }
 
-/// Запечатать приватные метаданные, ВЫВЕДЯ nonce внутри, и вернуть его рядом.
+/// Seal private metadata, DERIVING the nonce internally, and return it alongside.
 ///
-/// # Почему эта функция существует
+/// # Why this function exists
 ///
-/// По той же причине, что и [`seal_chunk_hedged`], и заведена она позже него не
-/// потому, что метаданные безопаснее: хеджирование здесь было, но собирал его
-/// ВЫЗЫВАЮЩИЙ — движок выводил nonce у себя и передавал сюда готовым. Пока шаг
-/// вывода стоит снаружи, его можно не сделать, и подпись функции этому не
-/// мешает: она принимает любые 24 байта. Повтор же здесь обходится дороже
-/// всего — `CEK` и `header_salt` приходят из того же генератора, поэтому откат
-/// снапшота ВМ повторял бы и ключ K5, и nonce, а открытые тексты (имя и размер
-/// другого документа) различались бы.
+/// For the same reason as [`seal_chunk_hedged`]. It was added later not
+/// because metadata is safer: hedging existed here, but the CALLER assembled it;
+/// the engine derived a nonce itself and passed it here ready-made. While
+/// that derivation step is external, it can be skipped, and the function signature
+/// cannot prevent that: it accepts any 24 bytes. Reuse here is especially
+/// costly: `CEK` and `header_salt` come from the same RNG, so VM snapshot
+/// rollback would repeat both the K5 key and nonce, while plaintexts
+/// (the name and size of another document) would differ.
 ///
-/// Засев приходит параметром: генератора в этом крейте нет и быть не должно.
+/// The seed is a parameter: this crate has no RNG and must not have one.
 ///
-/// Возвращается пара `(nonce, шифротекст)`: nonce не секрет, но без него блок
-/// не расшифровать, и в файл он кладётся готовым (И-1).
+/// Returns `(nonce, ciphertext)`: the nonce is not secret, but the block cannot
+/// be decrypted without it, and it is stored ready-made in the file (I-1).
 ///
 /// # Errors
-/// Отдаёт [`CryptoError`] при отказе вывода nonce или шифрования.
+/// Returns [`CryptoError`] on nonce derivation or encryption failure.
 pub fn seal_metadata_hedged(
     key: &MetaKey,
     file_id: &[u8; 16],
@@ -416,14 +416,14 @@ pub fn seal_metadata_hedged(
     Ok((nonce, ct))
 }
 
-/// Зашифровать приватные метаданные заголовка под собственным ключом K5.
+/// Encrypt private header metadata under its own K5 key.
 ///
-/// # Nonce здесь передаётся аргументом, и это ОПАСНАЯ форма
+/// # The nonce is an argument here: this is the DANGEROUS form
 ///
-/// Та же оговорка и тот же признак `explicit-nonce`, что у `seal_chunk`: форма
-/// оставлена векторам и пробам, которым нужен ровно тот nonce, что записан в
-/// артефакте. Продуктовый путь ходит через [`seal_metadata_hedged`], где nonce
-/// вывести можно, а передать нельзя.
+/// The same caveat and `explicit-nonce` feature as for `seal_chunk`: this form
+/// remains for vectors and probes needing precisely the nonce recorded in the
+/// artifact. Production paths use [`seal_metadata_hedged`], where a nonce
+/// can be derived but cannot be supplied.
 #[cfg(any(test, feature = "explicit-nonce"))]
 pub fn seal_metadata(
     key: &MetaKey,
@@ -437,7 +437,7 @@ pub fn seal_metadata(
     seal_with(key.expose(), AeadAlg::XChaCha20Poly1305, nonce, plaintext, &aad)
 }
 
-/// Расшифровать приватные метаданные.
+/// Decrypt private metadata.
 pub fn open_metadata(
     key: &MetaKey,
     file_id: &[u8; 16],
@@ -462,14 +462,14 @@ mod tests {
     const NONCE: [u8; NONCE_LEN] = [0x21; NONCE_LEN];
     const CHUNK_64_KIB: usize = 65536;
 
-    /// Ключ метаданных с ТЕМИ ЖЕ байтами, что и ключ полезной нагрузки.
+    /// A metadata key with the SAME bytes as the payload key.
     ///
-    /// Совпадение намеренное: тест
-    /// `private_metadata_never_opens_as_a_chunk` проверяет, что блок метаданных
-    /// не подменяет чанк даже при совпавших ключе и nonce, то есть что защиту
-    /// даёт разделение доменов в AAD, а не различие ключей. После разделения
-    /// типов (`MetaKey` против `PayloadKey`) выразить «тот же ключ» иначе нельзя
-    /// — и это ровно то, ради чего типы и разделены.
+    /// The equality is deliberate: the test
+    /// `private_metadata_never_opens_as_a_chunk` checks that metadata
+    /// cannot replace a chunk even when key and nonce coincide, meaning protection
+    /// comes from domain separation in AAD rather than differing keys. After separating
+    ///  the types (`MetaKey` versus `PayloadKey`), there is no other way to express "the same key",
+    /// which is exactly why those types were separated.
     fn meta_key() -> MetaKey {
         MetaKey::from_bytes([0x33; 32])
     }
@@ -478,8 +478,8 @@ mod tests {
         PayloadKey::from_bytes([0x33; 32])
     }
 
-    /// Наполнитель без повторяющегося блока: одинаковые блоки скрыли бы ошибку
-    /// в раскладке кадра.
+    /// Filler with no repeated block: identical blocks would hide an error
+    /// in the frame layout.
     fn payload(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i % 251) as u8).collect()
     }
@@ -718,19 +718,19 @@ mod tests {
         }
     }
 
-    /// ОДИН ЗАСЕВ НА ДВА РАЗНЫХ ТЕКСТА ДАЁТ РАЗНЫЕ NONCE.
+    /// ONE SEED FOR TWO DIFFERENT PLAINTEXTS PRODUCES DIFFERENT NONCES.
     ///
-    /// # Ради чего этот тест стоит
+    /// # What this test protects
     ///
-    /// Ради перезаписи чанка, которой ещё нет. Когда она появится (фаза 6),
-    /// самым естественным приёмом будет «взять nonce, который уже лежит в
-    /// кадре» — и это уничтожило бы конфиденциальность обоих текстов сразу:
-    /// один поток ключей на два разных открытых текста раскрывается XOR-ом, а
-    /// одноразовый ключ Poly1305 позволяет подделать тег (И-1).
+    /// Chunk rewriting, which does not exist yet. When it arrives (phase 6),
+    /// the most natural approach will be "take the nonce already in the
+    /// frame", which would destroy confidentiality of both plaintexts at once:
+    /// one keystream for two different plaintexts exposes them through XOR, and
+    /// the one-time Poly1305 key permits tag forgery (I-1).
     ///
-    /// Здесь проверяется, что защита от этого — СВОЙСТВО ВЫВОДА, а не
-    /// дисциплина вызывающего: даже при полностью совпавшем засеве, то есть при
-    /// откате снапшота ВМ, другой текст даёт другой nonce.
+    /// This checks that protection is a PROPERTY OF DERIVATION rather than
+    /// caller discipline: even with exactly the same seed, as after
+    /// VM snapshot rollback, a different plaintext yields a different nonce.
     #[test]
     fn the_same_seed_still_yields_different_nonces_for_different_plaintexts() {
         let seed = [0x33u8; NONCE_LEN];
@@ -748,12 +748,12 @@ mod tests {
         assert_ne!(first, second);
     }
 
-    /// А ОДИНАКОВЫЙ ТЕКСТ ПРИ ОДИНАКОВОМ ЗАСЕВЕ СОВПАДЁТ — И ЭТО ГРАНИЦА.
+    /// IDENTICAL PLAINTEXT WITH AN IDENTICAL SEED WILL MATCH: THIS IS THE BOUNDARY.
     ///
-    /// Утверждается прямо, потому что это и есть остаток риска, названный в
-    /// README: полный повтор состояния генератора ПРИ СОВПАДАЮЩЕМ открытом
-    /// тексте даёт совпадающий шифротекст, раскрывая факт равенства входов.
-    /// Тест сторожит, чтобы эта граница не уехала молча ни в одну сторону.
+    /// Stated explicitly because this is the residual risk named in
+    /// README: a full repeat of RNG state WITH IDENTICAL plaintext
+    /// produces identical ciphertext, revealing equality of the inputs.
+    /// The test guards against this boundary silently shifting in either direction.
     #[test]
     fn the_same_seed_and_the_same_plaintext_repeat_and_that_is_the_known_limit() {
         let seed = [0x44u8; NONCE_LEN];

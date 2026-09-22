@@ -1,37 +1,37 @@
-//! Точка входа разбора контейнера.
+//! Container parsing entry point.
 //!
-//! Порядок операций здесь — часть контракта безопасности, а не деталь
-//! реализации: структурные границы, затем подпись, и только затем использование
-//! полей.
+//! The operation order is part of the security contract, not an implementation
+//! detail: structural boundaries, then signature, and only then use of
+//! fields.
 //!
-//! Но это **не делает вход доверенным**. Враждебный заголовок может быть
-//! безупречно подписан ключом противника, поэтому декодер обязан выдерживать
-//! любой ввод, а доверие к подписанту — отдельное решение, принимаемое выше.
+//! This **does not make the input trusted**. A hostile header may be
+//! perfectly signed with an attacker's key, so the decoder must tolerate
+//! all input; trust in the signer is a separate decision made above.
 //!
-//! # Отступление от §5.1 спецификации
+//! # Departure from specification §5.1
 //!
-//! Спецификация предписывает проверять подпись **до** декодирования. Буквально
-//! это неисполнимо: и публичный ключ автора, и идентификатор набора алгоритмов
-//! лежат **внутри** заголовка, а без них нечем и не над чем проверять. Поэтому
-//! реальный порядок такой:
+//! The specification requires signature verification **before** decoding. Literally,
+//! this is impossible: both the author's public key and the algorithm suite identifier
+//! are **inside** the header; without them verification lacks its key and input. Thus
+//! the actual order is:
 //!
-//! 1. структурное разрезание ([`Prologue::split`]) — без криптографии;
-//! 2. декодирование заголовка ради двух значений: ключа автора и набора;
-//! 3. проверка подписи по сырым байтам заголовка;
-//! 4. всё остальное.
+//! 1. structural splitting ([`Prologue::split`]), without cryptography;
+//! 2. header decoding to obtain two values: the author key and suite;
+//! 3. signature verification over the raw header bytes;
+//! 4. everything else.
 //!
-//! Отступление безопасно ровно постольку, поскольку декодер тотален: он не
-//! паникует, не зацикливается и не выделяет память по непроверенной длине. Это
-//! требование §5.2 существует независимо от порядка — «подписать враждебный
-//! заголовок может кто угодно», — поэтому декодер и так обязан выдерживать
-//! непроверенный ввод, и шаг 2 не добавляет ему работы, которой он не был бы
-//! обязан делать после шага 3.
+//! The departure is safe precisely insofar as the decoder is total: it does not
+//! panic, loop forever, or allocate based on an unchecked length. This
+//! §5.2 requirement exists regardless of order: "anyone can sign a hostile
+//! header". The decoder must therefore tolerate
+//! unverified input anyway, and step 2 imposes no work it would not already
+//! have to perform after step 3.
 //!
-//! Цена отступления названа прямо: ошибка декодирования побеждает ошибку
-//! подписи. Файл с неизвестным критичным полем и мусорной подписью даёт
-//! [`FormatError::UnknownCriticalField`], а не отказ подписи. Наружу это отдаёт
-//! один бит («заголовок разобрался»), и этот бит противник и так получает,
-//! подписав свой заголовок своим ключом.
+//! The cost is explicit: a decoding error takes precedence over a signature
+//! error. A file with an unknown critical field and a garbage signature yields
+//! [`FormatError::UnknownCriticalField`] rather than a signature failure. This reveals
+//! one bit ("the header parsed"), which the attacker can already obtain
+//! by signing their own header with their own key.
 
 use crate::header::{
     MAX_READABLE_CONTAINER_VERSION, MIN_READABLE_CONTAINER_VERSION, ParsedHeader,
@@ -40,64 +40,64 @@ use crate::header::{
 use crate::{FormatError, MAGIC, MAX_HEADER_LEN, Prologue};
 use oc_crypto::{Transcript, label, sign};
 
-/// Отказ проверки подписи заголовка.
+/// Header signature verification failure.
 ///
-/// Один вариант и на «публичный ключ не разобрался», и на «подпись не сошлась».
-/// Различать их снаружи незачем: разный ответ выдал бы противнику лишний бит о
-/// том, какая именно проверка не прошла.
+/// One variant for both "public key could not be parsed" and "signature mismatch".
+/// There is no need to distinguish them externally: different answers would give the attacker
+/// an extra bit about precisely which check failed.
 const BAD_HEADER_SIGNATURE: FormatError = FormatError::BadHeaderSignature;
 
-/// Что известно о подписанте.
+/// What is known about the signer.
 ///
-/// Отдельный тип, а не булев флаг: главная ошибка в системах такого рода —
-/// взять публичный ключ **из самого заголовка**, проверить им же подпись и
-/// назвать результат проверенным. Это самоподписанность, доказывающая ровно
-/// ничего. Разделение на два значения не даёт спутать «подпись сходится» и «мы
-/// знаем, кто подписал».
+/// A separate type, not a Boolean flag: the primary mistake in systems of this kind is
+/// taking a public key **from the header itself**, verifying the signature with it,
+/// and calling the result verified. That is self-signing, proving precisely
+/// nothing. Distinct values prevent confusing "the signature matches" with "we
+/// know who signed".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignerTrust {
-    /// Ключ автора закреплён за этой организацией и совпадает.
+    /// The author key is pinned for this organization and matches.
     Pinned,
-    /// Подпись корректна, но пары «организация, ключ» видим впервые. Интерфейс
-    /// обязан сказать об этом прямо, а не показывать замок.
+    /// The signature is valid, but this "organization, key" pair is new. The interface
+    /// must state that explicitly rather than display a padlock.
     Unknown,
-    /// **Организация известна, ключ другой.**
+    /// **Known organization, different key.**
     ///
-    /// Самое важное из трёх значений и единственное, которое обязано
-    /// останавливать работу. Ровно так выглядит подмена: файл выдаёт себя за
-    /// того же отправителя, от которого вы уже получали файлы, но подписан не
-    /// тем ключом.
+    /// The most important of the three values and the only one that must
+    /// stop processing. This is exactly what substitution looks like: the file claims to be
+    /// from the same sender as previously received files but is signed with
+    /// a different key.
     ///
-    /// Честные причины у этого тоже есть — автор сменил ключ, — и различить их
-    /// изнутри файла нельзя ничем: подпись корректна в обоих случаях. Поэтому
-    /// решение отдаётся человеку, но по умолчанию **отказ**: цена ошибочного
-    /// отказа — один звонок отправителю, цена ошибочного согласия — открытый
-    /// файл злоумышленника.
+    /// Legitimate reasons also exist: the author changed keys. Nothing inside the file can
+    /// distinguish them: the signature is valid in either case. Therefore
+    /// the person decides, with **denial** as the default: a mistaken
+    /// rejection costs one call to the sender; mistaken acceptance costs opening
+    /// an attacker's file.
     Conflict,
 }
 
-/// Хранилище закреплённых ключей авторов.
+/// Store of pinned author keys.
 ///
-/// Возвращает вердикт целиком, а не «известен ли ключ»: отличить «видим
-/// впервые» от «известен другой ключ» может только тот, кто владеет хранилищем,
-/// и решать это за него здесь было бы нечем.
+/// Returns the complete verdict rather than "is this key known": only the store's owner
+/// can distinguish "first seen" from "a different key is known",
+/// and this layer has no basis for deciding on its behalf.
 ///
-/// `org_id` в запросе обязателен, и это следствие устройства формата. Имени
-/// автора в заголовке нет намеренно (§2, тег 5): имя, названное в самом
-/// заголовке, доказывает не больше, чем сам заголовок. Единственное, к чему
-/// можно привязать закрепление, — `org_id`, поле арендатора. Отсюда и граница
-/// гарантии: подмену ключа **у известной организации** это ловит, а
-/// злоумышленника, назвавшегося новой организацией, — нет; он просто окажется
-/// неизвестным, что и есть честное состояние.
+/// `org_id` is required in the query as a consequence of the format. The author's
+/// name is deliberately absent from the header (§2, tag 5): a name claimed in
+/// the header proves no more than the header itself. The only anchor
+/// for pinning is `org_id`, the tenant field. Hence the guarantee's
+/// boundary: this catches key substitution **for a known organization**, but not
+/// an attacker claiming to be a new organization; they simply become
+/// unknown, which is the honest state.
 pub trait TrustStore {
-    /// Что известно про пару «организация, ключ автора».
+    /// What is known about the "organization, author key" pair.
     fn lookup(&self, org_id: &[u8], author_key: &[u8; 32]) -> SignerTrust;
 }
 
-/// Хранилище, которому не известен никто.
+/// A store that knows nobody.
 ///
-/// Полезно и как значение по умолчанию, и как способ явно сказать «доверия нет»
-/// в тестах: с ним любой корректно подписанный контейнер даёт
+/// Useful as both a default and an explicit "no trust" statement
+/// in tests: every correctly signed container yields
 /// [`SignerTrust::Unknown`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EmptyTrustStore;
@@ -108,56 +108,56 @@ impl TrustStore for EmptyTrustStore {
     }
 }
 
-/// Проверенный заголовок вместе с байтами, по которым он разобран.
+/// Verified header together with the bytes from which it was parsed.
 #[derive(Debug, Clone)]
 pub struct VerifiedHeader<'a> {
     pub parsed: ParsedHeader,
-    /// Исходные байты заголовка: по ним, а не по повторной кодировке, считаются
-    /// все хеши.
+    /// Original header bytes: all hashes are computed over these,
+    /// not over a re-encoding.
     pub header_bytes: &'a [u8],
-    /// Смещение первого байта изменяемой области.
+    /// Offset of the mutable region's first byte.
     pub content_desc_offset: u64,
     pub trust: SignerTrust,
 }
 
-/// Идентификатор набора алгоритмов, входящий в подпись заголовка (§5).
+/// Algorithm suite identifier included in the header signature (§5).
 ///
-/// Отдельного скалярного поля `suite_id` в заголовке нет: набор задан тремя
-/// идентификаторами внутри поля `SUITE`. Поэтому значение выводится из
-/// разобранного набора, и выводится именно из **алгоритма подписи** — того
-/// единственного, от которого зависит сама проверяемая подпись. Когда [`SigAlg`]
-/// получит второе значение, этот байт не даст предъявить подпись одной схемы как
-/// подпись другой, если их кодировки удастся столкнуть.
+/// There is no separate scalar `suite_id` field in the header: the suite is defined by three
+/// identifiers within `SUITE`. This value is therefore derived from the
+/// parsed suite, specifically from the **signature algorithm**,
+/// the sole algorithm on which the signature being verified depends. When [`SigAlg`]
+/// gains a second value, this byte prevents presenting one scheme's signature as
+/// another's if their encodings can be made to collide.
 ///
-/// Идентификаторы AEAD и хеша дерева в байт не входят намеренно: они лежат
-/// внутри байтов заголовка, а те покрыты подписью целиком. Второе место, где
-/// кодируется то же самое, — это второе место, которое может разойтись с первым,
-/// и расхождение проявилось бы как молчаливый отказ читать корректный файл.
+/// The AEAD and tree hash identifiers deliberately do not enter this byte: they are
+/// within the header bytes, all covered by the signature. A second encoding
+/// of the same thing is a second place that may diverge from the first,
+/// causing silent rejection of a valid file.
 ///
 /// [`SigAlg`]: oc_crypto::SigAlg
 pub fn suite_id(suite: &Suite) -> u8 {
     suite.sig as u8
 }
 
-/// Точная строка байтов под подписью автора (§5).
+/// Exact byte string covered by the author's signature (§5).
 ///
 /// ```text
 /// "CC/v1/header-sig" ‖ 0x00 ‖ u8(suite_id) ‖ Magic ‖ u32le(HeaderLen) ‖ Header
 /// ```
 ///
-/// Нулевой байт после метки ставит сам [`Transcript::new`], поэтому здесь его
-/// добавлять нельзя: второй такой байт дал бы строку, которой нет в
-/// спецификации, и файлы разошлись бы с любой другой реализацией формата.
+/// [`Transcript::new`] itself inserts the zero byte after the label, so it must not
+/// be added here: a second zero would produce a string absent from
+/// the specification, making files incompatible with any other implementation.
 ///
-/// Заголовок кладётся последним и без префикса длины — длина уже связана
-/// предыдущим полем. Ради этого случая в [`Transcript`] и заведён
-/// [`Transcript::tail_after_declared_length`]: он говорит, что отсутствие
-/// префикса здесь осознанно, а не забыто.
+/// The header comes last without a length prefix: its length is already bound by
+/// the preceding field. [`Transcript`] provides
+/// [`Transcript::tail_after_declared_length`] for this case: it states that the missing
+/// prefix is deliberate, not forgotten.
 ///
-/// Функция публична, потому что упаковщику нужно подписать ровно ту же строку.
-/// Две независимые её сборки — писательская и читательская — разойдясь, дали бы
-/// файл, который наш писатель подписал, а наш читатель отверг; причину пришлось
-/// бы искать сравнением байтов.
+/// Public because the packer must sign exactly the same string.
+/// Two independent constructions, one for writing and one for reading, could diverge and yield
+/// a file our writer signs but our reader rejects, requiring byte comparison
+/// to find the cause.
 pub fn header_signing_transcript(
     header_bytes: &[u8],
     suite: &Suite,
@@ -178,23 +178,23 @@ pub fn header_signing_transcript(
     Ok(transcript)
 }
 
-/// Разобрать и проверить пролог контейнера.
+/// Parse and verify the container prologue.
 ///
-/// Последовательность (о её расхождении с §5.1 — в описании модуля):
-/// 1. структурные границы: магия, предел длины, хватает ли байтов;
-/// 2. декодирование заголовка — ради ключа автора и набора алгоритмов;
-/// 3. проверка подписи Ed25519 по транскрипту с меткой домена;
-/// 4. согласование версий: `min_reader_version` и диапазон `container_version`;
-/// 5. определение доверия к подписанту по хранилищу.
+/// Sequence (see module documentation for its departure from §5.1):
+/// 1. structural boundaries: magic, length limit, sufficient bytes;
+/// 2. header decoding to obtain the author key and algorithm suite;
+/// 3. Ed25519 signature verification over the domain-labeled transcript;
+/// 4. version negotiation: `min_reader_version` and the `container_version` range;
+/// 5. signer trust determination using the store.
 ///
-/// Шаг 4 идёт **до** любого содержательного использования полей: файл,
-/// требующий более новую версию клиента, обязан получить отказ, даже если всё
-/// остальное разобралось и подпись сошлась. Ключ автора и набор алгоритмов на
-/// шаге 2 читаются раньше — но они не «применяются», а лишь задают, чем и над
-/// чем считать подпись.
+/// Step 4 precedes **any** substantive use of fields: a file
+/// requiring a newer client must be rejected even if everything else
+/// parsed and its signature matched. The author key and suite are read earlier,
+/// at step 2, but are not "applied": they only determine what to use and
+/// what to compute the signature over.
 ///
-/// Успех означает «подпись сходится», а **не** «подписанту можно верить»:
-/// доверие возвращается отдельным полем [`VerifiedHeader::trust`].
+/// Success means "the signature matches", **not** "the signer is trustworthy":
+/// trust is returned separately in [`VerifiedHeader::trust`].
 pub fn verify_and_parse<'a>(
     buf: &'a [u8],
     trust_store: &dyn TrustStore,
@@ -296,20 +296,20 @@ pub fn verify_and_parse<'a>(
     })
 }
 
-/// Разобрать пролог **без** проверки подписи.
+/// Parse the prologue **without** signature verification.
 ///
-/// Существует ровно для одного применения — фаззинга декодера, которому нужен
-/// доступ к глубоким веткам без возни с подписью.
+/// Exists for exactly one use: decoder fuzzing, which needs
+/// access to deep branches without dealing with signatures.
 ///
-/// Закрыта `cfg`, а не только неудобным именем. Имя и `#[doc(hidden)]` — это
-/// просьба к ревьюеру, а обход проверки подписи слишком дорого стоит, чтобы
-/// держаться на просьбе: функция, доступная из рабочей сборки, рано или поздно
-/// будет из неё вызвана — из отладочной ветки, из утилиты диагностики, из
-/// «временно, чтобы посмотреть, что внутри». Теперь в сборке `cc-cli` этого
-/// символа нет вовсе, и вызвать его нельзя даже намеренно.
+/// Gated by `cfg`, not merely an awkward name. A name and `#[doc(hidden)]` are
+/// requests to a reviewer; bypassing signature verification is too costly to rely
+/// on requests: a function available in a production build will eventually
+/// be called there, from a debugging branch, a diagnostic utility, or
+/// a "temporary look inside". Now the `cc-cli` build lacks this
+/// symbol entirely, making it impossible to call even deliberately.
 ///
-/// Фаззер включает признак `fuzzing` явно: `--cfg fuzzing` (cargo-fuzz ставит
-/// его сам).
+/// The fuzzer enables `fuzzing` explicitly: `--cfg fuzzing` (cargo-fuzz sets
+/// it automatically).
 #[doc(hidden)]
 #[cfg(any(test, fuzzing))]
 pub fn parse_without_verifying_signature_for_fuzzing_only(
@@ -332,13 +332,13 @@ mod tests {
     use oc_crypto::{AeadAlg, KemAlg, SigAlg, TreeHashAlg};
     use oc_policy::{Action, Policy};
 
-    /// Байты сразу за подписью. Настоящей изменяемой области здесь нет — важно
-    /// лишь то, что `content_desc_offset` указывает именно на них.
+    /// Bytes immediately after the signature. There is no real mutable region here;
+    /// only `content_desc_offset` pointing exactly to these bytes matters.
     const TRAILER: &[u8] = b"<content-desc goes here>";
 
-    /// Метка, по которой тест находит `original_root` внутри закодированного
-    /// заголовка, чтобы испортить байт значения, а не длины: порча длины сломала
-    /// бы разбор раньше подписи и проверяла бы не то свойство.
+    /// Marker used by the test to locate `original_root` within the encoded
+    /// header and corrupt a value byte rather than a length byte: corrupting the length
+    /// would break parsing before signature verification and test the wrong property.
     const ORIGINAL_ROOT: [u8; 32] = [0x33; 32];
 
     fn signer(seed: u8) -> Ed25519Signer {
@@ -346,7 +346,7 @@ mod tests {
         Ed25519Signer::from_seed(&[seed; 32])
     }
 
-    /// Набор алгоритмов всех тестовых заголовков.
+    /// Algorithm suite for all test headers.
     fn sample_suite() -> Suite {
         Suite {
             sig: SigAlg::Ed25519,
@@ -355,12 +355,12 @@ mod tests {
         }
     }
 
-    /// Хранилище, знающее перечисленные ключи независимо от организации.
+    /// Store recognizing the listed keys regardless of organization.
     ///
-    /// Организацию намеренно игнорирует: тесты этого модуля проверяют, что
-    /// `verify_and_parse` спрашивает хранилище тем ключом, которым проверил
-    /// подпись, а привязка к организации — свойство реализации хранилища и
-    /// проверяется у неё (`cc_cli::trust`).
+    /// Deliberately ignores organization: these tests check that
+    /// `verify_and_parse` queries the store with the key it used to verify
+    /// the signature. Organization binding is a property of the store implementation,
+    /// tested there (`cc_cli::trust`).
     #[derive(Debug, Default)]
     struct PinnedKeys(Vec<[u8; 32]>);
 
@@ -370,8 +370,8 @@ mod tests {
         }
     }
 
-    /// Заголовок, заполненный целиком: разбор обязан пройти по всем ветвям, а не
-    /// по минимальному подмножеству полей.
+    /// Fully populated header: parsing must traverse every branch rather than
+    /// a minimal field subset.
     fn sample_header(author_key: [u8; 32]) -> Header {
         Header {
             container_version: CONTAINER_VERSION,
@@ -408,10 +408,10 @@ mod tests {
         }
     }
 
-    /// Сложить контейнер из готовых частей.
+    /// Assemble a container from prepared parts.
     ///
-    /// Отдельно от подписания намеренно: тесты подделки должны уметь подставить
-    /// чужую подпись, не пересобирая заголовок.
+    /// Deliberately separate from signing: forgery tests must be able to insert
+    /// someone else's signature without rebuilding the header.
     fn assemble(header_bytes: &[u8], signature: &[u8; SIGNATURE_LEN]) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&MAGIC);
@@ -422,10 +422,10 @@ mod tests {
         out
     }
 
-    /// Корректно подписанный контейнер.
+    /// A correctly signed container.
     ///
-    /// `signer` и `header.author_key` разведены намеренно: только так тест может
-    /// построить заголовок, названный ключ которого не тот, что реально подписал.
+    /// `signer` and `header.author_key` are deliberately separate: only this allows a test
+    /// to construct a header whose stated key differs from the actual signer.
     fn container(header: &Header, signer: &Ed25519Signer) -> Vec<u8> {
         let header_bytes = header.encode().unwrap();
         let transcript = header_signing_transcript(&header_bytes, &header.suite).unwrap();
@@ -433,7 +433,7 @@ mod tests {
         assemble(&header_bytes, &signature)
     }
 
-    /// Контейнер, подписанный своим же ключом: обычный честный файл.
+    /// A container signed with its own key: an ordinary honest file.
     fn self_consistent(signer: &Ed25519Signer) -> Vec<u8> {
         container(&sample_header(signer.public_key()), signer)
     }
@@ -779,23 +779,23 @@ mod tests {
         }
     }
 
-    /// Читатель принимает ровно читаемый диапазон и отвергает обоих соседей.
+    /// The reader accepts exactly the readable range and rejects both adjacent values.
     ///
-    /// Обе границы, а не одна верхняя (§2.1 п.3). Версия ниже читаемой опаснее
-    /// версии выше: она не вызывает подозрений — «это же старый файл», — хотя
-    /// означает то же самое, семантику, которой у нас нет.
+    /// Both boundaries, not just the upper one (§2.1 item 3). A version below the readable range is
+    /// more dangerous than one above: it arouses no suspicion, "it is just an old file",
+    /// although it means the same thing: semantics we do not support.
     ///
-    /// ЧЕТВЁРКА В СПИСКЕ ОТВЕРГАЕМЫХ — ЭТО ПОЛОЖИТЕЛЬНЫЙ КОНТРОЛЬ РЕШЕНИЯ Р-1, а
-    /// не ещё одно круглое число. Ноль и `MAX + 1` отвергались и до решения:
-    /// проверка на них зеленела бы и на старом рубеже. Отличает новое поведение
-    /// от старого ровно сосед снизу — версия 4, вчера читаемая, сегодня сожжённая.
-    /// Единица здесь по той же причине, но слабее: она проверяет, что нижняя
-    /// граница уехала от [`FIRST_CONTAINER_VERSION`], оставшегося записью истории.
+    /// FOUR IN THE REJECTION LIST IS A POSITIVE CONTROL FOR DECISION R-1,
+    /// not just another round number. Zero and `MAX + 1` were rejected before the decision:
+    /// testing them would also pass with the old boundary. What distinguishes the new behavior
+    /// is precisely the lower neighbor: version 4, readable yesterday and permanently retired today.
+    /// One appears for the same reason, but is weaker: it verifies that the lower
+    /// bound moved away from [`FIRST_CONTAINER_VERSION`], retained as a historical record.
     ///
-    /// Перебор диапазона (а не одной [`CONTAINER_VERSION`]) держит второе
-    /// свойство, ради которого этап существует: читатель узнаёт версию РАНЬШЕ,
-    /// чем писатель начинает её производить. Сегодня границы совпали и перебор
-    /// даёт один шаг; он снова станет содержательным в день бампа читателя.
+    /// Iterating the range, rather than only [`CONTAINER_VERSION`], maintains the second
+    /// property this stage exists for: the reader learns a version BEFORE
+    /// the writer starts producing it. Today the bounds coincide and the iteration
+    /// has one step; it becomes substantive again when the reader version is bumped.
     #[test]
     fn the_reader_accepts_all_released_versions_and_refuses_the_neighbours() {
         let signer = signer(7);
@@ -834,13 +834,13 @@ mod tests {
         }
     }
 
-    /// Отказ называет ту границу, по которой отказал.
+    /// The rejection names the boundary responsible for it.
     ///
-    /// Отдельной пробой, а не `matches!` в соседней: «отказ случился» и «отказ
-    /// объяснён верно» — разные утверждения, и первое зеленеет, когда второе
-    /// сломано. Если бы `first` продолжал нести [`FIRST_CONTAINER_VERSION`],
-    /// пользователю сообщалось бы «читаемый диапазон 1..=5» о читателе, который
-    /// единицу не принимает, — неправда с видом диагностики.
+    /// A separate probe, not a `matches!` in the neighboring one: "rejection occurred" and
+    /// "rejection was explained correctly" are different claims; the first passes when the second
+    /// is broken. If `first` still carried [`FIRST_CONTAINER_VERSION`],
+    /// users would be told "readable range 1..=5" about a reader that rejects
+    /// one: a falsehood presented as a diagnostic.
     #[test]
     fn the_refusal_names_the_readable_range_not_the_history() {
         let signer = signer(7);
@@ -860,11 +860,11 @@ mod tests {
         );
     }
 
-    /// Требование к читателю выше нашей поддержки — отказ, и отказ отдельный.
+    /// A reader requirement above our support is rejected with its own distinct error.
     ///
-    /// Отдельный вариант ошибки нужен затем, чтобы номер версии ФОРМАТА не уходил
-    /// наружу в поле, означающем версию КЛИЕНТА: это два разных пространства, и
-    /// смешать их значит сказать пользователю неправду о том, что ему делать.
+    /// A separate error variant keeps a FORMAT version number from being exposed
+    /// in a field meaning CLIENT version: these are different spaces, and
+    /// conflating them misleads the user about what to do.
     #[test]
     fn a_container_demanding_a_newer_client_is_refused_as_such() {
         let signer = signer(7);

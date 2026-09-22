@@ -1,17 +1,17 @@
-//! Транскрипт — единственный способ получить байты под подпись или MAC.
+//! Transcript: the only way to obtain bytes for a signature or MAC.
 //!
-//! Тип существует ради одного инварианта: **подписать неразделённые по домену
-//! байты невозможно**. Конструктор требует метку, а функции подписи принимают
-//! только [`Transcript`], поэтому забыть метку нельзя — код просто не
-//! скомпилируется.
+//! This type exists for one invariant: **signing bytes without domain
+//! separation is impossible**. Its constructor requires a label, and signing functions accept
+//! only [`Transcript`], so a label cannot be forgotten: the code simply will
+//! not compile.
 //!
-//! Без этого подпись автора, сделанная в одном контексте (запись отзыва, запрос
-//! активации, выдача права), становится воспроизводимой в другом, если
-//! кодировки удастся столкнуть. Ошибка тихая и обнаруживается только атакой.
+//! Otherwise, an author's signature made in one context (revocation record, activation
+//! request, permission grant) becomes replayable in another if
+//! encodings can collide. A silent error detectable only by an attack.
 
 use crate::label::Label;
 
-/// Байты, подготовленные к подписи или к MAC, с обязательной меткой домена.
+/// Bytes prepared for signing or MAC computation, with a mandatory domain label.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Transcript {
     buf: Vec<u8>,
@@ -24,14 +24,14 @@ impl core::fmt::Debug for Transcript {
 }
 
 impl Transcript {
-    /// Начать транскрипт с метки домена.
+    /// Begin a transcript with a domain label.
     ///
-    /// Метка приходит типом [`Label`], а не `&'static [u8]`, и разница здесь не
-    /// косметическая: значение `Label` невозможно сочинить — его отдают только
-    /// константы реестра [`crate::label`]. Пока принимались байты, проверки И-12
-    /// смотрели на реестр, а вызывающий был вправе передать мимо него строку,
-    /// которой в реестре нет (например расширение уже занятой метки), и ни одна
-    /// проба этого не увидела бы. Теперь это не компилируется.
+    /// The label has type [`Label`], not `&'static [u8]`, a substantive
+    /// difference: a `Label` cannot be invented; only constants in
+    /// [`crate::label`] supply it. When bytes were accepted, I-12 checks
+    /// inspected the registry while a caller could bypass it with a string
+    /// absent from the registry (for example an extension of an occupied label), invisible to
+    /// every probe. That no longer compiles.
     #[must_use]
     pub fn new(label: Label) -> Self {
         let bytes = label.as_bytes();
@@ -41,41 +41,41 @@ impl Transcript {
         Self { buf }
     }
 
-    /// Добавить один байт: идентификатор алгоритма, версию, тег.
+    /// Append one byte: algorithm identifier, version, tag.
     pub fn u8(&mut self, value: u8) -> &mut Self {
         self.buf.push(value);
         self
     }
 
-    /// Добавить `u32` в little-endian. Порядок задан спецификацией.
+    /// Append a little-endian `u32`. Order is specified by the format.
     pub fn u32le(&mut self, value: u32) -> &mut Self {
         self.buf.extend_from_slice(&value.to_le_bytes());
         self
     }
 
-    /// Добавить `u32` в big-endian: так кодируются номера чанков.
+    /// Append a big-endian `u32`, used for chunk indices.
     pub fn u32be(&mut self, value: u32) -> &mut Self {
         self.buf.extend_from_slice(&value.to_be_bytes());
         self
     }
 
-    /// Добавить `u64` в big-endian: так кодируются последовательности лизингов.
+    /// Append a big-endian `u64`, used for lease sequences.
     pub fn u64be(&mut self, value: u64) -> &mut Self {
         self.buf.extend_from_slice(&value.to_be_bytes());
         self
     }
 
-    /// Добавить данные фиксированной длины: ключ, отпечаток, идентификатор.
+    /// Append fixed-length data: key, fingerprint, identifier.
     ///
-    /// Для полей **переменной** длины используется [`Transcript::field`], иначе
-    /// две разные последовательности полей дают одни и те же байты и подпись
-    /// перестаёт однозначно определять содержание.
+    /// For **variable-length** fields use [`Transcript::field`], or
+    /// two different field sequences can produce identical bytes and the signature
+    /// ceases to identify contents unambiguously.
     pub fn fixed(&mut self, value: &[u8]) -> &mut Self {
         self.buf.extend_from_slice(value);
         self
     }
 
-    /// Добавить поле переменной длины с префиксом длины.
+    /// Append a variable-length field with a length prefix.
     pub fn field(&mut self, value: &[u8]) -> &mut Self {
         let len = u32::try_from(value.len()).unwrap_or(u32::MAX);
         self.buf.extend_from_slice(&len.to_le_bytes());
@@ -83,27 +83,27 @@ impl Transcript {
         self
     }
 
-    /// Добавить завершающий блок без префикса длины.
+    /// Append a final block without a length prefix.
     ///
-    /// Допустимо **только** когда длина уже была записана в транскрипт раньше —
-    /// как в подписи заголовка, где `u32le(HeaderLen)` предшествует самому
-    /// заголовку.
+    /// Permitted **only** when its length was already written into the transcript,
+    /// as in a header signature, where `u32le(HeaderLen)` precedes
+    /// the header itself.
     pub fn tail_after_declared_length(&mut self, value: &[u8]) -> &mut Self {
         self.buf.extend_from_slice(value);
         self
     }
 
-    /// Готовые байты.
+    /// Completed bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.buf
     }
 
-    /// Длина в байтах.
+    /// Byte length.
     pub fn len(&self) -> usize {
         self.buf.len()
     }
 
-    /// Пуст ли транскрипт. Метка всегда присутствует, поэтому всегда `false`.
+    /// Whether the transcript is empty. A label is always present, so always `false`.
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }

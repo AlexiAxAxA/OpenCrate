@@ -10,30 +10,30 @@
     clippy::arithmetic_side_effects,
     clippy::disallowed_methods
 )]
-//! Замороженные векторы заголовка: политика, `core_hash` и изменяемая область.
+//! Frozen header vectors: policy, `core_hash`, and the mutable region.
 //!
-//! Живут в `oc-format`, а не в `oc-crypto`, потому что и кодирование политики, и
-//! транскрипт хеша живут здесь. Загрузчик файла векторов повторён (двадцать строк),
-//! и это осознанно: формат файла нарочно примитивен ровно затем, чтобы его мог
-//! разобрать кто угодно, включая вторую реализацию, — значит и второй его разбор в
-//! этом репозитории не является дублированием логики.
+//! They live in `oc-format`, not `oc-crypto`, because policy encoding and the
+//! hash transcript live here. The vector file loader is repeated (twenty lines),
+//! deliberately: the file format is primitive precisely so anyone can parse it,
+//! including a second implementation. A second parser for it in this
+//! repository is therefore not duplicated logic.
 //!
-//! ## Что именно замораживается и зачем
+//! ## What is frozen and why
 //!
-//! Два вектора, и оба закрывают дыры второго раунда ревью.
+//! Two vectors, both closing gaps from the second review round.
 //!
-//! `policy_value` — **байты политики целиком**. До Р-8 байтовая раскладка вариантов
-//! `validity` и `network` (дискриминант первым байтом, поля little-endian, требование
-//! пустого остатка у бесполевых видов) и различие «поля нет» ↔ «поле есть и пусто» у
-//! `max_opens` жили ТОЛЬКО в коде, хотя §4 объявляет свои номера нормативными.
-//! Собрать те же байты по документу было невозможно.
+//! `policy_value`: **the complete policy bytes**. Before R-8 the byte layouts of
+//! `validity` and `network` variants (first-byte discriminant, little-endian fields, requirement
+//! of no trailing bytes for fieldless variants) and the distinction "field absent" ↔ "field present but empty"
+//! for `max_opens` existed ONLY in code, although §4 declares its numbers normative.
+//! Assembling the same bytes from the document was impossible.
 //!
-//! `policy_hash` — **транскрипт**. До Р-10 §4 говорил лишь «по сырым байтам», не
-//! называя ни алгоритм, ни границы. Конвенция здесь обратна `core_hash`: хешируется
-//! только ЗНАЧЕНИЕ записи, без шести байт тега и длины, — а `core_hash` вырезает
-//! записи целиком. Реализация, рассуждающая по аналогии, получила бы неверный ответ,
-//! и выглядело бы это как «слот не открывается, файл повреждён»: `policy_hash` идёт в
-//! связанные данные каждого слота.
+//! `policy_hash`: **the transcript**. Before R-10, §4 merely said "over raw bytes",
+//! specifying neither algorithm nor boundaries. The convention here is opposite to `core_hash`:
+//! only the record VALUE is hashed, without the six tag and length bytes, while `core_hash` excludes
+//! entire records. An implementation reasoning by analogy would obtain the wrong result,
+//! appearing as "the slot does not open; the file is damaged": `policy_hash` enters the
+//! associated data of every slot.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -47,11 +47,11 @@ use oc_crypto::{AeadAlg, SigAlg, TreeHashAlg};
 use oc_format::content::ContentDesc;
 use oc_policy::{Action, Binding, Network, Policy, Timestamp, Validity};
 
-/// Политика вектора. Значения произвольные, но ФИКСИРОВАННЫЕ навсегда.
+/// Vector policy. Arbitrary values, but FIXED forever.
 ///
-/// Подобрана так, чтобы задействовать все нетривиальные ветки кодирования разом:
-/// вид `validity` с двумя полями, вид `network` с двумя полями, непустой `max_opens`,
-/// привязку не по умолчанию, поднятый флаг и ровно одно разрешённое действие.
+/// Chosen to exercise every nontrivial encoding branch at once:
+/// a two-field `validity` variant, a two-field `network` variant, nonempty `max_opens`,
+/// nondefault binding, a raised flag, and exactly one allowed action.
 fn frozen_policy() -> Policy {
     Policy {
         validity: Validity::Window {
@@ -103,9 +103,9 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Заголовок вокруг замороженной политики. Нужен только затем, чтобы получить
-/// настоящий байтовый диапазон поля: `policy_hash` считается по нему, а не по
-/// повторной кодировке.
+/// Header surrounding the frozen policy. Needed solely to obtain
+/// the field's actual byte range: `policy_hash` uses that rather than
+/// re-encoding.
 fn header_with(policy: Policy) -> Header {
     Header {
         // Литералы, а не CONTAINER_VERSION / SUPPORTED_READER_VERSION, и это
@@ -180,15 +180,15 @@ fn the_policy_bytes_and_hash_match_their_frozen_vectors() {
     assert_eq!(decoded, frozen_policy(), "политика не пережила круговой прогон");
 }
 
-/// Ключ MAC изменяемой области и `file_id` вектора. Фиксированы навсегда.
+/// Mutable region MAC key and vector `file_id`. Fixed forever.
 ///
-/// Ключ подан прямо, а не выведен из CEK: K6 уже заморожен в `derivations.kat`, и
-/// повторять эту производную здесь значило бы проверять её дважды, а замораживать —
-/// раскладку самой области.
+/// The key is supplied directly, not derived from the CEK: K6 is already frozen in `derivations.kat`,
+/// and repeating that derivation here would test it twice, whereas what must be frozen
+/// is the region's own layout.
 const MAC_KEY: [u8; 32] = [0x6c; 32];
 
-/// Изменяемая область вектора. Числа согласованы между собой по §6.1:
-/// `chunk_count = max(1, ⌈total_len / chunk_size⌉)` при `chunk_size = 64 КиБ`.
+/// The vector's mutable region. Numbers are mutually consistent under §6.1:
+/// `chunk_count = max(1, ⌈total_len / chunk_size⌉)` with `chunk_size = 64 KiB`.
 fn frozen_content_desc() -> ContentDesc {
     ContentDesc {
         total_len: 5_000_000,
@@ -200,20 +200,20 @@ fn frozen_content_desc() -> ContentDesc {
     }
 }
 
-/// `core_hash` и изменяемая область целиком, вместе с её MAC.
+/// `core_hash` and the entire mutable region, including its MAC.
 ///
-/// Оба значения — долг, записанный в `tests/kat/README.md` с самого появления
-/// векторов, и оба закрываются перед заморозкой версии 1.
+/// Both values have been recorded as outstanding work in `tests/kat/README.md` since vectors
+/// first appeared, and both are completed before version 1 freezes.
 ///
-/// `header_bytes` заморожен вместе с `core_hash` намеренно. Хеш считается по
-/// **байтовому диапазону**, а не по повторной кодировке разобранной структуры
-/// (§5), поэтому вектор без самих байт проверял бы половину утверждения: вторая
-/// реализация не смогла бы понять, разошлась она в хеше или в кодировании
-/// заголовка.
+/// `header_bytes` is deliberately frozen with `core_hash`. The hash is computed over
+/// a **byte range**, not a re-encoding of a parsed structure
+/// (§5), so a vector lacking the bytes would test only half the claim: a second
+/// implementation could not tell whether it diverged in hashing or header
+/// encoding.
 ///
-/// Изменяемая область заморожена в собранном виде — `ContentDescLen(4) ‖ тело ‖
-/// MAC(32)`, — то есть ровно то, что лежит в файле. Именно про эти 32 байта MAC
-/// §1.2 предупреждает, что арифметика без них промахивается.
+/// The mutable region is frozen fully assembled: `ContentDescLen(4) ‖ body ‖
+/// MAC(32)`, exactly what is in the file. Those are the 32 MAC bytes
+/// §1.2 warns must not be omitted from arithmetic.
 #[test]
 fn the_header_core_hash_and_content_desc_match_their_frozen_vectors() {
     let v = load("header.kat");
@@ -239,7 +239,7 @@ fn the_header_core_hash_and_content_desc_match_their_frozen_vectors() {
     assert_eq!(read, encoded.len(), "область обязана кончаться ровно на MAC");
 }
 
-/// Инструмент перевыпуска. `#[ignore]`, потому что это не проверка.
+/// Reissuance tool. `#[ignore]` because this is not a check.
 #[test]
 #[ignore = "инструмент перевыпуска векторов, а не проверка"]
 fn print_policy_vectors() {

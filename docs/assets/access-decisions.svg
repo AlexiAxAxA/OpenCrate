@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="350" viewBox="0 0 1120 350" role="img" aria-labelledby="title desc">
+<title id="title">One policy, three observable outcomes</title><desc id="desc">The access-policy example allows viewing at time1100, denies printing at time1100, and denies viewing at time2000 after the lease window has ended. Inputs are synthetic.</desc>
+<rect width="1120" height="350" rx="22" fill="#f1f5fa"/>
+<g font-family="Segoe UI,Arial,sans-serif">
+<text x="42" y="47" font-size="13" letter-spacing="2.3" fill="#52718b">RUN THE ACCESS-POLICY EXAMPLE</text>
+<text x="42" y="90" font-size="29" font-weight="700" fill="#17314c">The inputs change. The decision follows.</text>
+<g fill="#fff" stroke="#d4dfeb"><rect x="42" y="125" width="326" height="161" rx="15"/><rect x="397" y="125" width="326" height="161" rx="15"/><rect x="752" y="125" width="326" height="161" rx="15"/></g>
+<g font-size="15" fill="#5c7489"><text x="64" y="156">VIEW · t=1100</text><text x="419" y="156">PRINT · t=1100</text><text x="774" y="156">VIEW · t=2000</text></g>
+<g font-size="30" font-weight="700"><text x="64" y="208" fill="#1f7667">ALLOW</text><text x="419" y="208" fill="#9c5442">DENY</text><text x="774" y="208" fill="#9c5442">DENY</text></g>
+<g font-size="15" fill="#405b72"><text x="64" y="245">Active lease; enforce obligations</text><text x="419" y="245">No print permission</text><text x="774" y="245">Lease window has ended</text></g>
+<text x="42" y="320" font-size="14" fill="#5c7489">Synthetic facts demonstrate policy evaluation. Production facts must come from verified evidence and protected state.</text>
+</g></svg>

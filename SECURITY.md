@@ -17,7 +17,7 @@ documents or user data anywhere public.
    becomes available the moment the repository is public; the maintainer enables
    it as part of the release procedure and confirms it with a test report before
    announcing the repository.
-2. **E-mail**: `security@closecrate.com`. Use it if you have no GitHub account
+2. **E-mail**: [security@closecrate.com](mailto:security@closecrate.com). Use it if you have no GitHub account
    or the form is unavailable. The same address is published in
    `https://closecrate.com/.well-known/security.txt`. If both routes fail, open
    a public issue that says only "security report, contact needed" and nothing

@@ -1,21 +1,21 @@
-//! Писатель правки: кадры, дерево, изменяемая область (`docs/format.md`,
-//! «ПРАВКА ИСПОЛНИМА», п. G).
+//! Edit writer: frames, tree, mutable region (`docs/format.md`,
+//! "EDITING IS EXECUTABLE", item G).
 //!
-//! Чистый, как весь движок: ни ввода-вывода, ни часов, ни генератора — засевы
-//! nonce приходят параметром. Подпись ставит не он: ключ правки живёт в TPM, и
-//! движку отдаётся только транскрипт на подпись и готовая подпись обратно.
+//! Pure like the entire engine: no I/O, clocks, or RNG; nonce seeds
+//! are parameters. It does not sign: the editing key resides in a TPM,
+//! and only a signing transcript and the completed return signature are exchanged with the engine.
 //!
-//! # Что писатель обязан и чего не вправе
+//! # What the writer must do and must not do
 //!
-//! * Кадр, чей открытый текст не менялся, **переносится как есть**. Повтор
-//!   тройки (nonce, шифротекст, тег) на том же индексе не повторяет nonce на
-//!   ДРУГОМ тексте — это та же запись, а не новая.
-//! * Изменившийся кадр запечатывается только `seal_chunk_hedged`: передать
-//!   nonce в него нечем, а выведенный nonce зависит от текста (И-1).
-//! * Перенесённый кадр обязан стоять на СВОЁМ индексе: AAD связывает индекс, и
-//!   кадр, переставленный на чужое место, не откроется у читателя. Писатель
-//!   индексов не сверяет — это обещание вызывающего, и нарушение его ловит
-//!   читатель, а не пропускает.
+//! * A frame whose plaintext is unchanged **is copied unchanged**. Repeating
+//!   (nonce, ciphertext, tag) at the same index does not reuse a nonce for
+//!   DIFFERENT plaintext; it is the same record, not a new one.
+//! * A changed frame is sealed only through `seal_chunk_hedged`, which accepts no
+//!   nonce, while the derived nonce depends on plaintext (I-1).
+//! * A copied frame must retain ITS OWN index: AAD binds the index, so a
+//!   frame moved elsewhere will not open for the reader. The writer
+//!   does not check indices; that is the caller's promise, with violations detected
+//!   rather than accepted by the reader.
 
 use oc_crypto::aead::{NONCE_LEN, TAG_LEN, seal_chunk_hedged};
 use oc_crypto::merkle::{Leaf, MerkleTree, leaf_of};
@@ -29,25 +29,25 @@ use oc_format::edit::{
     EditError, edition_digest, editor_transcript, next_counter, session_start, session_step, unsigned_editor,
 };
 
-/// Кусок новой редакции.
+/// A piece of the new revision.
 #[derive(Debug)]
 pub enum Piece<'a> {
-    /// Кадр старого файла с ЭТИМ ЖЕ индексом: `nonce ‖ ct ‖ tag`.
+    /// An old-file frame with THIS SAME index: `nonce ‖ ct ‖ tag`.
     Keep(&'a [u8]),
-    /// Новый открытый текст и свежий засев nonce.
+    /// New plaintext and a fresh nonce seed.
     Seal { plaintext: &'a [u8], seed: [u8; NONCE_LEN] },
 }
 
-/// Что нужно, чтобы собрать редакцию.
+/// Inputs needed to assemble a revision.
 #[derive(Debug)]
 pub struct EditPlan<'a> {
     pub file_id: [u8; 16],
     pub aead: AeadAlg,
     pub chunk_size: u32,
     pub container_version: u16,
-    /// `core_hash` заголовка (§3.2): подпись привязывается к нему.
+    /// Header `core_hash` (§3.2): the signature binds to it.
     pub core_hash: [u8; 32],
-    /// Основа правки: её счётчик и корень.
+    /// Edit base: its counter and root.
     pub base_counter: u64,
     pub base_root: [u8; 32],
     pub certified_by: Vec<u8>,
@@ -55,7 +55,7 @@ pub struct EditPlan<'a> {
     pub pieces: Vec<Piece<'a>>,
 }
 
-/// Редакция без подписи: описание, транскрипт на подпись, сумма, кадры.
+/// Unsigned revision: descriptor, signing transcript, digest, frames.
 #[derive(Debug)]
 pub struct Unsigned {
     pub desc: ContentDesc,
@@ -64,16 +64,16 @@ pub struct Unsigned {
     pub payload: Vec<u8>,
 }
 
-/// Отказ писателя правки.
+/// Edit-writer failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditWriteError {
     Format(FormatError),
     Crypto(CryptoError),
     Edit(EditError),
-    /// Перенесённый кадр короче nonce и тега.
+    /// A copied frame is shorter than nonce plus tag.
     BadFrame { index: u32 },
-    /// Куски не складываются в раскладку: не последний короче чанка, или
-    /// длиннее, или кусков нет.
+    /// Pieces do not fit the layout: a nonfinal piece shorter than a chunk,
+    /// a piece too long, or no pieces.
     BadLayout { index: u32 },
 }
 
@@ -95,10 +95,10 @@ impl From<EditError> for EditWriteError {
     }
 }
 
-/// Собрать редакцию без подписи.
+/// Assemble an unsigned revision.
 ///
 /// # Errors
-/// [`EditWriteError`] — кадр, раскладка, крипта или счётчик.
+/// [`EditWriteError`]: frame, layout, cryptography, or counter.
 pub fn prepare(key: &PayloadKey, plan: EditPlan<'_>) -> Result<Unsigned, EditWriteError> {
     let chunk = usize::try_from(plan.chunk_size).map_err(|_| FormatError::OffsetOverflow)?;
     let count = plan.pieces.len();
@@ -161,12 +161,12 @@ pub fn prepare(key: &PayloadKey, plan: EditPlan<'_>) -> Result<Unsigned, EditWri
     Ok(Unsigned { desc, transcript, digest, payload })
 }
 
-/// Вложить подпись и заверить изменяемую область.
+/// Insert the signature and authenticate the mutable region.
 ///
-/// Возвращает `(область, кадры)`: область — `ContentDescLen ‖ тело ‖ MAC`.
+/// Returns `(region, frames)`: region is `ContentDescLen ‖ body ‖ MAC`.
 ///
 /// # Errors
-/// [`EditWriteError`] — кодирование не удалось.
+/// [`EditWriteError`]: encoding failed.
 pub fn finish(
     unsigned: Unsigned,
     signature: &[u8; MODULUS_LEN],

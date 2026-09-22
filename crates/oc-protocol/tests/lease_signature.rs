@@ -1,7 +1,7 @@
-//! Подпись лизинга: круг от выдачи до проверки, и все способы её не принять.
+//! Lease signature: round trip from issuance to verification, and every way to reject it.
 //!
-//! Отдельным файлом, а не в модуле: здесь нужен настоящий подписывающий ключ, то
-//! есть `oc-crypto` целиком, а модульные тесты формата обходятся без него.
+//! A separate file rather than a module: these tests need a real signing key,
+//! meaning the complete `oc-crypto`, whereas format unit tests do without it.
 
 // Индексирование и срезы разрешены ЗДЕСЬ и только здесь: тест перебирает байты
 // заведомо известной длины и читает вектор, отсутствие ключа в котором обязано
@@ -50,7 +50,7 @@ fn server() -> oc_crypto::sign::Ed25519Signer {
     oc_crypto::sign::Ed25519Signer::from_seed(&[0x5a; 32])
 }
 
-/// Лизинг, подписанный сервером, проверяется его же ключом.
+/// A server-signed lease verifies with that server's key.
 #[test]
 fn a_lease_signed_by_the_server_verifies_with_its_key() {
     let body = lease::encode(&sample()).unwrap();
@@ -61,10 +61,10 @@ fn a_lease_signed_by_the_server_verifies_with_its_key() {
     assert_eq!(lease::decode(&body).unwrap(), sample());
 }
 
-/// Подпись ЧУЖОГО сервера не принимается.
+/// A DIFFERENT server's signature is rejected.
 ///
-/// Это и есть защита от поддельного сервера: ключ проверки лежит в заголовке под
-/// подписью автора, и подменить его нельзя, не подменив заголовок.
+/// This protects against a fake server: the verification key resides in the header under
+/// the author's signature and cannot be replaced without replacing the header.
 #[test]
 fn a_lease_signed_by_another_server_is_refused() {
     let body = lease::encode(&sample()).unwrap();
@@ -77,11 +77,11 @@ fn a_lease_signed_by_another_server_is_refused() {
     );
 }
 
-/// Правка ЛЮБОГО байта тела ломает подпись.
+/// Changing ANY body byte breaks the signature.
 ///
-/// Перебором по всем позициям, а не выборочно: подпись обязана покрывать тело
-/// целиком, и «покрывает почти всё» — это дыра ровно там, где её не проверили.
-/// Дороже всего пропустить хвост: поле часов необязательное и лежит последним.
+/// Every position is tested, not a sample: the signature must cover the entire
+/// body, and "covers almost everything" is a hole exactly where no check was made.
+/// Missing the tail is most costly: the clock field is optional and comes last.
 #[test]
 fn flipping_any_byte_of_the_body_breaks_the_signature() {
     let body = lease::encode(&sample()).unwrap();
@@ -98,11 +98,11 @@ fn flipping_any_byte_of_the_body_breaks_the_signature() {
     }
 }
 
-/// Подпись одного лизинга не переносится на другой.
+/// One lease's signature cannot be transferred to another.
 ///
-/// Самая дешёвая атака из возможных: взять своё честное разрешение и подставить
-/// в него чужой file_id или чужое устройство. Проверяются обе подмены отдельно,
-/// потому что защищает их одно и то же — но проверять надо каждую.
+/// The cheapest possible attack: take your own legitimate permission and substitute
+/// someone else's file_id or device. Both substitutions are checked separately,
+/// because the same protection applies to them, but each must be tested.
 #[test]
 fn a_signature_does_not_travel_to_another_file_or_device() {
     let signer = server();
@@ -127,13 +127,13 @@ fn a_signature_does_not_travel_to_another_file_or_device() {
     );
 }
 
-/// Собрать документ ЦЕЛИКОМ: `подпись(64) ‖ тело`.
+/// Build the COMPLETE document: `signature(64) ‖ body`.
 ///
-/// Отдельной функцией, потому что именно эту раскладку принимает комбинатор
-/// [`lease::verify_signed`], а пробы выше работают с половинками — телом и
-/// подписью по отдельности. Ровно из-за этого комбинатор не звала ни одна из
-/// них: мутация «проверка подписи в `verify_signed` снята целиком» оставалась
-/// незамеченной, хотя продукт (`cc_cli::lease`) ходит только через него.
+/// A separate function because this is precisely the layout accepted by
+/// [`lease::verify_signed`], whereas the tests above operate on halves: body and
+/// signature separately. For that very reason none of them called the combinator:
+/// the mutation "remove signature verification entirely from `verify_signed`" went
+/// undetected, although the product (`cc_cli::lease`) uses only that path.
 fn signed(lease: &Lease, signer: &oc_crypto::sign::Ed25519Signer) -> Vec<u8> {
     let body = lease::encode(lease).unwrap();
     let sig = signer.sign(&lease::signing_transcript(&body)).unwrap();
@@ -142,7 +142,7 @@ fn signed(lease: &Lease, signer: &oc_crypto::sign::Ed25519Signer) -> Vec<u8> {
     out
 }
 
-/// Честный документ проходит комбинатор и разбирается в то, что подписали.
+/// A legitimate document passes the combinator and parses into what was signed.
 #[test]
 fn the_lease_combinator_accepts_the_servers_own_document() {
     let signer = server();
@@ -154,13 +154,13 @@ fn the_lease_combinator_accepts_the_servers_own_document() {
     );
 }
 
-/// Чужой ключ, битая подпись и битое тело — отказ, и отказ ИМЕННО подписной.
+/// Wrong key, corrupt signature or corrupt body: rejected specifically as a SIGNATURE failure.
 ///
-/// Перебор по КАЖДОМУ байту подписи и КАЖДОМУ байту тела, а не по трём
-/// выбранным позициям: «покрывает почти всё» — это дыра ровно там, где не
-/// проверили. Сверяется не `is_err()`, а конкретный код: комбинатор, начавший
-/// отвечать на подделку кодом РАЗБОРА, сообщает противнику о содержимом
-/// незаверенных байтов, и именно это запрещает И-5.
+/// Every byte of the signature and EVERY byte of the body is tested, not three
+/// selected positions: "covers almost everything" is a hole exactly where no
+/// check was made. The specific error code is checked, not `is_err()`: a combinator that
+/// responds to forgery with a PARSING error reveals unauthenticated byte contents
+/// to the adversary, precisely what I-5 forbids.
 #[test]
 fn the_lease_combinator_refuses_a_foreign_key_a_broken_signature_and_a_broken_body() {
     let signer = server();
@@ -200,12 +200,12 @@ fn the_lease_combinator_refuses_a_foreign_key_a_broken_signature_and_a_broken_bo
     }
 }
 
-/// ЛЮБОЙ обрубок отвергается как несошедшаяся подпись, а не как обрезание.
+/// EVERY truncation is rejected as an invalid signature, not as truncation.
 ///
-/// Перебираются все длины от нуля до полной. Короче подписи — документа нет
-/// вовсе; длиннее подписи, но короче целого — подпись не сходится с укороченным
-/// телом. Оба случая обязаны выглядеть одинаково: различие здесь сообщало бы,
-/// докуда именно противник угадал.
+/// All lengths from zero to full are tested. Shorter than a signature means there is no
+/// document at all; longer than a signature but shorter than the whole document means the signature
+/// does not verify over the shortened body. Both must look identical: a distinction
+/// would reveal exactly how far the adversary guessed correctly.
 #[test]
 fn the_lease_combinator_refuses_every_truncation_as_a_signature_failure() {
     let signer = server();
@@ -221,18 +221,18 @@ fn the_lease_combinator_refuses_every_truncation_as_a_signature_failure() {
     }
 }
 
-/// ПОДПИСЬ ПРОВЕРЯЕТСЯ ДО РАЗБОРА ТЕЛА — сторож на порядок двух строк.
+/// THE SIGNATURE IS VERIFIED BEFORE BODY PARSING: a guard on the order of two lines.
 ///
-/// Тело здесь заведомо НЕРАЗБИРАЕМО, подпись заведомо ЧУЖАЯ. Правильный ответ
-/// ровно один — `BadHeaderSignature`; любой код разбора означает, что тело
-/// успели прочитать до проверки подлинности, то есть различимые отказы
-/// сообщаются о байтах, которых никто не подписывал (довод И-5, он же записан в
-/// докстроке `revocation::verify_signed`).
+/// The body is deliberately UNPARSEABLE and the signature deliberately WRONG. There is exactly
+/// one correct answer: `BadHeaderSignature`; any parsing error means the body
+/// was read before authentication, yielding distinguishable rejections
+/// for bytes nobody signed (the I-5 rationale, also documented in
+/// `revocation::verify_signed`).
 ///
-/// До этой пробы порядок держался на комментарии: перестановка `decode` перед
-/// `verify` не роняла ни одной проверки — пробы на коды разбора звали `decode`
-/// напрямую, а пробы на подпись подавали разбираемое тело, и случай, где
-/// встречаются оба, не проверял никто.
+/// Before this test, ordering relied on a comment: moving `decode` before
+/// `verify` broke no tests. Parsing-error tests called `decode`
+/// directly, signature tests supplied parseable bodies, and nobody tested the case
+/// combining both conditions.
 #[test]
 fn the_lease_signature_is_checked_before_the_body_is_parsed() {
     let signer = server();
@@ -266,10 +266,10 @@ fn the_lease_signature_is_checked_before_the_body_is_parsed() {
     }
 }
 
-/// Разбор произвольных байтов не паникует.
+/// Parsing arbitrary bytes does not panic.
 ///
-/// Лизинг приходит по сети, то есть от противника, и паника здесь — отказ в
-/// обслуживании ровно там, где ввод враждебен по определению.
+/// A lease arrives over the network, hence from an adversary; a panic here is denial
+/// of service exactly where input is hostile by definition.
 #[test]
 fn decoding_arbitrary_bytes_never_panics() {
     let body = lease::encode(&sample()).unwrap();
@@ -289,12 +289,12 @@ fn decoding_arbitrary_bytes_never_panics() {
     }
 }
 
-/// Лизинг сходится с замороженным вектором — тело, подпись и ключ.
+/// The lease matches the frozen vector: body, signature and key.
 ///
-/// Заморожена и подпись, а не только тело, и это существенно: тело само по себе
-/// ничего не значит, лизинг — утверждение сервера. Оставив на свободе транскрипт,
-/// мы оставили бы на свободе то, ЧТО именно подписано, а расхождение там
-/// молчаливо — подпись не сойдётся, и выглядеть будет как «сервер сломался».
+/// The signature is frozen too, not just the body, and this matters: the body by itself
+/// means nothing; a lease is a server assertion. Leaving the transcript unfrozen
+/// would leave exactly WHAT is signed unfrozen; divergence there
+/// is silent: the signature fails to verify, making it look as though "the server broke".
 #[test]
 fn the_lease_matches_its_frozen_vector() {
     let v = load_kat("lease.kat");
@@ -334,7 +334,7 @@ fn load_kat(name: &str) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
-/// Выпустить вектор лизинга. Инструмент, не проверка.
+/// Generate the lease vector. A tool, not a test.
 #[test]
 #[ignore = "инструмент перевыпуска векторов, а не проверка"]
 fn print_lease_vector() {

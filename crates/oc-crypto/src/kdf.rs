@@ -1,8 +1,8 @@
-//! Ключевая схема: производные K1…K9 из `docs/format.md`, раздел 3.5.
+//! Key schedule: derivations K1…K9 from `docs/format.md`, section 3.5.
 //!
-//! Каждая функция соответствует ровно одной строке таблицы. Ни одна метка не
-//! используется дважды, и каждая производная включает `file_id`, чтобы ключи не
-//! совпадали между файлами даже при совпадении исходных секретов.
+//! Each function corresponds to exactly one table row. No label is
+//! used twice, and each derivation includes `file_id` to prevent keys from
+//! matching across files even when the initial secrets match.
 
 use crate::secret::{
     Cek, ClaimSecret, Kek, MacKey, MetaKey, PayloadKey, SecretA, SecretB, SessionMacKey, SECRET_LEN,
@@ -15,27 +15,27 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
-/// Длина ikm для K1: ровно две доли по 32 байта.
+/// K1 ikm length: exactly two 32-byte shares.
 ///
-/// Число зашито константой, а не выведено из длины аргументов, потому что
-/// фиксированность длины — условие корректности комбинатора, а не деталь
-/// реализации.
+/// Hardcoded as a constant rather than derived from argument lengths because
+/// fixed length is a condition of the combiner's correctness, not an
+/// implementation detail.
 const KEK_IKM_LEN: usize = 64;
 
-/// Развернуть HKDF-SHA256 в буфер длины, заданной типом.
+/// Expand HKDF-SHA256 into a buffer whose length is specified by its type.
 ///
-/// `expand` отказывает единственным образом — когда запрошено больше 255×32
-/// байт; здесь длина выхода задана типом массива и не превышает 32 байт, так
-/// что ветка ошибки недостижима. Поэтому K1…K8 возвращают ключ, а не `Result`:
-/// протаскивать невозможный вариант через каждый вызов ключевой схемы значило
-/// бы приучить вызывающего к `?` там, где отказывать не на чем.
-/// Возвращается затирающая обёртка, а не голый массив.
+/// `expand` fails in only one case: requesting more than 255×32
+/// bytes; here the array type specifies output length, at most 32 bytes,
+/// so the error branch is unreachable. K1…K8 therefore return a key rather than `Result`:
+/// threading an impossible variant through every key-schedule call would
+/// train callers to use `?` where nothing can fail.
+/// Returns a wiping wrapper rather than a bare array.
 ///
-/// Выход этой функции — ключевой материал. Голый `[u8; N]` живёт на стеке до
-/// конца вызывающей функции и попадает в файл подкачки вместе с ним, а владельца,
-/// который затрёт его при уничтожении, у него нет. Обёртка делает затирание
-/// свойством типа: раньше каждый вызывающий обязан был помнить о нём сам, и
-/// помнил не всякий.
+/// This function outputs key material. A bare `[u8; N]` remains on the stack until
+/// the calling function ends and can enter the pagefile with it, without an owner
+/// to wipe it on destruction. The wrapper makes wiping
+/// a property of the type: previously every caller had to remember it individually,
+/// and not all did.
 fn hkdf_sha256<const N: usize>(salt: &[u8], ikm: &[u8], info: &[&[u8]]) -> Zeroizing<[u8; N]> {
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
     let mut okm = Zeroizing::new([0u8; N]);
@@ -47,39 +47,39 @@ fn hkdf_sha256<const N: usize>(salt: &[u8], ikm: &[u8], info: &[&[u8]]) -> Zeroi
     okm
 }
 
-/// Nonce, не зависящий целиком от состояния генератора (hedged nonce).
+/// A nonce not wholly dependent on RNG state (hedged nonce).
 ///
-/// **Зачем.** Случайный nonce безопасен ровно настолько, насколько генератор не
-/// повторяется, а это условие ничем не подкреплено: откат снапшота виртуальной
-/// машины, клон образа диска, восстановление из резервной копии возвращают
-/// генератор в прежнее состояние. Отдельная случайная величина от этого не
-/// спасает — она берётся из того же генератора и повторяется вместе с ним, а
-/// вместе с ней повторяется весь поток ключей. Для запечатывания слота цена
-/// максимальная: открытые тексты там — доли секрета схемы 2-из-2, и повтор даёт
-/// `ct₁ ⊕ ct₂ = pt₁ ⊕ pt₂`, то есть обе доли, KEK и ключ содержимого без единого
-/// приватного ключа.
+/// **Why.** A random nonce is safe only while the RNG does not
+/// repeat, and nothing guarantees that: virtual-machine snapshot rollback,
+/// disk-image cloning, and backup restoration return
+/// the RNG to a previous state. A separate random value does not
+/// help: it comes from the same RNG and repeats with it,
+/// repeating the entire keystream. For slot sealing the cost is
+/// maximal: plaintexts are shares of a 2-of-2 secret-sharing scheme, and repetition gives
+/// `ct₁ ⊕ ct₂ = pt₁ ⊕ pt₂`, hence both shares, the KEK, and the content key without a single
+/// private key.
 ///
-/// **Как.** С версии 3 `HKDF-Extract(salt = засев из генератора,
-/// ikm = u32be(len(pt)) ‖ pt ‖ u32be(len(aad)) ‖ aad)`, затем `Expand(info = метка)`.
-/// AAD ровно тот, что передаётся AEAD: при повторе генератора одинаковый текст
-/// в другом контексте получает другой nonce. Это хеджирование, а не SIV:
-/// ключ в засев не входит; полный повтор входов по-прежнему повторяет nonce.
-/// Две длины обязательны, поскольку части переменной ширины (довод K1).
-/// Непредставимая как u32 длина и слишком длинный выход дают BadLength.
+/// **How.** Since version 3, `HKDF-Extract(salt = RNG seed,
+/// ikm = u32be(len(pt)) ‖ pt ‖ u32be(len(aad)) ‖ aad)`, then `Expand(info = label)`.
+/// AAD is exactly what AEAD receives: with a repeated RNG, identical plaintext
+/// in a different context gets a different nonce. This is hedging, not SIV:
+/// the key is not part of the seed; fully repeated inputs still repeat the nonce.
+/// Both lengths are mandatory because the parts have variable widths (the K1 argument).
+/// Lengths unrepresentable as u32 and excessive output lengths return BadLength.
 ///
-/// **Правилу «nonce хранятся, а не выводятся» это не противоречит.** Правило
-/// существует затем, чтобы nonce не был функцией величин, доступных читателю:
-/// выведенный из общего секрета, он совпадал бы всегда, когда совпал секрет.
-/// Здесь наоборот — nonce выводится из того, чего у читателя нет (засев,
-/// открытый текст), и **кладётся в файл**; читатель по-прежнему берёт его
-/// готовым и никогда не вычисляет.
+/// **This does not contradict "nonces are stored, not derived".** The rule
+/// exists to prevent a nonce being a function of values available to the reader:
+/// derived from the shared secret, it would match whenever that secret matched.
+/// Here, conversely, the nonce derives from what the reader lacks (seed,
+/// plaintext) and **is stored in the file**; the reader still takes it
+/// ready-made and never computes it.
 ///
-/// Засев не сохраняется нигде: он нужен только на время вычисления.
+/// The seed is never stored anywhere: it is needed only during computation.
 ///
-/// Метка приходит типом [`label::Label`] — засев nonce это тоже домен, и
-/// четыре его метки (K17–K20) стоят в реестре наравне с прочими. Передать сюда
-/// пятую, сочинённую на месте, значило бы вывести nonce в домене, которого
-/// §3.6 не знает.
+/// The label has type [`label::Label`]: nonce hedging is also a domain, and
+/// its four labels (K17–K20) are registered alongside the others. Passing a
+/// fifth label invented on the spot would derive a nonce in a domain
+/// unknown to §3.6.
 pub fn hedged_nonce<const N: usize>(
     label: label::Label,
     seed: &[u8],
@@ -99,10 +99,10 @@ pub fn hedged_nonce<const N: usize>(
     hk.expand(label.as_bytes(), &mut out).map_err(|_| CryptoError::BadLength)?;
     Ok(out)
 }
-/// `HMAC-SHA256` над последовательностью кусков сообщения.
+/// `HMAC-SHA256` over a sequence of message pieces.
 ///
-/// Куски скармливаются по очереди, а не склеиваются в буфер: склейка потребовала
-/// бы выделения памяти под сообщение, которое нигде больше не нужно.
+/// Pieces are fed sequentially rather than concatenated into a buffer: concatenation would
+/// allocate memory for a message needed nowhere else.
 fn hmac_sha256(key: &[u8], message: &[&[u8]]) -> [u8; 32] {
     let mut tag = [0u8; 32];
     // `new_from_slice` у HMAC принимает ключ любой длины (длинный хешируется,
@@ -117,53 +117,53 @@ fn hmac_sha256(key: &[u8], message: &[&[u8]]) -> [u8; 32] {
     tag
 }
 
-/// K23 — доказательство открытия вызова без раскрытия самого секрета.
-/// Вызов остаётся секретом двух сторон: по открытому эхо нельзя вывести K24.
-/// Все 64 байта аппаратного вызова входят в ключ HMAC, выход всегда 32 байта.
+/// K23: proof of opening the challenge without revealing the secret itself.
+/// The challenge remains secret between two parties: the public echo cannot derive K24.
+/// All 64 bytes of the hardware challenge enter the HMAC key; output is always 32 bytes.
 ///
-/// **Протоколом НЕ ИСПОЛЬЗУЕТСЯ с 2026-09-21.** Эхо считает [`echo_transcript`]
-/// (K31): прежняя форма не была привязана к разговору ничем, кроме самого
-/// секрета, и записанное эхо годилось в любом разговоре, где секрет повторился.
-/// Решение и его границы — `docs/format.md`, раздел «ЭХО ПРИВЯЗАНО К РАЗГОВОРУ
-/// 2026-09-21».
+/// **NOT USED by the protocol since 2026-09-21.** [`echo_transcript`] computes the echo
+/// (K31): the old form bound nothing but the
+/// secret to the conversation, so a recorded echo worked in any conversation repeating that secret.
+/// For the decision and its limits, see `docs/format.md`, section "ECHO BOUND TO THE CONVERSATION
+/// 2026-09-21".
 ///
-/// Функция оставлена ради замороженного вектора `k23_prove_echo`
-/// (`tests/kat/derivations_wire.kat`): И-14 запрещает менять замороженное, а
-/// удалить производную значило бы оставить вектор без того, что он проверяет.
-/// Новых вызывающих у неё быть не должно — сторож
-/// `the_old_unbound_echo_has_no_callers_outside_its_vector` следит за этим.
+/// Retained for the frozen `k23_prove_echo` vector
+/// (`tests/kat/derivations_wire.kat`): I-14 forbids changing frozen artifacts, and
+/// removing the derivation would leave the vector without the operation it checks.
+/// It must acquire no new callers; the guard
+/// `the_old_unbound_echo_has_no_callers_outside_its_vector` enforces that.
 pub fn prove_echo(challenge: &[u8], device_fpr: &[u8; 32]) -> [u8; 32] {
     hmac_sha256(challenge, &[label::PROVE_ECHO.as_bytes(), device_fpr])
 }
 
-/// K31, ступень 1 — хеш транскрипта рукопожатия (`docs/protocol.md` §9.4).
+/// K31, step 1: handshake transcript hash (`docs/protocol.md` §9.4).
 ///
 /// `SHA-256("CC/v1/echo-transcript" ‖ 0x00 ‖ u32le(len(hello)) ‖ hello ‖
 /// u32le(len(challenge)) ‖ challenge)`.
 ///
-/// # Что сюда входит и почему именно это
+/// # What is included and why
 ///
-/// Ровно два кадра, и оба к моменту эха есть у ОБЕИХ сторон целиком:
-/// приветствие устройства (`вид ‖ TLV`: предъявленные ключи, `device_fpr`,
-/// номер механизма) и вызов сервера (`вид ‖ TLV`: запечатанные половины со
-/// своими `enc`, nonce и шифротекстами). Ни номера соединения, ни показаний
-/// часов здесь нет намеренно: номер знает только сервер, часы у сторон разные,
-/// и величина, известная одному, транскриптом быть не может.
+/// Exactly two frames, both available in full to BOTH parties by echo time:
+/// the device hello (`kind ‖ TLV`: presented keys, `device_fpr`,
+/// mechanism number) and server challenge (`kind ‖ TLV`: sealed halves with
+/// their `enc`, nonces, and ciphertexts). Neither connection numbers nor clock
+/// readings are included deliberately: only the server knows the number, the parties have different clocks,
+/// and a value known to only one party cannot be a transcript.
 ///
-/// # Почему СЫРЫЕ байты, а не пересобранные значения
+/// # Why RAW bytes rather than reconstructed values
 ///
-/// Тот же довод, что у И-5: пересборка из разобранного дала бы одни байты у
-/// канонического документа и другие у того, чья каноничность не проверена
-/// ничем, кроме нашего же кодировщика. Посредник, правящий кадр по дороге,
-/// обязан разойтись с честной стороной — а он разойдётся только если под хеш
-/// идёт то, что реально проехало по проводу.
+/// The same argument as I-5: reconstructing parsed data would yield one byte sequence for
+/// a canonical document and another for one whose canonicality is checked
+/// by nothing except our own encoder. An intermediary modifying a frame in transit
+/// must diverge from the honest party, which happens only when the hash
+/// covers what actually traveled over the wire.
 ///
-/// # Почему с длинами
+/// # Why lengths are included
 ///
-/// [`Transcript::field`](crate::transcript::Transcript::field) ставит перед
-/// каждым куском его длину: без неё пара («ab», «c») и пара («a», «bc») дали бы
-/// один хеш, то есть противник переносил бы байты из приветствия в вызов и
-/// обратно, не меняя эха.
+/// [`Transcript::field`](crate::transcript::Transcript::field) prefixes
+/// each piece with its length: otherwise ("ab", "c") and ("a", "bc") would give
+/// one hash, allowing an attacker to move bytes between hello and challenge
+/// without changing the echo.
 #[must_use]
 pub fn handshake_transcript(hello_framed: &[u8], challenge_framed: &[u8]) -> [u8; 32] {
     use sha2::Digest as _;
@@ -172,27 +172,27 @@ pub fn handshake_transcript(hello_framed: &[u8], challenge_framed: &[u8]) -> [u8
     Sha256::digest(t.as_bytes()).into()
 }
 
-/// K31, ступень 2 — эхо доказательства владения, привязанное к разговору.
+/// K31, step 2: proof-of-possession echo bound to the conversation.
 ///
-/// `HMAC-SHA256(ключ = секрет вызова, "CC/v1/echo-transcript" ‖ device_fpr ‖
-/// handshake)`, где `handshake` — выход [`handshake_transcript`].
+/// `HMAC-SHA256(key = challenge secret, "CC/v1/echo-transcript" ‖ device_fpr ‖
+/// handshake)`, where `handshake` is the output of [`handshake_transcript`].
 ///
-/// # Что это чинит
+/// # What this fixes
 ///
-/// K23 брал в сообщение только отпечаток. Эхо, записанное с провода, годилось в
-/// ЛЮБОМ разговоре того же устройства, стоило секрету повториться, — а секрет
-/// сервера повторяется при откате снапшота (И-1, довод С-13; K30 снял повтор,
-/// но не саму конструкцию). Запас держался на том, что по `Proven` без MAC
-/// сессии сервер сегодня ничего не выдаёт, то есть был толщиной в одну правку.
-/// Теперь эхо есть функция разговора: сервер в каждом разговоре запечатывает
-/// заново, эфемерная пара `Seal` своя, и вызов разойдётся байтами.
+/// K23 included only the fingerprint in the message. An echo recorded from the wire worked in
+/// ANY conversation with the same device whenever the secret repeated, and the server
+/// secret repeats after snapshot rollback (I-1, argument C-13; K30 addressed repetition,
+/// but not the construction itself). The safety margin depended on the server currently issuing
+/// nothing on `Proven` without a session MAC, making it just one edit thick.
+/// The echo is now a function of the conversation: the server seals anew
+/// in each conversation, with its own ephemeral `Seal` pair, so challenge bytes differ.
 ///
-/// # Чего это НЕ даёт
+/// # What this does NOT provide
 ///
-/// Полного отката снапшота ВМЕСТЕ с часами оно не лечит: тогда повторяется и
-/// секрет (часы входят в прообраз K30), и эфемерная пара запечатывания, то есть
-/// повторяется весь транскрипт. Противника, владеющего приватным ключом
-/// устройства, оно не касается вовсе — тот доказывает владение законно.
+/// It does not fix full snapshot rollback TOGETHER with the clock: then both
+/// the secret (time is in K30's preimage) and the ephemeral sealing pair repeat,
+/// repeating the entire transcript. It does not address an attacker possessing
+/// the device private key: that attacker legitimately proves possession.
 #[must_use]
 pub fn echo_transcript(
     challenge: &[u8],
@@ -202,44 +202,44 @@ pub fn echo_transcript(
     hmac_sha256(challenge, &[label::ECHO_TRANSCRIPT.as_bytes(), device_fpr, handshake])
 }
 
-/// K24 — отдельный ключ для заверения запросов данного разговора.
+/// K24: a separate key authenticating requests in this conversation.
 pub fn derive_session_mac_key(challenge: &[u8], device_fpr: &[u8; 32]) -> SessionMacKey {
     SessionMacKey::from_bytes(*hkdf_sha256::<SECRET_LEN>(
         &[], challenge, &[label::SESSION_MAC.as_bytes(), device_fpr],
     ))
 }
 
-/// K27 — отпечаток устройства для ЛЮБОГО механизма согласования.
+/// K27: device fingerprint for ANY agreement mechanism.
 ///
-/// Отпечаток — та единственная 32-байтовая величина, которую человек сверяет
-/// вторым каналом и на которую автор потом запечатывает долю. У X25519 эти две
-/// роли совпадают в самом ключе: он и есть 32 байта, и отпечаток равен ключу.
-/// Ровно на этом держались двери завещания, кворума и одобрения — и ровно
-/// поэтому они были закрыты для всего, что длиннее: у P-256 (65 байт) и
-/// гибридов (1216, 1249) отпечаток был НЕ ОПРЕДЕЛЁН, и посредник, приславший
-/// чужой отпечаток со своим ключом, получал бы долю на свой ключ под чужим
-/// именем (ревью 2026-09-06, Н-1 и Н-4).
+/// The fingerprint is the single 32-byte value a person checks
+/// through a second channel and to which the author later seals a share. For X25519 these two
+/// roles coincide in the key itself: it is 32 bytes, and its fingerprint equals the key.
+/// This is exactly what the bequest, quorum, and approval doors relied on, and precisely
+/// why they were closed to anything longer: for P-256 (65 bytes) and
+/// hybrids (1216, 1249), the fingerprint was UNDEFINED, and an intermediary presenting
+/// someone else's fingerprint with its own key could receive the share under its key
+/// in someone else's name (review 2026-09-06, N-1 and N-4).
 ///
-/// Определение закрывает эту дыру для всех механизмов разом: отпечаток стал
-/// ОБЯЗАТЕЛЬСТВОМ на ключ. Кто получил тройку `(fpr, kem, public)`, обязан
-/// проверить `fpr == device_fpr(kem, public)` ДО того, как использовать любую из
-/// трёх; для X25519 это та же сверка, что стояла и раньше.
+/// This definition closes the gap for every mechanism at once: the fingerprint becomes
+/// a COMMITMENT to the key. Whoever receives `(fpr, kem, public)` must
+/// check `fpr == device_fpr(kem, public)` BEFORE using any of
+/// the three; for X25519 this is the same comparison as before.
 ///
-/// **Форма намеренно несимметрична.** Для `kem_id = 1` возвращается сам ключ, а
-/// не его хеш: так заморожено векторами K11, K21, K23, K24 и раскладкой `Hello`,
-/// и сделать отпечаток единообразным значило бы перевыпустить их без единого
-/// нового факта о безопасности. Для остальных механизмов —
-/// `SHA-256("CC/v1/device-fpr" ‖ 0x00 ‖ u8(kem_id) ‖ public)`. Номер механизма
-/// входит в прообраз: один и тот же байтовый ключ под двумя номерами — разные
-/// отпечатки, и переразметка механизма меняет имя устройства.
+/// **The form is deliberately asymmetric.** For `kem_id = 1`, it returns the key itself,
+/// not its hash: K11, K21, K23, K24 vectors and the `Hello` layout freeze that behavior,
+/// and unifying the fingerprints would require reissuing them without a single
+/// new security fact. For the other mechanisms:
+/// `SHA-256("CC/v1/device-fpr" ‖ 0x00 ‖ u8(kem_id) ‖ public)`. The mechanism number
+/// is in the preimage: the same key bytes under two numbers produce different
+/// fingerprints, so relabeling a mechanism changes the device name.
 ///
-/// Длина ключа проверяется по механизму, а не «как пришло» (И-8): отпечаток
-/// ключа неверной длины ничему не навредил бы, но правило одно на всех, и
-/// исключение из него здесь стоило бы дороже проверки.
+/// Key length is checked against the mechanism, not taken "as received" (I-8): a fingerprint
+/// of an incorrectly sized key would do no harm, but one rule applies everywhere,
+/// and making an exception here would cost more than the check.
 ///
 /// # Errors
-/// Длина `public` не соответствует механизму, либо механизм не задаёт длину
-/// (RSA-OAEP: ключ переменной длины, отпечаток для него не определён).
+/// `public` length does not match the mechanism, or the mechanism defines no length
+/// (RSA-OAEP: variable-length keys, with no defined fingerprint).
 pub fn device_fpr(kem: crate::KemAlg, public: &[u8]) -> Result<[u8; 32], CryptoError> {
     use crate::KemAlg;
     // Исполнимость спрашивается ОДНИМ именем, а не вторым `match` рядом с
@@ -270,16 +270,16 @@ pub fn device_fpr(kem: crate::KemAlg, public: &[u8]) -> Result<[u8; 32], CryptoE
     Ok(h.finalize().into())
 }
 
-/// Длина публичного ключа механизма — ДРУГОЙ вопрос, чем исполнимость.
+/// A mechanism's public-key length is a DIFFERENT question from executability.
 ///
-/// `None` означает «формы ключа этот механизм не задаёт», и сегодня это ровно
-/// неисполнимый RSA-OAEP: ключ у него переменной длины, и отпечаток по нему не
-/// определён. Совпадение двух таблиц — пробела здесь и `false` у
-/// [`crate::seal::supports_kem`] — проверяется пробой, а не подразумевается:
-/// длина есть свойство формы, исполнимость — свойство сборки, и завтра может
-/// появиться механизм с известной формой, которого сборка ещё не умеет.
+/// `None` means "this mechanism defines no key shape", currently exactly
+/// unimplemented RSA-OAEP: its keys have variable length and no defined
+/// fingerprint. Agreement between the two tables, a gap here and `false` in
+/// [`crate::seal::supports_kem`], is tested rather than assumed:
+/// length is a property of shape, executability of a build; tomorrow a
+/// mechanism may have a known shape that the build cannot yet execute.
 ///
-/// `match` без `_`: новый член [`crate::KemAlg`] обязан ломать сборку здесь.
+/// `match` without `_`: a new [`crate::KemAlg`] member must break the build here.
 fn public_key_len(kem: crate::KemAlg) -> Option<usize> {
     use crate::KemAlg;
     match kem {
@@ -291,34 +291,34 @@ fn public_key_len(kem: crate::KemAlg) -> Option<usize> {
     }
 }
 
-/// K25 — MAC сырых байтов кадра, включая вид, но без хвостового MAC.
-/// Метки нет: K24 выделен только под K25, а вид внутри сообщения разводит запросы.
+/// K25: MAC of raw frame bytes including kind, but excluding the trailing MAC.
+/// No label: K24 is dedicated to K25, and the kind inside the message separates requests.
 pub fn request_mac(key: &SessionMacKey, framed: &[u8]) -> [u8; 32] {
     hmac_sha256(key.expose(), &[framed])
 }
 
-/// K28 — тождество операции на проводе (`docs/protocol.md` §9.10).
+/// K28: wire operation identity (`docs/protocol.md` §9.10).
 ///
-/// `SHA-256("CC/v1/operation-id" ‖ 0x00 ‖ seed(32) ‖ u8(kind) ‖ тело)`, где тело —
-/// закодированный запрос БЕЗ самого поля тождества (у запроса активации — без
-/// тега 9: значение не может входить в себя).
+/// `SHA-256("CC/v1/operation-id" ‖ 0x00 ‖ seed(32) ‖ u8(kind) ‖ body)`, where body is
+/// the encoded request WITHOUT the identity field itself (for an activation request, without
+/// tag 9: a value cannot include itself).
 ///
-/// # Почему не голые случайные байты
+/// # Why not bare random bytes
 ///
-/// По доводу С-13 (И-1): генератор повторяется при откате снапшота ВМ, клоне
-/// образа, восстановлении из копии. Голый случайный идентификатор совпал бы у
-/// двух РАЗНЫХ запросов, и второй получил бы сохранённый исход первого —
-/// «выдано» за чужой запрос или отказ «уже использован» за свой. Тело в засеве
-/// разводит разные запросы и при повторившемся генераторе; одинаковыми остаются
-/// только одинаковые запросы, и для них общий исход — правда.
+/// By the C-13 argument (I-1): RNGs repeat after VM snapshot rollback, image
+/// cloning, and backup restoration. A bare random identifier could match for
+/// two DIFFERENT requests, giving the second request the stored outcome of the first:
+/// "issued" for someone else's request or "already used" rejection for its own. Including the body in the seed
+/// separates different requests even when the RNG repeats; only identical
+/// requests remain identical, and sharing an outcome is correct for them.
 ///
-/// Секрета здесь нет и не нужно: идентификатор идёт по проводу открыто, и
-/// требуется от него единственность, а не непредсказуемость. Посредник, видящий
-/// провод, узнаёт его и так; подделать ему нечего — повтор с чужим телом
-/// отвергается сервером по хешу тела, а тело активации заверено MAC сессии.
+/// No secret is present or needed: the identifier travels openly on the wire,
+/// and requires uniqueness rather than unpredictability. An intermediary observing
+/// the wire already learns it; there is nothing to forge: replay with a different body
+/// is rejected by the server's body hash, and activation bodies carry a session MAC.
 ///
-/// Вид входит в засев потому, что тело у активации и продления одно: без него
-/// один засев давал бы одно тождество двум разным операциям.
+/// The kind enters the seed because activation and renewal have the same body:
+/// without it, one seed would give two different operations one identity.
 #[must_use]
 pub fn operation_id(seed: &[u8; 32], kind: u8, body: &[u8]) -> [u8; 32] {
     use sha2::Digest as _;
@@ -331,70 +331,70 @@ pub fn operation_id(seed: &[u8; 32], kind: u8, body: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Назначение свежего значения сервера: вызов аттестации (`docs/protocol.md`
-/// §9.11.1, шаг 1).
+/// Purpose of a fresh server value: attestation challenge (`docs/protocol.md`
+/// §9.11.1, step 1).
 pub const FRESH_ATTEST_NONCE: u8 = 1;
 
-/// Назначение свежего значения сервера: секрет доказательства владения
+/// Purpose of a fresh server value: proof-of-possession secret
 /// (`docs/protocol.md` §9.4).
 pub const FRESH_PROOF_SECRET: u8 = 2;
 
-/// Назначение свежего значения сервера: секрет учётных данных TPM
-/// (`TPM2_MakeCredential`, `docs/protocol.md` §9.11.1, шаг 2).
+/// Purpose of a fresh server value: TPM credential secret
+/// (`TPM2_MakeCredential`, `docs/protocol.md` §9.11.1, step 2).
 pub const FRESH_CREDENTIAL_SECRET: u8 = 3;
 
-/// Назначение свежего значения сервера: засев защиты учётных данных TPM.
+/// Purpose of a fresh server value: TPM credential protection seed.
 pub const FRESH_CREDENTIAL_SEED: u8 = 4;
 
-/// Назначение свежего значения сервера: засев OAEP при защите учётных данных
-/// на EK типа RSA.
+/// Purpose of a fresh server value: OAEP seed for credential protection
+/// with an RSA EK.
 pub const FRESH_CREDENTIAL_OAEP: u8 = 5;
 
-/// K30 — свежее значение, порождаемое СЕРВЕРОМ (`docs/format.md`, раздел
-/// «СВЕЖЕСТЬ СЕРВЕРА ВЫВОДИТСЯ 2026-09-20»).
+/// K30: a fresh value generated by the SERVER (`docs/format.md`, section
+/// "SERVER FRESHNESS IS DERIVED 2026-09-20").
 ///
 /// `prk = SHA-256("CC/v1/server-fresh" ‖ 0x00 ‖ seed(32) ‖ u8(kind) ‖
-/// i64be(now) ‖ device_fpr(32))`, затем `HKDF-Expand(prk, info = метка)` в буфер
-/// нужной длины.
+/// i64be(now) ‖ device_fpr(32))`, then `HKDF-Expand(prk, info = label)` into a buffer
+/// of the required length.
 ///
-/// # Почему не голые случайные байты
+/// # Why not bare random bytes
 ///
-/// По доводу С-13 (И-1): генератор повторяется при откате снапшота ВМ, клоне
-/// образа, восстановлении из копии. У сервера это больнее, чем у клиента: вместе
-/// с генератором откатывается и его состояние, поэтому «уже выданное» значение
-/// снова становится невыданным, и повтор никем не замечается.
+/// By the C-13 argument (I-1): RNGs repeat after VM snapshot rollback, image
+/// cloning, and backup restoration. This is worse on the server than on the client: its state
+/// rolls back together with the RNG, so an "already issued" value
+/// becomes unissued again, and nobody notices the repetition.
 ///
-/// # Почему разводит ВРЕМЯ, а не данные запроса
+/// # Why TIME separates values rather than request data
 ///
-/// Ни у одного потребителя открытого текста, который развёл бы повторы, НЕТ:
-/// вызов аттестации — чистая свежесть, секрет доказательства — тоже, и три
-/// значения учётных данных TPM (`kind` 3–5, добавлены 2026-09-21) — тоже.
-/// Засев из одних
-/// данных запроса (отпечатка устройства) развёл бы РАЗНЫЕ устройства и оставил
-/// бы повтор для одного и того же — а именно он и опасен: два разговора одного
-/// устройства получили бы один секрет, то есть одно эхо и один ключ MAC сессии.
-/// Часы у сервера есть, и `now` уже приходит параметром в обработчик.
+/// NONE of the consumers has plaintext capable of distinguishing repeats:
+/// an attestation challenge is pure freshness, as is a proof secret, and so are the three
+/// TPM credential values (`kind` 3–5, added 2026-09-21).
+/// A seed based only on
+/// request data (the device fingerprint) would separate DIFFERENT devices but still
+/// repeat for the same device, which is precisely the danger: two conversations with one
+/// device would receive one secret, hence one echo and one session MAC key.
+/// The server has a clock, and `now` already enters the handler as a parameter.
 ///
-/// Отпечаток входит вторым разделителем, а не вместо времени: внутри одной
-/// секунды два устройства обязаны получить разные значения.
+/// The fingerprint is a second separator rather than a replacement for time: within one
+/// second, two devices must receive different values.
 ///
-/// # Чего это НЕ даёт
+/// # What this does NOT provide
 ///
-/// Откат снапшота ВМЕСТЕ с часами не разводится ничем: `now` вернётся прежним,
-/// и значение повторится. Это защита от повтора генератора, а не от противника,
-/// который управляет часами сервера.
+/// Snapshot rollback TOGETHER with the clock cannot be distinguished: `now` returns to its old value,
+/// and the value repeats. This protects against RNG repetition, not an adversary
+/// controlling the server clock.
 ///
-/// # Почему Expand, а не второй хеш со счётчиком
+/// # Why Expand rather than a second hash with a counter
 ///
-/// Секрет доказательства владения — несколько 32-байтовых половин, по одной на
-/// предъявленный ключ, и длина его известна только во время работы. Дописывать
-/// хеши со счётчиком значило бы завести самодельный KDF рядом с готовым:
-/// счётчик `HKDF-Expand` — тот же счётчик, только стандартный и уже проверенный.
-/// Поэтому `N = 32` не исключение: и вызов аттестации получает свои 32 байта
-/// через Expand, чтобы одна форма описывала оба применения.
+/// The proof-of-possession secret consists of several 32-byte halves, one per
+/// presented key, and its length is known only at runtime. Appending
+/// counter-based hashes would introduce a homemade KDF beside an existing one:
+/// `HKDF-Expand` uses the same counter, but standardized and already verified.
+/// Thus `N = 32` is no exception: even the attestation challenge gets its 32 bytes
+/// through Expand, giving one form for both applications.
 ///
 /// # Errors
-/// [`CryptoError::BadLength`] — запрошено больше 255×32 байт.
+/// [`CryptoError::BadLength`]: more than 255×32 bytes requested.
 pub fn server_fresh(
     seed: &[u8; 32],
     kind: u8,
@@ -418,12 +418,12 @@ pub fn server_fresh(
     hk.expand(label::SERVER_FRESH.as_bytes(), out).map_err(|_| CryptoError::BadLength)
 }
 
-/// K29 — данные квалификации утверждения TPM о ключе устройства
-/// (`docs/protocol.md` §9.11, звено 4): `extraData` в `TPMS_ATTEST`.
+/// K29: qualifying data for the TPM statement about a device key
+/// (`docs/protocol.md` §9.11, link 4): `extraData` in `TPMS_ATTEST`.
 ///
-/// Вызов привязывает утверждение к разговору, отпечаток — к устройству:
-/// утверждение, снятое для другого вызова или о другом ключе, не совпадёт.
-/// Секрета нет — вызов идёт по проводу открыто; нужна единственность.
+/// The challenge binds the statement to the conversation and the fingerprint to the device:
+/// a statement taken for another challenge or about another key will not match.
+/// No secret: the challenge travels openly on the wire; uniqueness is required.
 #[must_use]
 pub fn attest_qualify(challenge: &[u8; 32], device_fpr: &[u8; 32]) -> [u8; 32] {
     use sha2::Digest as _;
@@ -435,12 +435,12 @@ pub fn attest_qualify(challenge: &[u8; 32], device_fpr: &[u8; 32]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// K1 — ключ заворачивания файла.
+/// K1: file wrapping key.
 ///
 /// `HKDF-SHA256(salt=file_id, ikm=secret_A‖secret_B, info="CC/v1/kek"‖org_id‖file_id)`.
 ///
-/// `HKDF-Extract` над конкатенацией корректен как комбинатор **только** при
-/// фиксированных длинах обеих долей; здесь это гарантировано типами.
+/// `HKDF-Extract` over concatenation is a valid combiner **only** when
+/// both shares have fixed lengths; types guarantee that here.
 pub fn derive_kek(file_id: &[u8; 16], org_id: &[u8], a: &SecretA, b: &SecretB) -> Kek {
     // Ровно 64 байта, по 32 на долю. При переменной длине пара (A‖B) стала бы
     // неоднозначной: другая пара с тем же склеенным представлением дала бы тот
@@ -462,11 +462,11 @@ pub fn derive_kek(file_id: &[u8; 16], org_id: &[u8], a: &SecretA, b: &SecretB) -
     Kek::from_bytes(*okm)
 }
 
-/// K3 — ключ полезной нагрузки.
+/// K3: payload key.
 ///
-/// `header_salt` случаен на каждую операцию упаковки, поэтому повторная упаковка
-/// того же содержимого тем же CEK даёт другой ключ потока и не создаёт
-/// совпадающих шифротекстов.
+/// `header_salt` is random for each packing operation, so repacking
+/// the same content with the same CEK yields a different stream key and does not
+/// produce matching ciphertexts.
 pub fn derive_payload_key(
     cek: &Cek,
     header_salt: &[u8; 32],
@@ -491,9 +491,9 @@ pub fn derive_payload_key(
     ))
 }
 
-/// K5 — ключ приватных метаданных (настоящее имя файла и справочный размер).
+/// K5: private-metadata key (the real filename and informational size).
 ///
-/// Отдельный ключ, чтобы метаданные могли расти без влияния на полезную нагрузку.
+/// A separate key lets metadata grow without affecting the payload.
 pub fn derive_private_meta_key(cek: &Cek, header_salt: &[u8; 32], file_id: &[u8; 16]) -> MetaKey {
     MetaKey::from_bytes(*hkdf_sha256::<SECRET_LEN>(
         header_salt,
@@ -502,7 +502,7 @@ pub fn derive_private_meta_key(cek: &Cek, header_salt: &[u8; 32], file_id: &[u8;
     ))
 }
 
-/// K6 — ключ MAC изменяемой области.
+/// K6: mutable-region MAC key.
 pub fn derive_content_mac_key(cek: &Cek, header_salt: &[u8; 32], file_id: &[u8; 16]) -> MacKey {
     // Изменяемая область заверяется MAC на ключе от CEK, а не подписью автора:
     // правка происходит без автора, подписать он может только то, что видел.
@@ -513,25 +513,25 @@ pub fn derive_content_mac_key(cek: &Cek, header_salt: &[u8; 32], file_id: &[u8; 
     ))
 }
 
-/// K12 — ключ свидетеля состояния доступа.
+/// K12: access-state witness key.
 ///
-/// Заверяет голову кеша лиз, лежащую в двух местах: в профиле и вне его. Метка
-/// `"CC/v1/cached-lease"` была заведена реестром §3.6 заранее и до сих пор
-/// существовала только константой — здесь она обретает потребителя.
+/// Authenticates the lease-cache head stored in two places: inside and outside the profile. The label
+/// `"CC/v1/cached-lease"` was reserved in the §3.6 registry in advance and until now
+/// existed only as a constant; here it gains a consumer.
 ///
-/// Выводится из секрета УСТРОЙСТВА, а не из ключа файла: свидетель один на
-/// машину и не относится ни к какому контейнеру. Иначе голову пришлось бы
-/// заводить на каждый файл, и смысл «одно число вне профиля» пропал бы.
+/// Derived from the DEVICE secret rather than a file key: there is one witness per
+/// machine, unrelated to any container. Otherwise a head would be needed
+/// for every file, defeating the meaning of "one number outside the profile".
 ///
-/// Соль пуста намеренно. У HKDF соль необязательна, а здесь ей неоткуда взяться:
-/// нет ни идентификатора файла, ни salt заголовка — есть одно устройство. Домен
-/// задаёт метка в `info`, и этого достаточно: разделение обеспечивает она, а не
-/// соль.
+/// The salt is deliberately empty. HKDF salt is optional, and none is available here:
+/// there is no file identifier or header salt, only a device. The label
+/// in `info` sets the domain, which suffices: separation comes from it, not
+/// from salt.
 ///
-/// Чего этот ключ НЕ даёт: защиты от владельца машины. Секрет устройства лежит в
-/// его профиле, значит и ключ он выведет. Заверение здесь про соседа по машине,
-/// у которого есть право писать в общий каталог, и про случайную порчу — не про
-/// того, кто владеет профилем.
+/// What this key does NOT provide: protection against the machine's owner. The device secret is in
+/// their profile, so they can derive the key too. Authentication here addresses a fellow machine user
+/// with write access to a shared directory, and accidental corruption, not
+/// whoever owns the profile.
 pub fn derive_witness_key(device: &crate::secret::X25519Secret) -> MacKey {
     MacKey::from_bytes(*hkdf_sha256::<SECRET_LEN>(
         &[],
@@ -540,19 +540,19 @@ pub fn derive_witness_key(device: &crate::secret::X25519Secret) -> MacKey {
     ))
 }
 
-/// Выбор варианта смысловой метки (D5): `HMAC(ключ организации,
-/// "CC/v1/mark-choice" ‖ раскладка ‖ u64be(метка копии) ‖ u32be(точка))`,
-/// первые восемь байт как `u64be`, остаток от деления на число вариантов.
+/// Semantic-mark variant selection (D5): `HMAC(organization key,
+/// "CC/v1/mark-choice" ‖ layout ‖ u64be(copy mark) ‖ u32be(point))`,
+/// the first eight bytes interpreted as `u64be`, modulo the variant count.
 ///
-/// Ключ — ОТДЕЛЬНЫЙ ключ разметки организации, а не ключ устройства или
-/// автора: выбор должен быть непредсказуем для получателя и воспроизводим для
-/// того, кто ищет утечку, и больше ничего этим ключом не делается. Раскладка —
-/// под MAC: одна метка копии в двух документах даёт независимые выборы.
-/// Смещение остатка при числе вариантов до шестнадцати — порядка 2^-60, и
-/// выравнивания не требует.
+/// The key is a SEPARATE organization marking key, not a device or
+/// author key: selection must be unpredictable for the recipient and reproducible for
+/// whoever investigates a leak; this key serves no other purpose. The layout is
+/// MAC-covered: one copy mark in two documents yields independent choices.
+/// For up to sixteen variants, modulo bias is on the order of 2^-60 and
+/// requires no correction.
 ///
 /// # Errors
-/// [`CryptoError::BadLength`] — вариантов ноль.
+/// [`CryptoError::BadLength`]: zero variants.
 pub fn mark_choice(key: &MacKey, layout: &[u8; 32], token: u64, point: u32, variants: u32) -> Result<u32, CryptoError> {
     if variants == 0 {
         return Err(CryptoError::BadLength);
@@ -567,28 +567,28 @@ pub fn mark_choice(key: &MacKey, layout: &[u8; 32], token: u64, point: u32, vari
     u32::try_from(value).map_err(|_| CryptoError::BadLength)
 }
 
-/// K14 — секрет кода-претензии из его канонического текста.
+/// K14: claim-code secret derived from its canonical text.
 ///
-/// Вход — **канонические символы** кода: без разделителей, в верхнем регистре
-/// (§3.4). Приведение к этому виду — работа интерфейса, а не ключевой схемы:
-/// алфавит, группировка и снисходительность к пробелам решают, удобно ли код
-/// диктовать, и ни на один байт ключа не влияют. А вот превращение текста в
-/// секрет влияет на всё и потому живёт здесь, вместе с остальной схемой и своей
-/// меткой домена.
+/// Input is the code's **canonical characters**: no separators, uppercase
+/// (§3.4). Canonicalization belongs to the interface rather than the key schedule:
+/// alphabet, grouping, and whitespace tolerance determine how easily a code can
+/// be dictated, without affecting any key byte. Transforming text into a
+/// secret, however, affects everything and therefore lives here with the rest of the schedule and its
+/// domain label.
 ///
-/// Хешируется текст, а не собранные из символов биты. Разница существенна:
-/// сборка битов — это второе кодирование того же самого, и разойдись оно с первым
-/// хоть на порядок бит, код, напечатанный автором, перестал бы совпадать с кодом,
-/// введённым получателем. Текст же однозначен по построению.
+/// Hashes the text rather than bits assembled from the characters. The distinction matters:
+/// assembling bits is a second encoding of the same thing, and even a bit-order discrepancy
+/// would make the code printed by the author differ from the code
+/// entered by the recipient. Text is unambiguous by construction.
 ///
-/// BLAKE3, а не HKDF: здесь нет ни соли, ни разделения на извлечение и
-/// расширение — есть ровно одно сжатие переменной длины в 32 байта. Разделитель
-/// `0x00` после метки ставится потому, что длина текста заранее не фиксирована, и
-/// без него `метка‖код` разбиралось бы неоднозначно.
+/// BLAKE3 rather than HKDF: there is neither salt nor a division into extract and
+/// expand; there is exactly one compression of variable-length input into 32 bytes. The separator
+/// `0x00` follows the label because text length is not predetermined;
+/// without it, `label‖code` would parse ambiguously.
 ///
-/// Энтропия входа здесь **не проверяется и не может быть**: к этому моменту код
-/// уже текст, и сколько в нём было случайности, из него не видно. Граница
-/// [`crate::MIN_CLAIM_BITS`] проверяется там, где код порождается.
+/// Input entropy is **not checked here and cannot be**: the code is already
+/// text by this point, and its original randomness is not visible. The
+/// [`crate::MIN_CLAIM_BITS`] boundary is checked where the code is generated.
 pub fn claim_secret_from_code(canonical: &[u8]) -> ClaimSecret {
     let mut hasher = blake3::Hasher::new();
     hasher.update(label::CLAIM_CODE.as_bytes());
@@ -597,26 +597,26 @@ pub fn claim_secret_from_code(canonical: &[u8]) -> ClaimSecret {
     ClaimSecret::from_bytes(*hasher.finalize().as_bytes())
 }
 
-/// K7 и K8 — доля получателя из кода-претензии и обязательство этого кода.
+/// K7 and K8: recipient share derived from the claim code, and the code's commitment.
 ///
-/// Возвращает `(secret_B, commitment)`. В контейнер кладётся только
-/// обязательство: сам код передаётся вторым каналом.
-/// Приватный ключ X25519 устройства-наследника, выведенный из кода.
+/// Returns `(secret_B, commitment)`. Only the commitment enters the
+/// container; the code itself is delivered through a second channel.
+/// Heir-device X25519 private key derived from the code.
 ///
-/// # Почему пара ключей, а не доля
+/// # Why a keypair rather than a share
 ///
-/// Доля наследника ФИКСИРОВАНА — это доля B данного файла, — и вывести её из
-/// произвольного кода нельзя. Поэтому код выводит пару, а завещание
-/// запечатывается на её открытый ключ обычным `seal`: для сервера и для провода
-/// такой наследник неотличим от устройства, и ни та, ни другая сторона о коде
-/// не знают вовсе.
+/// The heir's share is FIXED: this file's share B, which cannot be derived from
+/// an arbitrary code. The code therefore derives a pair, and the bequest
+/// is sealed to its public key with ordinary `seal`: to the server and wire,
+/// such an heir is indistinguishable from a device, and neither side
+/// knows anything about the code.
 ///
-/// `salt = file_id`, как и у доли из кода, и по той же причине: один и тот же
-/// код, выданный дважды, в разных файлах даёт разные пары — общих таблиц не
-/// построить.
+/// `salt = file_id`, just as for the code-derived share, for the same reason: the same
+/// code issued twice produces different pairs for different files; shared tables cannot
+/// be constructed.
 ///
-/// Скалярное умножение X25519 «прощает» любые 32 байта: `from_bytes` выполняет
-/// clamping сам, и особой проверки выхода KDF не требуется.
+/// X25519 scalar multiplication "accepts" any 32 bytes: `from_bytes` performs
+/// clamping itself, so no special validation of KDF output is required.
 #[must_use]
 pub fn device_secret_from_claim(file_id: &[u8; 16], claim: &ClaimSecret) -> [u8; 32] {
     *hkdf_sha256::<SECRET_LEN>(file_id, claim.expose(), &[label::CLAIM_DEVICE.as_bytes()])
@@ -635,31 +635,31 @@ pub fn secret_b_from_claim(file_id: &[u8; 16], claim: &ClaimSecret) -> (SecretB,
     (SecretB::from_bytes(*share), *commitment)
 }
 
-/// K9 — обязательство слота, `HMAC-SHA256(KEK, "CC/v1/slot-commit"‖core_hash)`.
+/// K9: slot commitment, `HMAC-SHA256(KEK, "CC/v1/slot-commit"‖core_hash)`.
 ///
-/// Проверяется в постоянном времени **до** открытия AEAD. Без этого код-претензия
-/// превращается в оракул разбиения: XChaCha20-Poly1305 не является
-/// key-committing, и противник строит обёртку, открывающуюся под многими
-/// кандидатами KEK.
+/// Checked in constant time **before** opening AEAD. Without it, the claim code
+/// becomes a partitioning oracle: XChaCha20-Poly1305 is not
+/// key-committing, and an attacker constructs a wrapper that opens under many
+/// candidate KEKs.
 ///
-/// Связывается с `core_hash`, а не с `file_id`, по двум причинам. Первая:
-/// привязка строго сильнее — хеш ядра заголовка уже содержит `file_id` и ломается
-/// при подмене любого другого подписанного автором поля. Вторая: `core_hash`
-/// доступен там, где считается обёртка CEK, а `file_id` в её сигнатуру не
-/// передаётся.
+/// Bound to `core_hash`, not `file_id`, for two reasons. First:
+/// the binding is strictly stronger: the header-core hash already includes `file_id` and changes
+/// when any other author-signed field is substituted. Second: `core_hash`
+/// is available where the CEK wrapper is computed, whereas `file_id` is not
+/// passed in its signature.
 ///
-/// Круговой зависимости нет: `core_hash` считается по заголовку **без** записи
-/// слотов ключа — именно поэтому она из него и вырезается.
+/// No circular dependency: `core_hash` covers the header **without** the key-slot
+/// record, precisely why that record is excluded.
 ///
-/// Функция ровно одна. Раньше их было две — с привязкой к `file_id` и к
-/// `core_hash`, — и это нарушало инвариант «ни одна метка домена не используется
-/// дважды»: одна метка обслуживала два разных связывания, то есть тег из одного
-/// контекста мог быть предъявлен в другом.
+/// There is exactly one function. Previously there were two, bound to `file_id` and
+/// `core_hash`, violating "no domain label is used
+/// twice": one label served two distinct bindings, meaning a tag from one
+/// context could be presented in the other.
 pub fn slot_commitment(kek: &Kek, core_hash: &[u8; 32]) -> [u8; 32] {
     hmac_sha256(kek.expose(), &[label::SLOT_COMMIT.as_bytes(), core_hash.as_slice()])
 }
 
-/// Сравнение обязательства в постоянном времени.
+/// Constant-time commitment comparison.
 pub fn verify_commitment(expected: &[u8; 32], actual: &[u8; 32]) -> Result<(), CryptoError> {
     // Только `ct_eq`. Сравнение `==` выходит на первом различающемся байте, и по
     // времени ответа обязательство подбирается побайтово — за 32×256 попыток
@@ -929,15 +929,15 @@ mod device_fpr_tests {
     use super::*;
     use crate::KemAlg;
 
-    /// Для X25519 отпечаток И ЕСТЬ ключ — заморожено векторами провода.
+    /// For X25519, the fingerprint IS the key: frozen by wire vectors.
     #[test]
     fn x25519_fingerprint_is_the_key_itself() {
         let key = [0x5a; 32];
         assert_eq!(device_fpr(KemAlg::X25519HkdfSha256, &key).unwrap(), key);
     }
 
-    /// Номер механизма входит в прообраз: те же байты под другим номером —
-    /// другое имя устройства. Иначе переразметка механизма сохраняла бы имя.
+    /// The mechanism number enters the preimage: identical bytes under another number mean
+    /// a different device name. Otherwise relabeling the mechanism would preserve the name.
     #[test]
     fn the_mechanism_number_is_part_of_the_name() {
         let xw = crate::xwing::public_key(&[0x4d; 32]).unwrap();
@@ -948,7 +948,7 @@ mod device_fpr_tests {
         assert_ne!(&a[..], &xw[..32], "хеш не должен совпадать с началом ключа");
     }
 
-    /// Длина проверяется по механизму (И-8), а не «как пришло».
+    /// Length is checked against the mechanism (I-8), not taken "as received".
     #[test]
     fn a_key_of_the_wrong_length_is_refused_not_hashed() {
         assert_eq!(device_fpr(KemAlg::X25519HkdfSha256, &[0; 31]), Err(CryptoError::BadLength));
@@ -958,14 +958,14 @@ mod device_fpr_tests {
         assert_eq!(device_fpr(KemAlg::RsaOaepSha256, &[0; 256]), Err(CryptoError::UnsupportedAlgorithm));
     }
 
-    /// Пробел таблицы длин стоит ровно там, где сборка не исполняет механизм.
+    /// The length table has a gap exactly where the build cannot execute a mechanism.
     ///
-    /// Две таблицы отвечают на РАЗНЫЕ вопросы — «какой формы ключ» и «умеем ли
-    /// мы этот механизм», — и согласие между ними не следует ни из чего, кроме
-    /// сегодняшнего совпадения. Раз оно нужно `device_fpr` (иначе у ветки
-    /// «длины нет» появился бы достижимый смысл), оно обязано проверяться, а не
-    /// подразумеваться. Перебор ВСЕХ членов, а не списка по памяти: новый
-    /// механизм попадёт сюда сам.
+    /// The two tables answer DIFFERENT questions, "what shape is the key" and "can
+    /// we execute this mechanism"; nothing guarantees their agreement except
+    /// today's coincidence. Since `device_fpr` needs that agreement (otherwise the
+    /// "no length" branch would have reachable meaning), it must be tested rather than
+    /// assumed. Enumerate ALL members, not a list recalled from memory: a new
+    /// mechanism will be included automatically.
     #[test]
     fn the_length_table_has_a_hole_exactly_where_the_build_has_no_mechanism() {
         // Члены берутся ИЗ РАЗБОРА, а не списком: список по памяти устареет в
@@ -981,8 +981,8 @@ mod device_fpr_tests {
         }
     }
 
-    /// Хешированный отпечаток начинается не с метки: метка в прообразе, а не в
-    /// выходе. Проверка стережёт от «отпечаток = метка ‖ ключ» при рефакторинге.
+    /// A hashed fingerprint does not start with the label: the label is in the preimage, not the
+    /// output. This guards against "fingerprint = label ‖ key" during refactoring.
     #[test]
     fn the_label_is_in_the_preimage_not_in_the_output() {
         let p = [0x04; 65];

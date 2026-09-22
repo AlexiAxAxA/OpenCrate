@@ -1,74 +1,74 @@
-//! Документы аттестации ключа устройства на проводе (B6b, `docs/protocol.md`
+//! Device key attestation documents on the wire (B6b, `docs/protocol.md`
 //! §9.11.1).
 //!
-//! # Три шага, и почему не два
+//! # Three steps, and why not two
 //!
-//! Модель §9.11 — два хода проверяющего: учётные данные на EK для имени
-//! удостоверителя, затем секрет и утверждение. Провайдер Windows устроен иначе:
-//! удостоверитель рождается ВМЕСТЕ с утверждением (обёртка `KAST`, замер B6b), а
-//! утверждению нужен вызов проверяющего заранее. Поэтому на проводе три шага:
+//! The model in §9.11 has two verifier moves: credentials for the attestation
+//! key's name under the EK, then the secret and the attestation. The Windows provider works differently:
+//! the attestation key is created TOGETHER with the attestation (`KAST` wrapper, B6b measurement), and
+//! the attestation needs the verifier's challenge beforehand. Hence three wire steps:
 //!
-//! 1. устройство просит вызов — сервер отвечает `Nonce`;
-//! 2. устройство присылает `Evidence` целиком — EK, удостоверитель, утверждение
-//!    с этим вызовом — и получает учётные данные;
-//! 3. устройство возвращает открытый секрет — сервер выносит вердикт.
+//! 1. The device requests a challenge; the server responds with `Nonce`.
+//! 2. The device sends complete `Evidence`: EK, attestation key and attestation
+//!    with that challenge, and receives credentials.
+//! 3. The device returns the decrypted secret; the server delivers its verdict.
 //!
-//! Все три запроса идут ПОСЛЕ доказательства владения и под MAC сессии (K25):
-//! аттестация отвечает на вопрос о ключе, владение которым доказано в этом же
-//! разговоре, а не о ключе, названном со слов.
+//! All three requests follow proof of possession and are protected by the session MAC (K25):
+//! attestation concerns the key whose possession was proved in this same
+//! conversation, not a key merely named by the peer.
 //!
-//! # Что здесь не проверяется
+//! # What is not verified here
 //!
-//! Структуры TPM и сертификаты внутри — байты: их разбирает проверяющий
-//! (`cc_authority::attest`), строго и по своим пределам. Здесь — только
-//! раскладка документа и потолки длин, чтобы разбор конверта не выделял память
-//! по слову отправителя.
+//! TPM structures and certificates within are bytes: the verifier parses them
+//! (`cc_authority::attest`), strictly and with its own limits. This module handles only
+//! the document layout and length caps, so that envelope parsing cannot allocate memory
+//! based solely on the sender's claims.
 
 use oc_format::tlv::{TlvReader, TlvWriter};
 use oc_format::FormatError;
 
-/// Потолок `TPM2B_PUBLIC`.
+/// `TPM2B_PUBLIC` size cap.
 pub const MAX_PUBLIC: usize = 1026;
-/// Потолок сертификата.
+/// Certificate size cap.
 pub const MAX_CERTIFICATE: usize = 8 * 1024;
-/// Сколько промежуточных сертификатов принимается: цепочка не длиннее четырёх.
+/// Number of intermediate certificates accepted: the chain is at most four certificates long.
 pub const MAX_INTERMEDIATES: usize = 2;
-/// Потолок `TPMS_ATTEST`.
+/// `TPMS_ATTEST` size cap.
 pub const MAX_ATTEST: usize = 1024;
-/// Потолок `TPMT_SIGNATURE`.
+/// `TPMT_SIGNATURE` size cap.
 pub const MAX_SIGNATURE: usize = 600;
-/// Потолок учётных данных: `TPM2B_ID_OBJECT ‖ TPM2B_ENCRYPTED_SECRET`.
+/// Credential size cap: `TPM2B_ID_OBJECT ‖ TPM2B_ENCRYPTED_SECRET`.
 pub const MAX_CREDENTIAL: usize = 2 + 132 + 2 + 512;
-/// Длина вызова и секрета учётных данных.
+/// Length of the challenge and credential secret.
 pub const SECRET_LEN: usize = 32;
 
-/// Основание доверия к ключу подтверждения, как его называет вердикт.
+/// Basis of trust in the endorsement key, as stated by the verdict.
 pub mod basis {
-    /// Сертификат вендора до корня развёртывания.
+    /// Vendor certificate chaining to the deployment root.
     pub const VENDOR_CERTIFICATE: u8 = 1;
-    /// Ключ подтверждения закреплён администратором.
+    /// Endorsement key pinned by the administrator.
     pub const ENROLLED_EK: u8 = 2;
 }
 
-/// Теги доказательства.
+/// Evidence tags.
 pub mod evidence_tag {
-    /// `TPM2B_PUBLIC` ключа подтверждения.
+    /// Endorsement key's `TPM2B_PUBLIC`.
     pub const EK_PUBLIC: u16 = 1;
-    /// Сертификат EK (DER). Необязательное: во многих TPM его нет.
+    /// EK certificate (DER). Optional: many TPMs do not have one.
     pub const EK_CERTIFICATE: u16 = 2;
-    /// Промежуточные сертификаты: `u16be(len) ‖ der` подряд, не больше двух.
+    /// Intermediate certificates: consecutive `u16be(len) ‖ der`, at most two.
     pub const INTERMEDIATES: u16 = 3;
-    /// `TPM2B_PUBLIC` ключа удостоверителя.
+    /// Attestation key's `TPM2B_PUBLIC`.
     pub const IDENTITY_PUBLIC: u16 = 4;
-    /// `TPMS_ATTEST` байтами, как его подписал TPM.
+    /// `TPMS_ATTEST` bytes, as signed by the TPM.
     pub const ATTEST: u16 = 5;
-    /// `TPMT_SIGNATURE` под ним.
+    /// The `TPMT_SIGNATURE` over them.
     pub const SIGNATURE: u16 = 6;
-    /// `TPM2B_PUBLIC` аттестуемого ключа устройства.
+    /// `TPM2B_PUBLIC` of the device key being attested.
     pub const DEVICE_PUBLIC: u16 = 7;
 }
 
-/// Всё, что устройство предъявляет о своём ключе.
+/// Everything the device presents about its key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evidence {
     pub ek_public: Vec<u8>,
@@ -87,10 +87,10 @@ fn bounded(tag: u16, value: &[u8], limit: usize) -> Result<Vec<u8>, FormatError>
     Ok(value.to_vec())
 }
 
-/// Закодировать доказательство.
+/// Encode evidence.
 ///
 /// # Errors
-/// [`FormatError`] — поле пустое, длиннее потолка, промежуточных больше двух.
+/// [`FormatError`]: an empty or oversized field, or more than two intermediates.
 pub fn encode_evidence(e: &Evidence) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
     w.put(evidence_tag::EK_PUBLIC, &bounded(evidence_tag::EK_PUBLIC, &e.ek_public, MAX_PUBLIC)?)?;
@@ -118,10 +118,10 @@ pub fn encode_evidence(e: &Evidence) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать доказательство.
+/// Decode evidence.
 ///
 /// # Errors
-/// [`FormatError`] — порядок тегов, незнакомый тег, длина, отсутствующее поле.
+/// [`FormatError`]: tag ordering, unknown tag, length or missing field.
 pub fn decode_evidence(bytes: &[u8]) -> Result<Evidence, FormatError> {
     if bytes.len() > crate::activation::MAX_DOCUMENT {
         return Err(FormatError::OffsetOverflow);
@@ -171,11 +171,11 @@ pub fn decode_evidence(bytes: &[u8]) -> Result<Evidence, FormatError> {
     })
 }
 
-/// Учётные данные: `TPM2B_ID_OBJECT ‖ TPM2B_ENCRYPTED_SECRET`, та раскладка,
-/// которую принимает свойство активации провайдера Windows (замер B6b).
+/// Credentials: `TPM2B_ID_OBJECT ‖ TPM2B_ENCRYPTED_SECRET`, the layout
+/// accepted by the Windows provider's activation property (B6b measurement).
 ///
 /// # Errors
-/// [`FormatError`] — пусто, длиннее потолка или поля не сходятся с длиной.
+/// [`FormatError`]: empty, oversized or fields inconsistent with the length.
 pub fn check_credential(bytes: &[u8]) -> Result<(), FormatError> {
     let bad = || FormatError::BadFieldLength { tag: 0, len: bytes.len() };
     if bytes.is_empty() || bytes.len() > MAX_CREDENTIAL {

@@ -1,8 +1,8 @@
-//! Писатель правки: перенос кадров, свежие nonce, дерево, подпись.
+//! Edit writer: frame reuse, fresh nonces, tree, signature.
 //!
-//! Главное свойство — И-1 при правке: другой текст на том же индексе получает
-//! другой nonce, даже когда засев повторился (откат снапшота); тот же текст на
-//! том же индексе при переносе — ту же тройку байт.
+//! Central property: I-1 during editing. Different plaintext at the same index receives
+//! a different nonce even when the seed repeats (snapshot rollback); unchanged plaintext
+//! at the same index retains the same triple of byte sequences when copied.
 
 #![allow(
     clippy::unwrap_used,

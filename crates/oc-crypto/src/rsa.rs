@@ -1,66 +1,66 @@
-//! Проверка подписи RSA-PSS-SHA256 — подпись редактировавшего устройства.
+//! RSA-PSS-SHA256 signature verification: editing-device signature.
 //!
-//! # Почему своя реализация, а не крейт
+//! # Why our own implementation rather than a crate
 //!
-//! Проверка обязана жить в ЧИСТОМ крейте: `oc-format` и `oc-protocol` проверяют подписи и
-//! собирается под `wasm32-unknown-unknown`, поэтому платформенным CNG обойтись
-//! нельзя. Крейта `rsa` в дереве нет, и брать его неприятно — на нём висит
-//! RUSTSEC-2023-0071 (Marvin), и хотя к нашему употреблению он относится
-//! косвенно (атака про приватные операции, а подписывает TPM), исключение
-//! пришлось бы выписывать руками.
+//! Verification must live in a PURE crate: `oc-format` and `oc-protocol` verify signatures and
+//! build for `wasm32-unknown-unknown`, ruling out
+//! platform CNG. The dependency tree lacks the `rsa` crate, and taking it is undesirable:
+//! it carries RUSTSEC-2023-0071 (Marvin); although only indirectly relevant
+//! here (the attack concerns private operations, while the TPM signs), an exception
+//! would have to be granted manually.
 //!
-//! `crypto-bigint` в дереве уже есть, пришёл с `p256`. Всё, что нужно сверх
-//! него, — возведение в степень по модулю с ОТКРЫТЫМ показателем и разбор
-//! кодировки PSS. **Секретов в операции нет ни одного**, поэтому постоянное
-//! время не требуется, и «своя крипта» здесь допустима ровно по этой причине, а
-//! не потому, что так дешевле.
+//! `crypto-bigint` is already in the tree via `p256`. Beyond it, all we need
+//! is modular exponentiation with a PUBLIC exponent and parsing
+//! the PSS encoding. **The operation contains no secrets**, so constant
+//! time is unnecessary; that is exactly why "our own crypto" is acceptable here,
+//! not because it is cheaper.
 //!
-//! # Чем это опасно и что отсюда следует
+//! # The danger and its consequences
 //!
-//! Ломались исторически именно ПРОВЕРЯЮЩИЕ: атака Блайхенбахера на `e = 3` была
-//! о небрежном разборе набивки, а не о стойкости RSA. Поэтому здесь:
+//! Historically, VERIFIERS were what broke: Bleichenbacher's `e = 3` attack targeted
+//! careless padding parsing, not RSA strength. Therefore:
 //!
-//! * **показатель не параметр.** Он прибит к 65537 внутри, и передать сюда `e = 3`
-//!   нечем. Проверяющему незачем уметь то, чего наш подписывающий не производит;
-//! * **длина соли не восстанавливается, а требуется.** Формат закрепил 32 байта
-//!   (`docs/format.md`, «ВЕРСИЯ 3 ОТКРЫТА», п. 7), и подпись с другой солью —
-//!   отказ, а не «примем, раз сходится». Восстановление длины по разделителю
-//!   принимает больше, чем формат разрешает;
-//! * **длина модуля задана типом.** RSA-2048 и только он.
+//! * **the exponent is not a parameter.** Fixed internally at 65537, with no way to pass `e = 3`.
+//!   A verifier need not support anything our signer does not produce;
+//! * **salt length is required, not recovered.** The format fixes it at 32 bytes
+//!   (`docs/format.md`, "VERSION 3 OPENED", item 7), so another salt length means
+//!   rejection, not "accept if it verifies". Recovering length from a delimiter
+//!   accepts more than the format allows;
+//! * **modulus length is specified by type.** RSA-2048 only.
 //!
-//! # Что проверено исполнением
+//! # What has been verified by execution
 //!
-//! Вектор в `tests/kat/rsa_pss.kat` снят с ЖИВОГО TPM этой машины
-//! (`spikes/rsa-pss-tpm/`), а не выдуман и не взят из документации. Заново из
-//! спецификации он не выводится.
+//! The vector in `tests/kat/rsa_pss.kat` came from this machine's LIVE TPM
+//! (`spikes/rsa-pss-tpm/`), not invention or documentation. It cannot be rederived
+//! from the specification.
 
 use crate::CryptoError;
 use crypto_bigint::modular::{BoxedMontyForm, BoxedMontyParams};
 use crypto_bigint::{BoxedUint, Odd};
 use sha2::{Digest, Sha256};
 
-/// Длина модуля RSA-2048 в байтах. Она же длина подписи и длина кодировки `EM`.
+/// RSA-2048 modulus length in bytes. Also the signature length and `EM` encoding length.
 pub const MODULUS_LEN: usize = 256;
 
-/// Разрядность модуля.
+/// Modulus bit width.
 const BITS: u32 = 2048;
 
-/// Длина хеша SHA-256.
+/// SHA-256 hash length.
 const HLEN: usize = 32;
 
-/// Длина соли, закреплённая форматом.
+/// Salt length fixed by the format.
 const SLEN: usize = 32;
 
-/// Длина `DB`: `emLen − hLen − 1` = 256 − 32 − 1.
+/// `DB` length: `emLen − hLen − 1` = 256 − 32 − 1.
 const DB_LEN: usize = 223;
 
-/// Нулевая набивка перед разделителем: `emLen − sLen − hLen − 2` = 256 − 32 − 32 − 2.
+/// Zero padding before the delimiter: `emLen − sLen − hLen − 2` = 256 − 32 − 32 − 2.
 const PS_LEN: usize = 190;
 
-/// Показатель. Прибит: см. шапку модуля.
+/// Exponent. Fixed: see module documentation.
 const EXPONENT: [u8; 3] = [0x01, 0x00, 0x01];
 
-/// `MGF1` над SHA-256 (RFC 8017 §B.2.1), пишет ровно в длину буфера.
+/// `MGF1` over SHA-256 (RFC 8017 §B.2.1), writing exactly the buffer length.
 fn mgf1(seed: &[u8], out: &mut [u8]) {
     let mut counter: u32 = 0;
     for block in out.chunks_mut(HLEN) {
@@ -78,17 +78,17 @@ fn mgf1(seed: &[u8], out: &mut [u8]) {
     }
 }
 
-/// Проверить подпись RSA-PSS-SHA256 с солью 32 байта и показателем 65537.
+/// Verify RSA-PSS-SHA256 with a 32-byte salt and exponent 65537.
 ///
 /// # Errors
 ///
-/// [`CryptoError::BadSignature`] — подпись не сходится либо её кодировка не
-/// соответствует PSS. [`CryptoError::BadLength`] — не та длина подписи или
-/// модуль, не разбирающийся как число нужной разрядности.
+/// [`CryptoError::BadSignature`]: signature mismatch or encoding does not
+/// conform to PSS. [`CryptoError::BadLength`]: incorrect signature length or
+/// a modulus that cannot be parsed as a number of the required bit width.
 ///
-/// Два разных кода намеренно: «длина не та» — это ошибка вызывающего или
-/// обрезанный файл, «не сходится» — это подделка либо чужой ключ. Свести их в
-/// один значило бы отвечать «подделка» на собственную ошибку.
+/// Two distinct codes deliberately: "wrong length" means caller error or a
+/// truncated file; "mismatch" means forgery or the wrong key. Merging them
+/// would report "forgery" for our own error.
 pub fn verify_pss_sha256(
     modulus: &[u8; MODULUS_LEN],
     message: &[u8],
@@ -190,25 +190,25 @@ pub fn verify_pss_sha256(
 // случайность в этом крейте.
 // ---------------------------------------------------------------------------
 
-/// Длины модуля, принимаемые проверкой аттестации: 2048, 3072 и 4096 бит.
+/// Modulus lengths accepted by attestation verification: 2048, 3072, and 4096 bits.
 ///
-/// Меньше — не бывает у TPM 2.0 и не принимается; больше — не бывает у
-/// вендоров, и вход без предела стоил бы проверяющему возведения в степень
-/// произвольной длины.
+/// Smaller lengths do not occur in TPM 2.0 and are rejected; larger ones do not occur with
+/// vendors, and unbounded input would force the verifier to perform
+/// arbitrary-length exponentiation.
 pub const ATTESTATION_MODULUS_LENS: [usize; 3] = [256, 384, 512];
 
-/// DigestInfo SHA-256 (RFC 8017 §9.2, примечание 1): префикс перед хешем.
+/// SHA-256 DigestInfo (RFC 8017 §9.2, note 1): the prefix before the hash.
 const SHA256_DIGEST_INFO: [u8; 19] = [
     0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
     0x05, 0x00, 0x04, 0x20,
 ];
 
-/// `x^65537 mod n` над модулем допустимой длины; результат — ровно длины модуля.
+/// `x^65537 mod n` for an allowed modulus length; output is exactly modulus length.
 ///
-/// Модуль обязан иметь ПОЛНУЮ разрядность (старший бит первого байта поднят):
-/// «2048-битный» модуль с нулевым старшим байтом — это 2040-битный ключ под
-/// чужой длиной. Вход обязан быть меньше модуля: иначе представление
-/// неоднозначно (`x` и `x + n` дали бы одно и то же).
+/// The modulus must have FULL bit width (the first byte's highest bit set):
+/// a "2048-bit" modulus with a zero high byte is a 2040-bit key under
+/// the wrong length. Input must be less than the modulus, or representation
+/// would be ambiguous (`x` and `x + n` would give the same result).
 fn public_op(modulus: &[u8], input: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, CryptoError> {
     let k = modulus.len();
     if !ATTESTATION_MODULUS_LENS.contains(&k) || input.len() != k {
@@ -233,17 +233,17 @@ fn public_op(modulus: &[u8], input: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>
     Ok(zeroize::Zeroizing::new(out.to_vec()))
 }
 
-/// Проверить подпись RSASSA-PKCS1-v1_5 с SHA-256 и показателем 65537.
+/// Verify RSASSA-PKCS1-v1_5 with SHA-256 and exponent 65537.
 ///
-/// Кодировка СОБИРАЕТСЯ из сообщения и сравнивается с восстановленной целиком,
-/// а не разбирается. Разбор набивки PKCS#1 v1.5 — классическое место подделок
-/// (Блайхенбахер 2006: проверяющий, который читал `00 01 FF… 00 DigestInfo` и не
-/// проверял хвост, принимал подпись, подобранную под `e = 3`); сравнение с
-/// единственно верной кодировкой такой лазейки не оставляет.
+/// The encoding is CONSTRUCTED from the message and compared with the recovered value in full,
+/// not parsed. PKCS#1 v1.5 padding parsing is a classic forgery site
+/// (Bleichenbacher 2006: a verifier reading `00 01 FF… 00 DigestInfo` without
+/// checking the tail accepted a signature crafted for `e = 3`); comparing with
+/// the sole correct encoding leaves no such opening.
 ///
 /// # Errors
-/// [`CryptoError::BadLength`] — длина подписи не равна длине модуля или модуль
-/// недопустимой длины; [`CryptoError::BadSignature`] — не сходится.
+/// [`CryptoError::BadLength`]: signature length differs from modulus length or modulus
+/// length is disallowed; [`CryptoError::BadSignature`]: mismatch.
 pub fn verify_pkcs1v15_sha256(
     modulus: &[u8],
     message: &[u8],
@@ -287,14 +287,14 @@ pub fn verify_pkcs1v15_sha256(
     }
 }
 
-/// Зашифровать `message` RSAES-OAEP с SHA-256 и MGF1-SHA-256 (RFC 8017 §7.1.1).
+/// Encrypt `message` using RSAES-OAEP with SHA-256 and MGF1-SHA-256 (RFC 8017 §7.1.1).
 ///
-/// `seed` — случайные 32 байта от вызывающего. Метка TPM для учётных данных —
-/// `b"IDENTITY\0"`, с завершающим нулём (TPM 2.0, часть 1, «Credential
-/// Protection»); передаётся целиком, функция её не дополняет.
+/// `seed` is 32 random bytes from the caller. The TPM credential label is
+/// `b"IDENTITY\0"`, including its terminating zero (TPM 2.0, part 1, "Credential
+/// Protection"); it must be supplied in full; this function does not append to it.
 ///
 /// # Errors
-/// [`CryptoError::BadLength`] — модуль недопустимой длины или сообщение длиннее
+/// [`CryptoError::BadLength`]: disallowed modulus length or a message exceeding
 /// `k − 2·32 − 2`.
 pub fn encrypt_oaep_sha256(
     modulus: &[u8],
@@ -349,8 +349,8 @@ pub fn encrypt_oaep_sha256(
 mod tests {
     use super::*;
 
-    /// Производные длины обязаны сходиться с раскладкой PSS, а не быть
-    /// переписанными от руки числами.
+    /// Derived lengths must match the PSS layout rather than being
+    /// manually copied numbers.
     #[test]
     fn the_derived_lengths_match_the_pss_layout() {
         assert_eq!(DB_LEN, MODULUS_LEN - HLEN - 1);
@@ -371,7 +371,7 @@ mod tests {
         );
     }
 
-    /// Чётный модуль — не слабый ключ, а мусор на месте ключа.
+    /// An even modulus is garbage in place of a key, not a weak key.
     #[test]
     fn an_even_modulus_is_refused() {
         let mut modulus = [0xffu8; MODULUS_LEN];
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(verify_pss_sha256(&modulus, b"x", &signature), Err(CryptoError::BadLength));
     }
 
-    /// Модуль не той длины или без полной разрядности — отказ по длине.
+    /// Incorrect modulus length or incomplete bit width causes a length rejection.
     #[test]
     fn attestation_moduli_are_limited_to_full_width_known_lengths() {
         let short = [0xffu8; 128];
@@ -397,7 +397,7 @@ mod tests {
         );
     }
 
-    /// Подпись не меньше модуля — отказ: представление было бы неоднозначным.
+    /// A signature not smaller than the modulus is rejected: representation would be ambiguous.
     #[test]
     fn a_pkcs1_signature_not_below_the_modulus_is_refused() {
         let modulus = [0xffu8; 256];
@@ -407,8 +407,8 @@ mod tests {
         );
     }
 
-    /// Нулевая подпись не должна проходить ни при каком модуле: `0^e = 0`, и
-    /// хвостовой байт кодировки не совпадёт.
+    /// A zero signature must fail for every modulus: `0^e = 0`, and
+    /// the encoding's trailing byte will not match.
     #[test]
     fn a_zero_signature_never_verifies() {
         let modulus = [0xffu8; MODULUS_LEN];

@@ -1,61 +1,61 @@
-//! Движок упаковки: всё, что РЕШАЕТ, и ничего, что считает по байтам.
+//! Packing engine: everything that DECIDES, nothing that processes content bytes.
 //!
-//! # Зачем этот крейт существует
+//! # Why this crate exists
 //!
-//! Продуктовый план делит работу так: на сервере — то, что решает (ключ
-//! содержимого, доли, слоты, сборка и хеши заголовка), на устройстве — то, что
-//! считает (прогон AEAD по байтам документа). Граница закладывается СЕЙЧАС,
-//! чтобы позже компонент, держащий ключи, переехал в анклав сменой хостинга, а
-//! не переписыванием.
+//! The product plan divides work as follows: the server decides (content
+//! key, shares, slots, header construction and hashes); the device
+//! computes (AEAD over document bytes). The boundary is established NOW
+//! so the key-holding component can later move into an enclave through a hosting change
+//! rather than a rewrite.
 //!
-//! До этого крейта границы не было вовсе: `cc_cli::container::protect` делала
-//! обе половины подряд, и «перенести движок в анклав» было беспредметным — в
-//! репозитории отсутствовало то, что переносить.
+//! Before this crate there was no boundary: `cc_cli::container::protect` performed
+//! both halves consecutively, making "move the engine into an enclave" meaningless:
+//! the repository contained nothing to move.
 //!
-//! # Что здесь запрещено, и почему это проверяет сборка
+//! # What is forbidden here and why the build checks it
 //!
-//! Ни ввода-вывода, ни часов, ни собственного генератора: генератор приходит
-//! параметром. Крейт входит в тот же гейт чистоты, что `oc-format`,
-//! `oc-protocol`, `oc-crypto` и `oc-policy`, — сборка под
-//! `wasm32-unknown-unknown` и запрет `SystemTime` в `clippy.toml`.
+//! No I/O, clocks, or internal RNG: the RNG arrives
+//! as a parameter. This crate passes the same purity gate as `oc-format`,
+//! `oc-protocol`, `oc-crypto`, and `oc-policy`: compilation for
+//! `wasm32-unknown-unknown` and the `SystemTime` ban in `clippy.toml`.
 //!
-//! У четырёх остальных гейт держит детерминизм тестов. Здесь он держит саму
-//! границу: анклав не примет компонент, успевший обзавестись зависимостью от
-//! машины. Проверять это глазами ревьюера на каждом изменении — то же самое, что
-//! не проверять.
+//! For the other four, the gate preserves deterministic tests. Here it preserves the
+//! boundary itself: an enclave cannot accept a component already dependent on
+//! the host machine. Relying on a reviewer to check every change is equivalent to
+//! not checking.
 //!
-//! # Порядок вызовов и почему их два, а не один
+//! # Call order and why there are two calls rather than one
 //!
 //! ```text
-//!   plan()       → секреты, ключ полезной нагрузки          (движок)
-//!   seal_chunks  → шифротекст, корень дерева, длина          (устройство)
-//!   assemble()   → заголовок, транскрипт подписи, описание   (движок)
-//!   sign+write   → подпись автора и запись файла             (устройство)
+//!   plan()       → secrets, payload key                     (engine)
+//!   seal_chunks  → ciphertext, tree root, length            (device)
+//!   assemble()   → header, signature transcript, descriptor (engine)
+//!   sign+write   → author signature and file write          (device)
 //! ```
 //!
-//! Средний шаг — `oc_crypto::stream::seal_chunks`. Он лежит в крипте, а не
-//! здесь, и это не мелочь расположения: движок РЕШАЕТ, а тот цикл СЧИТАЕТ по
-//! байтам, то есть принадлежит устройству. В крипту он переехал 2026-09-09 из
-//! `cc_cli::payload`, когда устройств стало два — к машине получателя добавился
-//! хост чужого языка через wasm, — и вторая реализация того же цикла разошлась
-//! бы с первой молча (`oc_crypto::stream`, описание модуля).
+//! The middle step is `oc_crypto::stream::seal_chunks`. It belongs to crypto,
+//! not here, a substantive placement: the engine DECIDES, while that loop PROCESSES
+//! bytes and therefore belongs to the device. It moved from `cc_cli::payload` into
+//! crypto on 2026-09-09 when there were two devices: the recipient's machine plus
+//! a wasm host for other languages. A second implementation of the same loop would
+//! silently diverge from the first (`oc_crypto::stream` module documentation).
 //!
-//! Разрезать иначе нельзя: приватные метаданные несут ДЛИНУ документа, а её
-//! знает только тот, кто прогнал поток. Значит движок обязан отдать ключ, дождаться
-//! ответа и лишь потом собрать заголовок.
+//! No other split works: private metadata contains document LENGTH, known
+//! only to whoever processed the stream. The engine must therefore release the key, await
+//! the result, and only then assemble the header.
 //!
-//! # Чего движок не делает — и это решение, а не упущение
+//! # What the engine does not do, by decision rather than omission
 //!
-//! **Он не подписывает.** Подпись ставит ключ АВТОРА и покрывает заголовок
-//! целиком, включая слоты (И-6); движок отдаёт транскрипт, подпись накладывает
-//! устройство. Буквальное следование продуктовому плану — «сервер подписывает
-//! политику» — потребовало бы второй подписи в заголовке, то есть новой версии
-//! формата, посреди разреза, который обязан оставить байты неизменными.
+//! **It does not sign.** The AUTHOR's key signs the entire header,
+//! including slots (I-6); the engine supplies the transcript and the device
+//! applies the signature. Literally following the product plan, "the server signs
+//! the policy", would require a second header signature and thus a new format
+//! version during a split that must preserve bytes.
 //!
-//! **CEK движок не отдаёт.** Наружу уходит только `payload_key`, выведенный из
-//! него под конкретный размер чанка и алгоритм. Отдай движок CEK — и анклав
-//! доказывал бы целостность образа, не давая ничего сверх неё: ключ, которым
-//! разворачивается всё остальное, лежал бы снаружи.
+//! **The engine does not release CEK.** It exposes only `payload_key`, derived from
+//! CEK for the specific chunk size and algorithm. If it released CEK, the enclave
+//! would prove image integrity and nothing more: the key unwrapping everything
+//! else would reside outside.
 
 use rand_core::CryptoRng;
 use oc_crypto::secret::{Cek, ClaimSecret, PayloadKey, SecretA, SecretB};
@@ -70,34 +70,34 @@ use oc_policy::Policy;
 use zeroize::Zeroizing;
 
 pub mod wire;
-/// Писатель правки (`docs/format.md`, «ПРАВКА ИСПОЛНИМА», п. G).
+/// Edit writer (`docs/format.md`, "EDITING IS EXECUTABLE", item G).
 pub mod edit;
 
-/// Теги приватных метаданных.
+/// Private-metadata tags.
 ///
-/// Публичны, потому что пишет их движок, а читает устройство: держать два
-/// определения одних и тех же номеров в двух крейтах значило бы завести
-/// расхождение, которое проявится только на чужом файле.
+/// Public because the engine writes them and the device reads them: maintaining two
+/// definitions of identical numbers in two crates would create
+/// divergence appearing only in someone else's file.
 pub mod meta_tag {
     pub const NAME: u16 = 1;
     pub const SIZE: u16 = 2;
 }
 
-/// Длина nonce, которым зашифрованы приватные метаданные.
+/// Length of the nonce encrypting private metadata.
 pub const META_NONCE_LEN: usize = 24;
 
-/// Отказ движка.
+/// Engine failure.
 #[derive(Debug)]
 pub enum EngineError {
     Format(FormatError),
     Crypto(CryptoError),
-    /// Собранный заголовок не сошёлся сам с собой.
+    /// The assembled header is internally inconsistent.
     CoreHashMismatch,
-    /// Получатель гибридный, а гибридной половины автора не дали.
+    /// Hybrid recipient, but no author hybrid half was supplied.
     ///
-    /// Отдельная ошибка, а не понижение до классического слота: понижение
-    /// вернуло бы дыру, ради закрытия которой ветка и заведена, и вернуло бы
-    /// молча — файл выглядел бы постквантовым, не будучи им.
+    /// A distinct error, not a downgrade to a classical slot: downgrading
+    /// would restore the very hole this branch closes, silently;
+    /// the file would appear post-quantum without being so.
     MissingAuthorHybridKey,
 }
 
@@ -131,7 +131,7 @@ impl core::fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
-/// Набор алгоритмов, которым пользуется этот движок.
+/// Algorithm suite used by this engine.
 #[must_use]
 pub fn suite() -> Suite {
     Suite {
@@ -141,47 +141,47 @@ pub fn suite() -> Suite {
     }
 }
 
-/// Кому адресован файл, помимо устройства автора.
+/// Whom the file addresses besides the author's device.
 ///
-/// Слот автора присутствует **всегда** и здесь не описывается: без него снятие
-/// защиты требовало бы сети, и продукт создавал бы ровно тот риск потери
-/// собственных файлов, от которого должен спасать.
+/// The author slot is **always** present and not described here: without it,
+/// removing protection would require networking, creating precisely the risk of losing
+/// one's own files that the product should prevent.
 ///
-/// `Clone` есть и стоит объяснения: у варианта с кодом-претензией копируется
-/// СЕКРЕТ. Это осознанно — запрос упаковки живёт до сборки заголовка, а между
-/// планом и сборкой лежит весь поток документа, — и безопасно ровно потому, что
-/// `ClaimSecret` затирает себя при уничтожении. Копия исчезает так же, как
-/// оригинал.
+/// `Clone` deserves explanation: the claim-code variant copies a
+/// SECRET. This is deliberate: the packing request lives until header assembly,
+/// with the entire document stream between planning and assembly. It is safe precisely because
+/// `ClaimSecret` wipes itself on destruction. The copy disappears just like
+/// the original.
 #[derive(Debug, Clone)]
 pub enum Recipient {
-    /// Никого: файл открывает **только** автор.
+    /// Nobody: **only** the author opens the file.
     ///
-    /// Это не «бесшовный режим» из §3.4, хотя по флагам выглядит как значение по
-    /// умолчанию. В бесшовном режиме доля получателя доступна всякому, у кого
-    /// есть файл, — здесь она не доступна никому, кроме устройства автора.
+    /// Not "seamless mode" from §3.4, although its flags resemble the
+    /// default. In seamless mode the recipient share is available to anyone holding
+    /// the file; here nobody but the author's device can access it.
     None,
-    /// Долговременный ключ получателя (режим «ключ партнёра», §3.4).
+    /// Recipient's long-term key ("partner key" mode, §3.4).
     Identity { public_key: [u8; 32] },
-    /// Гибридный ключ получателя — `kem_id = 4`, X-Wing (версия 4 формата).
+    /// Recipient hybrid key: `kem_id = 4`, X-Wing (format version 4).
     ///
-    /// В коробке потому, что 1216 байт в перечислении раздули бы КАЖДЫЙ его
-    /// вариант до этого размера, включая `None`.
+    /// Boxed because 1216 bytes in an enum would inflate EVERY
+    /// variant to that size, including `None`.
     Hybrid { public_key: Box<[u8; oc_crypto::xwing::PUBLIC_KEY_LEN]> },
-    /// АППАРАТНЫЙ гибрид получателя — `kem_id = 5`, MLKEM768-P256 (версия 5).
+    /// Recipient HARDWARE hybrid: `kem_id = 5`, MLKEM768-P256 (version 5).
     ///
-    /// Отличается от [`Self::Hybrid`] тем, где живёт классическая половина
-    /// получателя: там программный X25519, здесь P-256 внутри его TPM.
+    /// Differs from [`Self::Hybrid`] in where the recipient's classical half
+    /// lives: software X25519 there, P-256 inside its TPM here.
     HardwareHybrid { public_key: Box<[u8; oc_crypto::mlkem_p256::PUBLIC_KEY_LEN]> },
-    /// Код-претензия (§3.4): доля выводится из кода, в контейнер идёт только
-    /// обязательство.
+    /// Claim code (§3.4): the share derives from the code; only the commitment
+    /// enters the container.
     Claim { secret: ClaimSecret },
 }
 
-/// Слот получателя, который появится в заголовке.
+/// Recipient slot that will appear in the header.
 ///
-/// Отличается от [`Recipient`] тем, что код-претензия здесь уже превращена в
-/// обязательство. Тип нужен именно ради этого: он не даёт существовать
-/// состоянию «режим кода, а обязательства нет».
+/// Unlike [`Recipient`], the claim code has already become a
+/// commitment. The type exists precisely to prevent the
+/// state "claim-code mode without a commitment".
 enum RecipientPlan {
     None,
     Identity([u8; 32]),
@@ -190,40 +190,40 @@ enum RecipientPlan {
     Claim([u8; 32]),
 }
 
-/// Открытые ключи, которые движок кладёт в заголовок и в слоты.
+/// Public keys the engine places in the header and slots.
 ///
-/// Только ОТКРЫТЫЕ. Ни одного секрета устройства сюда не приходит, и это
-/// проверяется типом: движку нечем подписать и нечем расшифровать чужое.
+/// PUBLIC only. No device secret enters here, enforced
+/// by types: the engine has nothing to sign with or decrypt others' data with.
 #[derive(Debug)]
 pub struct PublicKeys<'a> {
-    /// Ключ проверки подписи автора — идёт в заголовок как `author_key`.
+    /// Author verification key, stored in the header as `author_key`.
     pub author: [u8; 32],
-    /// Ключ запечатывания сервера: и `sealing_kid`, и получатель слота сервера.
+    /// Server sealing key: both `sealing_kid` and the server-slot recipient.
     pub authority_sealing: [u8; 32],
-    /// Закреплённый ключ проверки лизинга.
+    /// Pinned lease-verification key.
     pub authority_lease_verify: [u8; 32],
-    /// Программный ключ устройства автора.
+    /// Author-device software key.
     pub device: [u8; 32],
-    /// Аппаратный гибрид устройства автора — MLKEM768-P256, 1249 байт.
+    /// Author-device hardware hybrid: MLKEM768-P256, 1249 bytes.
     ///
-    /// Нужен тогда и только тогда, когда получатель на пятом механизме.
+    /// Required if and only if the recipient uses mechanism five.
     pub device_hardware_hybrid: Option<&'a [u8]>,
-    /// Гибридная открытая половина устройства автора — X-Wing, 1216 байт.
+    /// Author-device hybrid public half: X-Wing, 1216 bytes.
     ///
-    /// Нужна тогда и только тогда, когда получатель гибридный: авторский слот
-    /// обязан быть не слабее слота получателя, иначе постквантовая защита
-    /// теряется на самом файле — см. `seal_slots`.
+    /// Required if and only if the recipient is hybrid: the author slot
+    /// must be no weaker than the recipient slot, or post-quantum protection
+    /// is lost on the file itself; see `seal_slots`.
     pub device_hybrid: Option<&'a [u8]>,
-    /// Аппаратный ключ устройства (P-256 из TPM), если он есть.
+    /// Hardware device key (P-256 from a TPM), if available.
     ///
-    /// Когда он есть, слот автора адресуется ЕМУ, и второго слота на программный
-    /// ключ рядом не пишется: написав оба, мы дали бы противнику, укравшему
-    /// каталог ключей, открыть и новые файлы — то есть аппаратная привязка не
-    /// давала бы ничего, оставаясь надписью.
+    /// When present, the author slot addresses IT; no second slot for a software
+    /// key is written beside it. Writing both would let an attacker who stole
+    /// the key directory open new files too, making hardware binding
+    /// provide nothing but a label.
     pub device_tpm: Option<&'a [u8]>,
 }
 
-/// Что упаковать и по каким правилам.
+/// What to pack and under which rules.
 #[derive(Debug)]
 pub struct PackRequest<'a> {
     pub original_name: &'a str,
@@ -232,18 +232,18 @@ pub struct PackRequest<'a> {
     pub org_id: Vec<u8>,
     pub authority_urls: Vec<String>,
     pub recipient: Recipient,
-    /// Состав соавторов под подписью автора — тег `0x8001` (версия 4).
+    /// Coauthor roster under the author signature: tag `0x8001` (version 4).
     ///
-    /// `None` — тега в заголовке нет, и байты контейнера такие же, как до
-    /// появления поля: эталоны без состава не двигаются. Проверяется тем же
-    /// правилом, что в кодировщике (`Coauthors::validate`), — вызывающий обязан
-    /// отказать раньше, до прогона потока.
+    /// `None` means no header tag and container bytes identical to before
+    /// this field existed: golden artifacts without a roster remain unchanged. Checked using
+    /// the encoder's rule (`Coauthors::validate`); the caller must
+    /// reject earlier, before processing the stream.
     pub coauthors: Option<oc_format::header::Coauthors>,
 }
 
-/// Что движок отдаёт устройству, чтобы то прогнало поток.
+/// What the engine gives the device to process the stream.
 ///
-/// `payload_key`, а не `CEK`: см. модульную докстроку.
+/// `payload_key`, not `CEK`: see module documentation.
 #[derive(Debug)]
 pub struct Plan {
     pub file_id: [u8; 16],
@@ -252,7 +252,7 @@ pub struct Plan {
     pub aead: AeadAlg,
 }
 
-/// Что устройство сообщает движку, прогнав поток.
+/// What the device reports after processing the stream.
 #[derive(Debug, Clone, Copy)]
 pub struct SealedInfo {
     pub total_len: u64,
@@ -260,31 +260,31 @@ pub struct SealedInfo {
     pub tree_root: [u8; 32],
 }
 
-/// Что движок отдаёт после сборки.
+/// What the engine returns after assembly.
 ///
-/// # Транскрипта подписи здесь НЕТ, и это решение
+/// # NO signing transcript here, deliberately
 ///
-/// Он был — и убран, когда движок начали выносить в отдельный процесс. Причина
-/// не в удобстве протокола: устройство обязано подписывать то, что оно САМО
-/// вывело из заголовка, который собирается записать, а не то, что ему прислал
-/// движок. Иначе движок, оказавшись враждебным, подсовывал бы транскрипт одного
-/// заголовка к байтам другого, и подпись автора удостоверяла бы не тот файл.
+/// It existed and was removed when the engine began moving into a separate process. The reason
+/// is not protocol convenience: the device must sign what ITSELF
+/// derived from the header it intends to write, not what the engine
+/// sent. Otherwise a hostile engine could pair one header's transcript
+/// with another header's bytes, making the author's signature authenticate the wrong file.
 ///
-/// Вывод транскрипта — чистая функция от заголовка и набора алгоритмов
-/// (`oc_format::verify::header_signing_transcript`), устройству она доступна, и
-/// стоит ничего. Экономить на ней значило бы менять проверяемое на присланное.
+/// Transcript derivation is a pure function of the header and suite
+/// (`oc_format::verify::header_signing_transcript`), available to the device and
+/// essentially free. Omitting it would exchange verifiable data for supplied data.
 #[derive(Debug)]
 pub struct Assembled {
-    /// Заголовок целиком, готовый к записи.
+    /// Entire header, ready to write.
     pub header: Vec<u8>,
-    /// Изменяемая область с уже наложенным MAC.
+    /// Mutable region with its MAC already applied.
     pub content_desc: Vec<u8>,
 }
 
-/// Секреты одного файла, живущие между двумя вызовами движка.
+/// One file's secrets, living between the engine's two calls.
 ///
-/// Не `Clone` и не `Copy` намеренно: копия этой структуры — копия ключа
-/// содержимого, и заводить её незачем ни в одном сценарии.
+/// Deliberately neither `Clone` nor `Copy`: copying this structure copies the
+/// content key, with no scenario requiring that.
 #[derive(Debug)]
 pub struct Session {
     file_id: [u8; 16],
@@ -310,15 +310,15 @@ impl core::fmt::Debug for RecipientPlan {
     }
 }
 
-/// Первый вызов: породить секреты и отдать ключ полезной нагрузки.
+/// First call: generate secrets and release the payload key.
 ///
-/// # Порядок расхода генератора здесь заморожен
+/// # RNG consumption order is frozen here
 ///
-/// `file_id`, `header_salt`, `CEK`, доля A, доля B — ровно в этом порядке. Он
-/// не косметический: golden-эталоны сняты сидированным генератором, и любая
-/// перестановка меняет каждый байт файла. Тот же довод запрещает добавлять сюда
-/// новый вызов генератора «в начало» — только в конец, и только вместе с
-/// решением о версии формата.
+/// `file_id`, `header_salt`, `CEK`, share A, share B, precisely in that order. It
+/// is not cosmetic: golden artifacts use a seeded RNG; any
+/// reordering changes every file byte. For the same reason, a new RNG call cannot be
+/// inserted "at the start", only at the end, and only alongside
+/// a format-version decision.
 pub fn plan<G: CryptoRng + ?Sized>(request: &PackRequest<'_>, rng: &mut G) -> (Session, Plan) {
     let mut file_id = [0u8; 16];
     let mut header_salt = [0u8; 32];
@@ -363,16 +363,16 @@ pub fn plan<G: CryptoRng + ?Sized>(request: &PackRequest<'_>, rng: &mut G) -> (S
 }
 
 impl Session {
-    /// Второй вызов: собрать заголовок и изменяемую область.
+    /// Second call: assemble header and mutable region.
     ///
-    /// Заголовок собирается ДВАЖДЫ, и это не расточительство: хеш ядра обязан
-    /// существовать раньше ключевого материала, который к нему привязан (И-3),
-    /// а слоты и завёрнутый ключ из этого хеша вырезаны. Первый проход даёт
-    /// каркас без них, второй — настоящий заголовок.
+    /// The header is assembled TWICE, not wastefully: the core hash must
+    /// exist before key material bound to it (I-3),
+    /// while slots and the wrapped key are excluded from that hash. The first pass yields
+    /// a skeleton without them; the second yields the actual header.
     ///
     /// # Errors
-    /// Отдаёт [`EngineError`] при отказе кодирования, запечатывания или при
-    /// расхождении пересчитанного хеша ядра.
+    /// Returns [`EngineError`] on encoding or sealing failure, or a
+    /// recomputed core-hash mismatch.
     pub fn assemble<G: CryptoRng + ?Sized>(
         self,
         request: &PackRequest<'_>,
@@ -594,11 +594,11 @@ fn both_shares(a: &SecretA, b: &SecretB) -> Zeroizing<Vec<u8>> {
     out
 }
 
-/// Запечатать слот на ключ P-256 — тот случай, когда получатель это TPM.
+/// Seal a slot to a P-256 key, when the recipient is a TPM.
 ///
-/// Отдельная функция, а не флаг у [`seal_slot`], по той же причине, по которой
-/// разведены `seal` и `seal_p256` в крипте: у механизмов разный порядок расхода
-/// генератора, а у X25519 он заморожен golden-эталонами.
+/// A separate function rather than a [`seal_slot`] flag, for the same reason
+/// crypto separates `seal` and `seal_p256`: mechanisms consume the
+/// RNG differently, and X25519's order is frozen by golden artifacts.
 #[allow(clippy::too_many_arguments)]
 fn seal_slot_p256<G: CryptoRng + ?Sized>(
     kind: SlotKind,
@@ -626,11 +626,11 @@ fn seal_slot_p256<G: CryptoRng + ?Sized>(
     }))
 }
 
-/// Запечатать слот ГИБРИДОМ X-Wing — `kem_id = 4`.
+/// Seal a slot with the X-Wing HYBRID, `kem_id = 4`.
 ///
-/// Отдельная функция рядом с [`seal_slot`] и [`seal_slot_p256`] по той же
-/// причине, что и они друг рядом с другом: у механизма свой порядок расхода
-/// генератора, а у X25519 он заморожен эталонами.
+/// A separate function beside [`seal_slot`] and [`seal_slot_p256`] for the same
+/// reason those are separate: each mechanism has its own RNG consumption
+/// order, while X25519's is frozen by golden artifacts.
 #[allow(clippy::too_many_arguments)]
 fn seal_slot_xwing<G: CryptoRng + ?Sized>(
     kind: SlotKind,
@@ -658,7 +658,7 @@ fn seal_slot_xwing<G: CryptoRng + ?Sized>(
     }))
 }
 
-/// Запечатать слот АППАРАТНЫМ гибридом — `kem_id = 5`.
+/// Seal a slot with a HARDWARE hybrid, `kem_id = 5`.
 #[allow(clippy::too_many_arguments)]
 fn seal_slot_mlkem_p256<G: CryptoRng + ?Sized>(
     kind: SlotKind,
@@ -686,13 +686,13 @@ fn seal_slot_mlkem_p256<G: CryptoRng + ?Sized>(
     }))
 }
 
-/// Запечатать один слот.
+/// Seal one slot.
 ///
-/// `info` различает назначение слота, `aad` — хеш политики: шифротекст нельзя
-/// перенести в контейнер с другими правилами. Восемь аргументов — много, и
-/// линтер прав; но каждый здесь обязателен и содержателен, а собрать их в
-/// структуру значило бы завести тип, живущий ровно один вызов, и спрятать за ним
-/// то, что при чтении вызова как раз надо видеть.
+/// `info` distinguishes slot purpose; `aad` is the policy hash, preventing ciphertext from
+/// moving to a container with different rules. Eight arguments are many,
+/// and the linter is right, but each is mandatory and meaningful; gathering them into
+/// a structure would introduce a type lasting exactly one call, hiding
+/// what readers of that call need to see.
 #[allow(clippy::too_many_arguments)]
 fn seal_slot<G: CryptoRng + ?Sized>(
     kind: SlotKind,
@@ -723,11 +723,11 @@ fn seal_slot<G: CryptoRng + ?Sized>(
     }))
 }
 
-/// Слот кода-претензии: обязательство и ничего больше.
+/// Claim-code slot: commitment and nothing more.
 ///
-/// Поля запечатывания заполняются нулями, а `ct` остаётся пустым, и это не
-/// заглушки «чтобы прошло по структуре»: запечатывать здесь **нечего**. Доля
-/// получателя выводится из кода, а код в контейнер не попадает.
+/// Sealing fields are zeroed and `ct` stays empty, not as placeholders
+/// "to satisfy the structure": there is **nothing to seal**. The recipient
+/// share derives from the code, which never enters the container.
 fn claim_slot(claim_commit: [u8; 32], commitment: [u8; 32]) -> KeySlot {
     KeySlot::Known(KnownSlot {
         kind: SlotKind::RecipientClaim,
@@ -747,7 +747,7 @@ fn claim_slot(claim_commit: [u8; 32], commitment: [u8; 32]) -> KeySlot {
     })
 }
 
-/// Зашифровать приватные метаданные под собственным ключом.
+/// Encrypt private metadata under its own key.
 fn seal_private_meta<G: CryptoRng + ?Sized>(
     cek: &Cek,
     header_salt: &[u8; 32],
@@ -785,24 +785,24 @@ fn seal_private_meta<G: CryptoRng + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    //! Порядок расхода генератора — НАЗВАННЫЙ, а не подразумеваемый.
+    //! RNG consumption order is NAMED rather than implied.
     //!
-    //! Докстрока [`plan`] объявляет порядок замороженным: `file_id`,
-    //! `header_salt`, `CEK`, доля A, доля B. Держали его до сих пор только
-    //! эталоны — golden в `cc-cli` и `hardware_hybrid_golden.rs` рядом. Эталон
-    //! на перестановку двух соседних вызовов ответит «байты не сошлись на
-    //! позиции N», и по такому ответу порядок не восстановить: сходятся все
-    //! байты файла сразу, потому что из этих пяти величин выведено всё
-    //! остальное.
+    //! [`plan`]'s documentation freezes the order: `file_id`,
+    //! `header_salt`, `CEK`, share A, share B. Until now only golden
+    //! artifacts guarded it: those in `cc-cli` and adjacent `hardware_hybrid_golden.rs`. An artifact
+    //! responds to swapped adjacent calls with "bytes differ at
+    //! position N", insufficient to reconstruct order: all file bytes
+    //! change together because everything else derives from these five
+    //! values.
     //!
-    //! Четыре запроса из пяти — по 32 байта, и по одним длинам перестановка
-    //! соседей НЕ видна. Поэтому сверяется ещё и то, КУДА легли байты: кусок
-    //! потока под номером K обязан оказаться в поле с именем X, и при сдвиге
-    //! проба называет, кто пришёл на его место.
+    //! Four of five requests are 32 bytes, so lengths alone CANNOT reveal
+    //! neighbor swaps. Therefore we also check WHERE the bytes went: stream
+    //! piece K must land in field X, and on a shift
+    //! the probe names what took its place.
     //!
-    //! Проба живёт внутри крейта, а не в `tests/`: поля [`Session`] приватны, и
-    //! открывать их наружу ради сверки значило бы расширить интерфейс движка
-    //! ради теста — то есть отдать секреты файла всякому, кто подключит крейт.
+    //! This probe is inside the crate rather than `tests/`: [`Session`] fields are private;
+    //! exposing them for comparison would widen the engine API for a test,
+    //! releasing file secrets to anyone importing the crate.
 
     // Литы сняты для теста: `unwrap`/`panic` — словарь проверки, индексирование
     // и арифметика — нарезка потока заведомо известной длины.
@@ -817,22 +817,22 @@ mod tests {
     use super::{PackRequest, Recipient, plan};
     use oc_policy::{Action, Policy};
 
-    /// Сколько байт покрывает сверка адресов: 16 + 32 × 4.
+    /// Bytes covered by location checks: 16 + 32 × 4.
     const WATCHED: usize = 144;
 
-    /// Байт потока по его номеру.
+    /// Stream byte by index.
     ///
-    /// Своя дешёвая последовательность, а не хеш: криптографическое качество
-    /// здесь не нужно ни на грош — нужно лишь, чтобы куски были различимы и
-    /// воспроизводимы, а зависимости у движка не прибавилось.
+    /// A cheap custom sequence, not a hash: cryptographic quality
+    /// is entirely unnecessary; pieces need only be distinguishable and
+    /// reproducible, without another engine dependency.
     fn stream_byte(index: usize) -> u8 {
         (index as u8).wrapping_mul(31).wrapping_add(7)
     }
 
-    /// Генератор, который ЗАПОМИНАЕТ длины запросов по порядку.
+    /// RNG that REMEMBERS requested lengths in order.
     ///
-    /// Выдаёт заранее известный поток, поэтому по адресу байта видно, какой
-    /// запрос его получил.
+    /// Emits a known stream, letting byte position identify which
+    /// request received it.
     struct Recorder {
         next: usize,
         lengths: Vec<usize>,
@@ -873,7 +873,7 @@ mod tests {
         }
     }
 
-    /// ПЯТЬ ЗАПРОСОВ К ГЕНЕРАТОРУ, В НАЗВАННОМ ПОРЯДКЕ И В НАЗВАННЫЕ ПОЛЯ.
+    /// FIVE RNG REQUESTS, IN THE NAMED ORDER AND INTO THE NAMED FIELDS.
     #[test]
     fn the_generator_is_drawn_from_in_the_frozen_order() {
         let mut rng = Recorder { next: 0, lengths: Vec::new() };
@@ -924,10 +924,10 @@ mod tests {
         assert_eq!(at, WATCHED, "сверено не всё, что обещано: {at} байт вместо {WATCHED}");
     }
 
-    /// ПОЛОЖИТЕЛЬНЫЙ КОНТРОЛЬ: сверка адресов ловит перестановку двух соседей.
+    /// POSITIVE CONTROL: location checking detects swapping two neighbors.
     ///
-    /// Без него проба выше зеленела бы и на генераторе, отдающем одни нули, —
-    /// там все куски равны, и любой адрес «совпадает» с любым.
+    /// Without it, the probe above would pass even with an all-zero RNG,
+    /// where all pieces are equal and every location "matches" every other.
     #[test]
     fn the_order_check_would_notice_two_neighbours_swapped() {
         let mut rng = Recorder { next: 0, lengths: Vec::new() };

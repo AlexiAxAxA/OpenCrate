@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="510" viewBox="0 0 1120 510" role="img" aria-labelledby="title desc">
+<title id="title">From a document to an authorized action</title><desc id="desc">The publisher plans recipients, encrypts chunks and signs a header. The application transports the encrypted container. The recipient verifies evidence, evaluates policy, enforces obligations and authenticates chunks before exposing plaintext.</desc>
+<rect width="1120" height="510" rx="22" fill="#111f33"/>
+<g font-family="Segoe UI,Arial,sans-serif">
+<text x="43" y="49" font-size="13" letter-spacing="2.4" fill="#86bbdf">THE DOCUMENT LIFECYCLE</text>
+<text x="43" y="93" font-size="31" font-weight="700" fill="#f5f8ff">Protect the bytes. Decide how they may be used.</text>
+<rect x="43" y="137" width="305" height="287" rx="16" fill="#1e3851" stroke="#42647d"/>
+<rect x="408" y="137" width="305" height="287" rx="16" fill="#203249" stroke="#496179"/>
+<rect x="773" y="137" width="305" height="287" rx="16" fill="#3b302b" stroke="#806144"/>
+<g font-size="13" letter-spacing="2"><text x="68" y="169" fill="#84d1f2">01 / PUBLISHER</text><text x="433" y="169" fill="#a6c7e5">02 / DELIVERY</text><text x="798" y="169" fill="#f3c795">03 / RECIPIENT</text></g>
+<g font-size="23" font-weight="600" fill="#fff"><text x="68" y="209">Package</text><text x="433" y="209">Transport</text><text x="798" y="209">Verify + use</text></g>
+<g font-size="16" fill="#d1deeb">
+<text x="68" y="253">Choose recipients and policy</text><text x="68" y="289">Plan slots + encrypt chunks</text><text x="68" y="325">Assemble + sign the header</text><text x="68" y="383" font-size="13" fill="#8db8d8">Application + Engine / Crypto / Format</text>
+<text x="433" y="253">An encrypted .cc container</text><text x="433" y="289">Your storage and transport</text><text x="433" y="325">Access is decided separately</text><text x="433" y="383" font-size="13" fill="#9bb7d0">Infrastructure owned by the host</text>
+<text x="798" y="249">Authenticate header + evidence</text><text x="798" y="280">Evaluate action and context</text><text x="798" y="311">Enforce returned obligations</text><text x="798" y="342">Authenticate chunks before use</text><text x="798" y="383" font-size="13" fill="#d5b99c">Application + Format / Protocol / Policy</text>
+</g>
+<path d="M353 279h46m-8-7 8 7-8 7M718 279h46m-8-7 8 7-8 7" fill="none" stroke="#a6c7df" stroke-width="2"/>
+<text x="43" y="468" font-size="16" fill="#a5bbd1">Trust, keys, time and enforcement belong to the host. The core makes the format and decisions inspectable.</text>
+</g></svg>

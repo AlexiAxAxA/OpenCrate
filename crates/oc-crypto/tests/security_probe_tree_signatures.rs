@@ -11,20 +11,20 @@
     clippy::disallowed_methods,
     clippy::disallowed_types
 )]
-//! Направление 7: примитивы, дерево целостности и подписи.
+//! Track 7: primitives, integrity tree, and signatures.
 //!
-//! Файл сознательно делится на две части.
+//! This file deliberately has two parts.
 //!
-//! Часть I — попытки СЛОМАТЬ дерево: сверка формы с эталонной реализацией
-//! RFC 6962, согласованность четырёх мест, где записано правило продвижения,
-//! поиск двух наборов листьев с одним корнем (класс CVE-2012-2459) и перенос
-//! доказательства на другой индекс или другую длину.
+//! Part I: attempts to BREAK the tree, comparing shape with the RFC 6962
+//! reference implementation, agreement between the four sites encoding promotion,
+//! searching for two leaf sets with one root (CVE-2012-2459 class), and moving
+//! a proof to another index or length.
 //!
-//! Часть II — тесты с префиксом `probe_bug_`: заведены как воспроизведение
-//! найденных дефектов и падали на тогдашнем коде. Дефект исправлен, тест
-//! работает как регрессионный. Описание набора обновлено вместе с кодом —
-//! шапка, пережившая исправление, вводит в заблуждение о состоянии сборки
-//! ровно так же, как комментарий, переживший смену конструкции.
+//! Part II: tests prefixed `probe_bug_`, introduced to reproduce
+//! found defects and failing against the code at that time. After fixes, each
+//! serves as a regression. The suite description was updated alongside the code:
+//! a header outliving a fix misrepresents the build's state
+//! just as a comment outliving a construction change does.
 
 use std::collections::BTreeMap;
 
@@ -37,11 +37,11 @@ use zeroize::ZeroizeOnDrop;
 // Инструментарий
 // ---------------------------------------------------------------------------
 
-/// Лист, детерминированно выведенный из индекса и «поколения».
+/// Leaf deterministically derived from index and "generation".
 ///
-/// Поколение нужно, чтобы получить второй набор листьев с теми же индексами:
-/// без него нельзя проверить, что корень зависит от содержимого, а не только от
-/// числа листьев.
+/// Generation provides a second leaf set with the same indices:
+/// without it, one cannot test that the root depends on content rather than only
+/// leaf count.
 fn leaf(index: u32, generation: u8) -> Leaf {
     let seed = *blake3::hash(&[&index.to_be_bytes()[..], &[generation]].concat()).as_bytes();
     let mut nonce = [0u8; 24];
@@ -57,11 +57,11 @@ fn leaves(count: u32) -> Vec<Leaf> {
     (0..count).map(|i| leaf(i, 0)).collect()
 }
 
-/// Эталон RFC 6962 §2.1, дословно:
-/// `MTH(D[n]) = HASH(0x01 ‖ MTH(D[0:k]) ‖ MTH(D[k:n]))`, где `k` — наибольшая
-/// степень двойки, **строго меньшая** `n`. Реализация рекурсивная и намеренно
-/// не похожа на проверяемую: совпадение двух независимых записей одного правила
-/// — это и есть доказательство, что правило записано верно.
+/// RFC 6962 §2.1 reference, verbatim:
+/// `MTH(D[n]) = HASH(0x01 ‖ MTH(D[0:k]) ‖ MTH(D[k:n]))`, where `k` is the largest
+/// power of two **strictly less than** `n`. The implementation is recursive and deliberately
+/// unlike the tested one: agreement between two independent expressions of one rule
+/// is precisely evidence that the rule is encoded correctly.
 fn rfc6962_root(set: &[Leaf]) -> [u8; 32] {
     match set.len() {
         0 => panic!("RFC 6962 не определяет MTH для пустого набора"),
@@ -76,19 +76,19 @@ fn rfc6962_root(set: &[Leaf]) -> [u8; 32] {
     }
 }
 
-/// Эталон RFC 6962 даёт ВЕРШИНУ (MTH), а наружу дерево отдаёт корень —
-/// вершину, связанную с числом листьев. Проба сравнивает форму, поэтому обязана
-/// сравнивать сопоставимое: эталонная вершина оборачивается тем же root_of,
-/// что и настоящая. Сравнивать вершину с корнем напрямую значило бы объявить
-/// расхождением ровно то исправление, ради которого связка и заведена.
+/// The RFC 6962 reference yields the APEX (MTH), whereas the tree exposes a root,
+/// the apex bound to leaf count. The probe compares shape, so it must
+/// compare like with like: the reference apex is wrapped in the same root_of
+/// as the actual apex. Directly comparing apex and root would misclassify
+/// as divergence the very fix for which the binding was introduced.
 fn rfc6962_reference_root(set: &[Leaf]) -> [u8; 32] {
     let count = u32::try_from(set.len()).expect("набор не влезает в u32");
     root_of(count, &rfc6962_root(set))
 }
 
-/// Форма пути от листа до корня: на каких уровнях узел продвигается.
-/// Второе независимое место, где записано правило, — специально, чтобы поймать
-/// расхождение между `is_promoted` и остальным кодом.
+/// Path shape from leaf to root: levels at which a node is promoted.
+/// A second independent encoding of the rule, specifically to catch
+/// divergence between `is_promoted` and the remaining code.
 fn promotion_pattern(count: u32, index: u32) -> Vec<bool> {
     let mut pattern = Vec::new();
     let mut len = count as usize;
@@ -105,11 +105,11 @@ fn promotion_pattern(count: u32, index: u32) -> Vec<bool> {
 // Часть I. Дерево целостности
 // ---------------------------------------------------------------------------
 
-/// §6.3: «Нечётный узел продвигается, как в RFC 6962».
+/// §6.3: "An odd node is promoted, as in RFC 6962".
 ///
-/// Проверяется не комментарий, а байты: корень `MerkleTree::build` обязан
-/// совпасть с корнем эталонной рекурсии на каждом числе листьев. Расхождение
-/// проявилось бы только при определённом `n`, то есть у заказчика.
+/// Tests bytes rather than comments: `MerkleTree::build`'s root must
+/// match the reference recursion's root at every leaf count. Divergence
+/// would appear only at particular `n`, hence at a customer's site.
 #[test]
 fn the_shape_matches_the_rfc6962_reference_at_every_leaf_count() {
     let mut sizes: Vec<u32> = (1..=300).collect();
@@ -124,9 +124,9 @@ fn the_shape_matches_the_rfc6962_reference_at_every_leaf_count() {
     }
 }
 
-/// Четыре места, где живёт правило продвижения: построение, обновление, сбор
-/// доказательства и его проверка. Разойдись они хоть на одном уровне —
-/// доказательства перестали бы проверяться при определённом числе чанков.
+/// Four sites implement promotion: construction, updating, proof collection,
+/// and verification. Divergence at even one level would make
+/// proofs fail at particular chunk counts.
 #[test]
 fn all_four_places_agree_at_every_leaf_count_and_index() {
     let mut sizes: Vec<u32> = (1..=64).collect();
@@ -172,11 +172,11 @@ fn all_four_places_agree_at_every_leaf_count_and_index() {
     }
 }
 
-/// CVE-2012-2459: две разные последовательности листьев с одним корнем.
+/// CVE-2012-2459: two different leaf sequences with one root.
 ///
-/// Перебор ИСЧЕРПЫВАЮЩИЙ по алфавиту из трёх листьев и длинам 1…6 — это 1092
-/// последовательности, включая все хвостовые дубликаты, все перестановки и все
-/// повторы, ради которых уязвимость и существует.
+/// EXHAUSTIVE enumeration over a three-leaf alphabet and lengths 1…6: 1092
+/// sequences, including every trailing duplicate, permutation, and
+/// repetition implicated in the vulnerability.
 #[test]
 fn no_two_distinct_leaf_sequences_share_a_root() {
     let alphabet = [leaf(0, 0), leaf(1, 0), leaf(2, 0)];
@@ -202,15 +202,15 @@ fn no_two_distinct_leaf_sequences_share_a_root() {
     assert_eq!(roots.len(), total, "перебор выродился");
 }
 
-/// Перенос доказательства на другой индекс или другую длину.
+/// Moving a proof to another index or length.
 ///
-/// Лист считается через `leaf_of`, то есть так, как его считает читатель:
-/// номер чанка входит в хеш листа. Поэтому «доказательство листа i, выданное за
-/// доказательство листа j» означает проверку с листом, посчитанным для j.
+/// The leaf is computed through `leaf_of`, just as the reader computes it:
+/// the chunk index enters its hash. Thus "proof of leaf i presented as
+/// proof of leaf j" means verification with a leaf computed for j.
 ///
-/// Единственное исключение — то, что признано в самом коде: при `j == i` и
-/// совпавшей форме пути деревья неотличимы, потому что различающей информации во
-/// входных данных нет. Настоящую границу задаёт `chunk_count` под MAC.
+/// The only exception is acknowledged by the code itself: with `j == i` and
+/// identical path shape, trees are indistinguishable because input lacks
+/// distinguishing information. The actual boundary is MAC-covered `chunk_count`.
 #[test]
 fn a_proof_does_not_move_to_another_index_or_another_leaf_count() {
     for count in [2u32, 3, 4, 5, 6, 7, 8, 9, 12, 16, 17] {
@@ -244,9 +244,9 @@ fn a_proof_does_not_move_to_another_index_or_another_leaf_count() {
     }
 }
 
-/// `root()` содержит `unwrap_or([0u8; 32])`. Ветка обязана быть недостижимой:
-/// нулевой корень — это значение, которое противник может вычислить, не имея
-/// ничего.
+/// `root()` contains `unwrap_or([0u8; 32])`. That branch must be unreachable:
+/// a zero root is a value an adversary can compute while possessing
+/// nothing.
 #[test]
 fn the_degenerate_zero_root_is_unreachable() {
     for count in 1..=128u32 {
@@ -258,8 +258,8 @@ fn the_degenerate_zero_root_is_unreachable() {
     assert!(MerkleTree::build(&[]).is_err());
 }
 
-/// Лист и внутренний узел обязаны лежать в разных доменах, иначе внутренний узел
-/// выдаётся за лист и дерево из n листьев подменяется деревом из меньшего числа.
+/// Leaves and internal nodes must inhabit different domains, or an internal node
+/// can masquerade as a leaf, replacing an n-leaf tree with a smaller one.
 #[test]
 fn a_node_hash_is_never_a_leaf_hash() {
     let a = leaf(0, 0);
@@ -276,10 +276,10 @@ fn a_node_hash_is_never_a_leaf_hash() {
 // Часть I (продолжение). Транскрипт и секреты
 // ---------------------------------------------------------------------------
 
-/// Набор меток беспрефиксный ⇒ `label₁ ‖ X` никогда не равно `label₂ ‖ Y` при
-/// разных метках. Штатный тест проверяет только сами метки; здесь проверяется
-/// следствие, ради которого требование и введено: HKDF `info` собирается
-/// конкатенацией без разделителя.
+/// Prefix-free labels ⇒ `label₁ ‖ X` never equals `label₂ ‖ Y` for
+/// different labels. Ordinary tests check the labels themselves; this checks
+/// the consequence motivating the requirement: HKDF `info` is assembled
+/// by concatenation without delimiters.
 #[test]
 fn no_two_labels_can_be_made_equal_by_appending_anything() {
     // Метки берутся БАЙТАМИ: беспрефиксность — свойство строк, и тип `Label`
@@ -300,8 +300,8 @@ fn no_two_labels_can_be_made_equal_by_appending_anything() {
     }
 }
 
-/// Разделитель после метки обязан быть недостижим изнутри самой метки: иначе
-/// «метка ‖ 0x00 ‖ данные» перестаёт однозначно разделяться.
+/// The delimiter after a label must not occur inside the label, or
+/// "label ‖ 0x00 ‖ data" ceases to split unambiguously.
 #[test]
 fn no_label_contains_the_separator_byte() {
     for l in label::ALL.iter().map(|l| l.as_bytes()) {
@@ -309,8 +309,8 @@ fn no_label_contains_the_separator_byte() {
     }
 }
 
-/// `field` обязан быть инъективным: последовательность полей переменной длины
-/// восстанавливается из байтов однозначно.
+/// `field` must be injective: a variable-length field sequence must be uniquely
+/// recoverable from bytes.
 #[test]
 fn field_is_injective_on_realistic_lengths() {
     let mut seen = BTreeMap::new();
@@ -325,7 +325,7 @@ fn field_is_injective_on_realistic_lengths() {
     }
 }
 
-/// Все типы секретов обязаны затираться при уничтожении, включая клоны.
+/// All secret types must wipe on destruction, including clones.
 #[test]
 fn every_secret_type_is_zeroize_on_drop() {
     fn assert_zod<T: ZeroizeOnDrop>() {}
@@ -354,24 +354,24 @@ fn every_secret_type_is_zeroize_on_drop() {
 // Часть II. Заведены как воспроизведение дефектов; ПОЧИНЕНО, теперь регрессия.
 // ---------------------------------------------------------------------------
 
-/// ДЕФЕКТ (исправлен): идентификатор хеша дерева разбирался, входил в
-/// подписанный автором заголовок — и нигде не применялся.
+/// BUG (fixed): the tree-hash identifier parsed and entered the author-signed
+/// header, but was never applied.
 ///
-/// `merkle::leaf_of` и `merkle::node_of` жёстко зашивают BLAKE3 и не принимают
-/// `TreeHashAlg` ни аргументом, ни как-либо ещё (см. их сигнатуры), а
-/// `TreeHashAlg::from_u8(2)` отвечал `Ok(Sha256)`. То есть сборка ЗАЯВЛЯЛА
-/// поддержку SHA-256 для дерева и молча считала BLAKE3 — тот же класс дефекта,
-/// из-за которого в JWS появилось `alg: none`.
+/// `merkle::leaf_of` and `merkle::node_of` hardcode BLAKE3 and accept
+/// no `TreeHashAlg` argument or other input (see signatures), while
+/// `TreeHashAlg::from_u8(2)` returned `Ok(Sha256)`. The build thus CLAIMED
+/// SHA-256 tree support while silently computing BLAKE3, the same defect class
+/// that produced `alg: none` in JWS.
 ///
-/// Исправлено вторым рубежом `merkle::ensure_supported`, который вызывается
-/// прямо из `from_u8`. Сравнение с AEAD, стоявшее здесь раньше («у AEAD второй
-/// рубеж есть, а у дерева нет»), больше не описывает код: у AEAD рубеж тогда
-/// стоял в `seal_with`/`open_with`, то есть срабатывал лишь на первом чанке, и
-/// пункт Д-9 поднял его в `AeadAlg::from_u8`. Теперь оба идентификатора
-/// проверяются одинаково и в одном месте — на разборе.
+/// Fixed by a second boundary, `merkle::ensure_supported`, called
+/// directly from `from_u8`. The former AEAD comparison here ("AEAD has a second
+/// boundary, the tree does not") no longer describes the code: AEAD's boundary then
+/// lived in `seal_with`/`open_with`, firing only at the first chunk;
+/// item D-9 moved it into `AeadAlg::from_u8`. Both identifiers are now
+/// checked identically, at the same point: parsing.
 ///
-/// Тест утверждает то, что обязано быть верно: сборка, не умеющая считать дерево
-/// на SHA-256, обязана отвергать этот идентификатор, а не принимать его.
+/// The test asserts what must hold: a build unable to compute a SHA-256
+/// tree must reject this identifier rather than accept it.
 #[test]
 fn probe_bug_a_tree_hash_identifier_this_build_cannot_honour_is_accepted() {
     // Лист считается ровно как BLAKE3, независимо ни от чего. Прообраз собран

@@ -8,21 +8,21 @@
     clippy::disallowed_methods,
     clippy::disallowed_types
 )]
-//! Замороженные тест-векторы ключевой схемы (KAT).
+//! Frozen key-schedule known-answer tests (KAT).
 //!
-//! Векторы лежат **вне** кода — в `tests/kat/` в корне репозитория, — и это не
-//! организационная деталь. Их назначение в том, чтобы вторая реализация формата
-//! (сервер, редактор, чужой клиент) могла свериться, не читая наш Rust. Вектор,
-//! записанный константой в тесте, такой возможности не даёт.
+//! Vectors live **outside** code, in the repository-root `tests/kat/`; this is not
+//! an organizational detail. Their purpose is to let a second format implementation
+//! (server, editor, third-party client) compare results without reading our Rust. A vector
+//! encoded as a test constant cannot provide that.
 //!
-//! **Правило изменения.** Файлы `tests/kat/*.kat` меняются только вместе с
-//! решением, записанным в `docs/format.md`, и с подъёмом версии формата. «Тест
-//! упал → поправил вектор» запрещено: в этом случае вектор перестаёт быть
-//! доказательством и становится отражением кода, а тест — тавтологией.
+//! **Change rule.** `tests/kat/*.kat` files change only alongside
+//! a decision recorded in `docs/format.md` and a format-version increase. "Test
+//! failed → fix the vector" is forbidden: the vector would stop being
+//! evidence and become a reflection of code, making the test tautological.
 //!
-//! Формат файла нарочно примитивен: `имя = шестнадцатеричные байты`, комментарии
-//! с `#`. Разбор — двадцать строк без зависимостей, чтобы у сверяющегося не было
-//! повода не свериться.
+//! The file format is deliberately primitive: `name = hexadecimal bytes`, with
+//! `#` comments. Twenty dependency-free parsing lines leave an implementer
+//! no excuse not to compare.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -49,19 +49,19 @@ const CEK: [u8; 32] = [0xc3; 32];
 const CLAIM: [u8; 32] = [0x44; 32];
 const CORE_HASH: [u8; 32] = [0x0c; 32];
 const CHUNK_SIZE: u32 = 65536;
-/// Канонический текст кода-претензии: 30 символов алфавита §3.4 без разделителей.
+/// Canonical claim-code text: 30 characters from the §3.4 alphabet, no separators.
 ///
-/// Это ВХОД производной K14, а не пример для человека: человеку код печатается
-/// группами через дефис, но в хеш идёт канонический вид, и фиксировать надо
-/// именно его.
+/// This is derivation K14 INPUT, not a human-facing example: people see the code
+/// in hyphen-separated groups, but the canonical form enters the hash, so that
+/// is what must be frozen.
 const CLAIM_CODE: &[u8] = b"7K3QM9XBTZ4HVND2PRWC6JSFG8YKM0";
 const NONCE: [u8; 24] = [0x01; 24];
 const TAG: [u8; 16] = [0x02; 16];
-/// Шифротекст чанка для векторов дерева. Входит в прообраз листа (§6.3), поэтому
-/// обязан быть зафиксирован наравне с nonce и тегом.
+/// Chunk ciphertext for tree vectors. Included in the leaf preimage (§6.3), so
+/// it must be frozen alongside nonce and tag.
 ///
-/// Тридцать три байта, а не круглое число: длина входит в прообраз как `u64be`, и
-/// вектор на длине, не кратной ничему, ловит подмену ширины поля длины.
+/// Thirty-three bytes, not a round number: length enters the preimage as `u64be`,
+/// and a vector of an unaligned length detects length-field width substitution.
 const CT: [u8; 33] = [0x03; 33];
 
 fn kat_path(name: &str) -> PathBuf {
@@ -69,7 +69,7 @@ fn kat_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/kat").join(name)
 }
 
-/// Разбор файла векторов: `имя = hex`, строки с `#` и пустые пропускаются.
+/// Parse a vector file: `name = hex`; skip empty lines and `#` comments.
 fn load(name: &str) -> BTreeMap<String, Vec<u8>> {
     let path = kat_path(name);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
@@ -106,10 +106,10 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Сверить значение с замороженным вектором.
+/// Compare a value with the frozen vector.
 ///
-/// Сообщение об ошибке намеренно длинное: увидевший его первым делом захочет
-/// «поправить вектор», и остановить его может только текст.
+/// The error message is deliberately long: the first reader will want to
+/// "fix the vector", and only the text can stop them.
 fn check(vectors: &BTreeMap<String, Vec<u8>>, name: &str, actual: &[u8]) {
     let expected = vectors
         .get(name)
@@ -125,20 +125,20 @@ fn check(vectors: &BTreeMap<String, Vec<u8>>, name: &str, actual: &[u8]) {
     );
 }
 
-/// Пересчитать все векторы и напечатать их в формате файлов.
+/// Recompute all vectors and print them in the file format.
 ///
-/// Помечен `#[ignore]`, потому что это не проверка, а инструмент. Запускается
-/// вручную:
+/// Marked `#[ignore]` because it is a tool, not a check. Run
+/// manually:
 ///
 /// ```text
 /// cargo test -p oc-crypto --test kat -- --ignored --nocapture
 /// ```
 ///
-/// Существует затем, что перевыпуск векторов иногда законен — при осознанном
-/// изменении формата вместе с записью в `docs/format.md` и подъёмом версии.
-/// Инструмент для этого лучше, чем правка тридцати строк руками: руками
-/// поправят ровно те строки, которые упали, и молча оставят рассогласованными
-/// остальные.
+/// Exists because reissuing vectors is sometimes legitimate: a deliberate format
+/// change, documented in `docs/format.md`, with a version increase.
+/// A tool is better than editing thirty lines manually: by hand people
+/// would fix only the failing lines and silently leave the others
+/// inconsistent.
 #[test]
 #[ignore = "инструмент перевыпуска векторов, а не проверка"]
 fn print_all_vectors_for_regeneration() {
@@ -239,8 +239,8 @@ fn the_chunk_aad_matches_its_frozen_vectors() {
 // Дерево целостности (§6.3)
 // --------------------------------------------------------------------------
 
-/// Лист номер `i`, выведенный детерминированно: nonce и тег — производные от
-/// номера, чтобы вектор не зависел от генератора.
+/// Leaf `i`, derived deterministically: nonce and tag derive from
+/// the index, keeping the vector independent of the RNG.
 fn deterministic_leaf(index: u32) -> Leaf {
     let seed = *blake3::hash(&index.to_be_bytes()).as_bytes();
     let mut nonce = [0u8; 24];
@@ -277,25 +277,25 @@ fn the_tree_matches_its_frozen_vectors() {
 // Запечатывание слота (K10) и связанные данные (§3.3, §3.5, §2.0)
 // --------------------------------------------------------------------------
 
-/// Приватный ключ получателя вектора. Фиксирован навсегда.
+/// Vector recipient's private key. Fixed forever.
 const SEAL_RECIPIENT_SECRET: [u8; 32] = [0x5e; 32];
-/// Связанные данные запечатывания — по формату это `policy_hash`.
+/// Sealing associated data: `policy_hash` in the format.
 const SEAL_AAD: [u8; 32] = [0x9d; 32];
 
-/// Вектор `Seal` заморожен как вектор **открытия**, а не запечатывания.
+/// The `Seal` vector is frozen as an **opening** vector, not a sealing vector.
 ///
-/// Это не упрощение, а единственная честная форма. Запечатывание случайно по
-/// построению: эфемерная пара берётся из генератора, nonce выводится из засева
-/// (§3.1), и воспроизвести те же байты вторая реализация не может и не должна.
-/// Открытие же полностью детерминировано, и именно его выполняет всякий, кто
-/// читает контейнер: сервер открывает свой слот, получатель — свой.
+/// Not a simplification, but the only honest form. Sealing is random by
+/// construction: the ephemeral pair comes from an RNG, the nonce from a seed
+/// (§3.1), and a second implementation cannot and should not reproduce identical bytes.
+/// Opening is fully deterministic, and every container reader
+/// performs it: the server opens its slot, the recipient theirs.
 ///
-/// Поэтому вектор говорит: «вот приватный ключ, вот блоб, вот `info` и `aad` — ты
-/// обязан получить ровно этот открытый текст». Проверка покрывает всю конструкцию
-/// разом: согласование X25519, вывод ключа K10 вместе с его `info`, разбор
-/// хранимого nonce и AEAD со связанными данными. Отдельный вектор на промежуточный
-/// ключ K10 не нужен и был бы хуже: он заморозил бы внутренность, которую
-/// реализация вправе считать иначе, лишь бы результат совпал.
+/// Thus the vector says: "here are the private key, blob, `info`, and `aad`; you
+/// must recover exactly this plaintext". It checks the entire construction
+/// at once: X25519 agreement, K10 derivation including `info`, parsing
+/// of the stored nonce, and AEAD with associated data. A separate vector for the intermediate
+/// K10 key is unnecessary and worse: it would freeze an internal value
+/// an implementation may compute differently provided results agree.
 #[test]
 fn the_slot_sealing_matches_its_frozen_vectors() {
     use oc_crypto::seal::{SealedBlob, open, slot_info, x25519_public};
@@ -339,11 +339,11 @@ fn the_slot_sealing_matches_its_frozen_vectors() {
     );
 }
 
-/// Породить блоб для `seal.kat`. Запускается вручную при перевыпуске.
+/// Generate a blob for `seal.kat`. Run manually when reissuing.
 ///
-/// Генератор здесь детерминированный, но это **не** делает запечатывание
-/// воспроизводимым контрактом: он нужен лишь затем, чтобы перевыпуск вектора не
-/// зависел от системного источника энтропии, которого у этого крейта нет вовсе.
+/// The RNG is deterministic here, but that does **not** make sealing
+/// a reproducibility contract: it only makes vector reissuance independent
+/// of system entropy, which this crate does not have at all.
 #[test]
 #[ignore = "инструмент перевыпуска векторов, а не проверка"]
 fn print_seal_vector() {
@@ -392,25 +392,25 @@ fn print_seal_vector() {
     println!("seal_plaintext = {}", hex(&plaintext));
 }
 
-/// Слот на P-256 открывается из замороженного вектора.
+/// A P-256 slot opens from a frozen vector.
 ///
-/// Проверка версии 2 формата на проводе: `enc` в 65 байт, механизм в `info`,
-/// хранимый nonce, AEAD со связанными данными. Падение здесь означает, что
-/// изменились байты, обещанные неизменными, — чинить надо код, а не вектор.
+/// Wire-format version 2 check: 65-byte `enc`, mechanism in `info`,
+/// stored nonce, AEAD with associated data. Failure means
+/// bytes promised immutable changed; fix the code, not the vector.
 ///
-/// Это K10 при `kem_id = 2`, а НЕ K11. План Ф-6 обещал вектор на K11, и номер
-/// был не тот: K11 — сообщение сервер→устройство с `lease.seq` в `info`,
-/// принадлежит пути лизингов. Реализуй кто-нибудь K11 вместо K10, слот не
-/// открылся бы, а выглядело бы это как повреждённый файл.
-/// ГИБРИД MLKEM768-P256 СХОДИТСЯ С ЧУЖИМИ ВЕКТОРАМИ.
+/// This is K10 with `kem_id = 2`, NOT K11. Plan F-6 promised a K11 vector with
+/// the wrong number: K11 is a server→device message containing `lease.seq` in `info`,
+/// belonging to the lease path. Implementing K11 instead of K10 would make the slot
+/// fail to open, appearing as file corruption.
+/// THE MLKEM768-P256 HYBRID MATCHES EXTERNAL VECTORS.
 ///
-/// Десять векторов приложения A.1 черновика CFRG, по пять проверок на каждый:
-/// семя ML-KEM из общего семени, скаляр P-256 (сверяется по его открытой точке),
-/// составная открытая половина, детерминированная инкапсуляция и декапсуляция
-/// обеими половинами.
+/// Ten vectors from CFRG draft appendix A.1, five checks each:
+/// ML-KEM seed from the common seed, P-256 scalar (checked via its public point),
+/// composite public half, deterministic encapsulation, and decapsulation
+/// with both halves.
 ///
-/// Отрицательные контроли живут рядом, в пробах модуля: здесь проверяется
-/// СОВПАДЕНИЕ с чужими байтами, там — что подмена половины его ломает.
+/// Negative controls live beside it in module probes: this tests
+/// MATCHING external bytes; those test that substituting a half breaks the match.
 #[test]
 fn the_mlkem_p256_hybrid_matches_the_drafts_own_vectors() {
     use oc_crypto::agreement::KeyAgreement as _;
@@ -444,12 +444,12 @@ fn the_mlkem_p256_hybrid_matches_the_drafts_own_vectors() {
     }
 }
 
-/// ГИБРИД X-WING СХОДИТСЯ С ЧУЖИМИ ВЕКТОРАМИ, А НЕ СО СВОИМИ.
+/// THE X-WING HYBRID MATCHES EXTERNAL VECTORS, NOT ITS OWN.
 ///
-/// Три вектора приложения C черновика, по четыре проверки на каждый: рост пары
-/// из семени, детерминированная инкапсуляция (шифротекст и секрет) и
-/// декапсуляция. Вектор, снятый со своего кода, свидетельствовал бы лишь о том,
-/// что код не изменился; эти — что он совпадает с чужим.
+/// Three draft appendix C vectors, four checks each: pair expansion
+/// from seed, deterministic encapsulation (ciphertext and secret), and
+/// decapsulation. A vector taken from our code would show only
+/// that the code had not changed; these show agreement with another implementation.
 #[test]
 fn the_xwing_hybrid_matches_the_drafts_own_vectors() {
     use oc_crypto::xwing;
@@ -513,10 +513,10 @@ fn a_p256_slot_opens_from_its_frozen_vector() {
     check(&v, "p256_seal_plaintext", &opened);
 }
 
-/// Выпустить вектор запечатывания на P-256. Инструмент, не проверка.
+/// Issue a P-256 sealing vector. A tool, not a check.
 ///
-/// `#[ignore]` по той же причине, что и у соседей: перевыпуск законен только
-/// вместе с решением, записанным в `docs/format.md`.
+/// `#[ignore]` for the same reason as its neighbors: reissuance is legitimate only
+/// alongside a decision recorded in `docs/format.md`.
 #[test]
 #[ignore = "инструмент перевыпуска векторов, а не проверка"]
 fn print_p256_seal_vector() {
@@ -565,17 +565,17 @@ fn print_p256_seal_vector() {
     println!("p256_seal_plaintext = {}", hex(&plaintext));
 }
 
-/// Подпись редактировавшего устройства: вектор снят с ЖИВОГО TPM.
+/// Editing-device signature: vector captured from a LIVE TPM.
 ///
-/// Единственный вектор в каталоге, который наш код не производил и произвести не
-/// может: приватный ключ остался в TPM машины разработки и удалён после прогона.
-/// Поэтому он доказывает то, чего не доказывает ни один другой, — что чистый
-/// проверяющий согласен с НЕЗАВИСИМОЙ реализацией, а не сам с собой.
+/// The only vector in this directory our code neither produced nor can produce:
+/// the private key remained in the development machine's TPM and was deleted after the run.
+/// It therefore proves something no other vector proves: the pure
+/// verifier agrees with an INDEPENDENT implementation rather than itself.
 ///
-/// Перевыпуск возможен только новым прогоном `spikes/rsa-pss-tpm/` на машине с
-/// TPM, и это будет ДРУГОЙ вектор: соль PSS случайна, двадцать подписей одного
-/// сообщения различны. Значит «упало — перевыпущу» здесь не сработает даже
-/// технически, и это удачно.
+/// Reissuance requires rerunning `spikes/rsa-pss-tpm/` on a TPM-equipped
+/// machine, producing a DIFFERENT vector: PSS salt is random; twenty signatures of one
+/// message differ. Thus "failed, so reissue" cannot work here even
+/// technically, which is fortunate.
 #[test]
 fn the_editor_signature_vector_from_a_real_tpm_verifies() {
     let v = load("rsa_pss.kat");
@@ -589,12 +589,12 @@ fn the_editor_signature_vector_from_a_real_tpm_verifies() {
     );
 }
 
-/// Проверяющий обязан ОТКАЗЫВАТЬ, и это важнее, чем принимать.
+/// The verifier must REJECT, more importantly than accept.
 ///
-/// Ломались исторически именно проверяющие: атака Блайхенбахера на `e = 3` была о
-/// небрежном разборе набивки, а не о стойкости RSA. Поэтому вектор используется
-/// не только для приёма: каждая порча обязана давать отказ, и отказ **по своему
-/// коду** — «не та длина» и «не сходится» разные беды.
+/// Historically verifiers broke: Bleichenbacher's `e = 3` attack concerned
+/// careless padding parsing, not RSA strength. The vector therefore tests
+/// not only acceptance: every corruption must fail with **its proper
+/// code**, since "wrong length" and "mismatch" are different failures.
 #[test]
 fn every_corruption_of_the_editor_signature_is_refused() {
     let v = load("rsa_pss.kat");
@@ -649,30 +649,30 @@ fn every_corruption_of_the_editor_signature_is_refused() {
 // Производные провода: K11, K12, K21, K22 (docs/format.md §3.5) — derivations_wire.kat
 // --------------------------------------------------------------------------
 
-/// Отпечаток устройства получателя долей A и B. Отпечаток при `kem_id = 1` —
-/// это и есть публичный ключ, поэтому приватный ключ здесь тот же, что у
-/// `seal.kat`: одна пара на все векторы открытия.
+/// Fingerprint of the device receiving shares A and B. For `kem_id = 1`, the fingerprint
+/// is the public key itself, so this private key matches
+/// `seal.kat`: one pair for all opening vectors.
 const DEVICE_SECRET: [u8; 32] = SEAL_RECIPIENT_SECRET;
-/// Номер лизинга в `info` доли A. Не ноль: ноль не поймал бы перестановку байт
-/// `u64be` и `u64le`.
+/// Lease sequence in share-A `info`. Nonzero: zero would not detect byte-order
+/// swapping between `u64be` and `u64le`.
 const LEASE_SEQ: u64 = 0x0102_0304_0506_0708;
-/// Открытый текст засевов nonce — 33 байта, не кратно ничему, как у дерева.
+/// Nonce-hedging plaintext: 33 bytes, unaligned as in the tree vectors.
 const SEED_PLAINTEXT: [u8; 33] = [0x7e; 33];
-/// AAD другой длины, чтобы вектор различал обе переменные части.
+/// AAD of another length, so the vector distinguishes both variable parts.
 const SEED_AAD: [u8; 17] = [0x4a; 17];
-/// Засев — 24 случайных байта по спеке; здесь фиксированы.
+/// Seed: 24 random bytes per specification, fixed here.
 const NONCE_SEED: [u8; 24] = [0x5d; 24];
 
-/// `info` доли A по §3.5: метка ‖ u8(kem) ‖ file_id ‖ device_fpr ‖ u64be(seq).
+/// Share-A `info` per §3.5: label ‖ u8(kem) ‖ file_id ‖ device_fpr ‖ u64be(seq).
 ///
-/// Собирается ЗДЕСЬ по спеке, а не берётся у [`oc_crypto::seal`] — хотя теперь
-/// сборка живёт в этом же крейте, и соблазн позвать её велик. Нельзя: проба
-/// сверяла бы функцию с самой собой. Довод «крейт чист и сервера не видит»,
-/// стоявший здесь до переноса, был верен по выводу и неверен по причине —
-/// причина в том, что ВТОРАЯ реализация и есть содержание этой пробы. Сервер
-/// сверяет свою сборку с тем же вектором у себя
-/// (`crates/cc-authority/tests/kat_journal.rs`) — так реализации одной строки
-/// сходятся через файл, а не через общий код.
+/// Constructed HERE from the specification, not taken from [`oc_crypto::seal`], even though
+/// construction now lives in this crate, tempting reuse. Forbidden: the probe
+/// would compare a function with itself. The former argument "the crate is pure and cannot see the server"
+/// reached the right conclusion for the wrong reason:
+/// the SECOND implementation is the substance of this probe. The server
+/// checks its construction against the same vector separately
+/// (`crates/cc-authority/tests/kat_journal.rs`), making implementations of one string
+/// agree through a file rather than shared code.
 fn a_to_device_info_by_spec(device_fpr: &[u8; 32], seq: u64) -> Vec<u8> {
     let mut info = oc_crypto::label::A_TO_DEVICE.as_bytes().to_vec();
     info.push(oc_crypto::KemAlg::X25519HkdfSha256 as u8);
@@ -682,7 +682,7 @@ fn a_to_device_info_by_spec(device_fpr: &[u8; 32], seq: u64) -> Vec<u8> {
     info
 }
 
-/// `info` доли B по §3.5: метка ‖ u8(kem) ‖ file_id ‖ device_fpr — без номера.
+/// Share-B `info` per §3.5: label ‖ u8(kem) ‖ file_id ‖ device_fpr, without sequence.
 fn b_to_device_info_by_spec(device_fpr: &[u8; 32]) -> Vec<u8> {
     let mut info = oc_crypto::label::B_TO_DEVICE.as_bytes().to_vec();
     info.push(oc_crypto::KemAlg::X25519HkdfSha256 as u8);
@@ -797,7 +797,7 @@ fn the_nonce_seeds_match_their_frozen_vectors() {
     );
 }
 
-/// Длины разделяют части: одна и та же конкатенация текста и AAD не коллидирует.
+/// Lengths separate parts: identical plaintext/AAD concatenations do not collide.
 #[test]
 fn nonce_seed_lengths_separate_plaintext_from_aad() {
     use oc_crypto::{kdf::hedged_nonce, label};
@@ -813,9 +813,9 @@ fn nonce_seed_lengths_separate_plaintext_from_aad() {
         Err(oc_crypto::CryptoError::BadLength),
     );
 }
-/// Детерминированный генератор для печати векторов провода. Свой, а не общий с
-/// `print_seal_vector`: тот объявлен внутри функции, и это верно — генератор
-/// перевыпуска не должен быть виден проверкам.
+/// Deterministic RNG for printing wire vectors. Separate from
+/// `print_seal_vector`, whose RNG is correctly scoped inside the function:
+/// reissuance RNGs must not be visible to checks.
 struct WireRng([u8; 32]);
 impl rand_core::TryRng for WireRng {
     type Error = core::convert::Infallible;
@@ -841,7 +841,7 @@ impl rand_core::TryRng for WireRng {
 }
 impl rand_core::TryCryptoRng for WireRng {}
 
-/// Породить векторы провода и засевов. Запускается вручную при перевыпуске:
+/// Generate wire and hedging vectors. Run manually when reissuing:
 ///
 /// ```text
 /// cargo test -p oc-crypto --test kat print_wire -- --ignored --nocapture
@@ -907,11 +907,11 @@ fn print_wire_and_seed_vectors() {
 // K28 — тождество операции на проводе (docs/protocol.md §9.10) — operation_id.kat
 // --------------------------------------------------------------------------
 
-/// Тождество операции по спеке и функцией крейта — против одного вектора.
+/// Operation identity per specification and crate function, against one vector.
 ///
-/// Транскрипт собирается ЗДЕСЬ байтами спеки, а не зовом функции: проба,
-/// сверяющая функцию только с ней самой, зеленела бы на любой перестановке
-/// полей. Вектор посчитан отдельным сценарием вне Rust (шапка файла).
+/// The transcript is constructed HERE from specification bytes rather than by calling the function:
+/// a probe comparing a function only with itself would pass after any field
+/// reordering. The vector was computed by an independent script outside Rust (file header).
 #[test]
 fn the_operation_id_matches_its_frozen_vector() {
     let v = load("operation_id.kat");
@@ -940,13 +940,13 @@ fn the_operation_id_matches_its_frozen_vector() {
 // 2026-09-20») — server_fresh.kat
 // --------------------------------------------------------------------------
 
-/// HMAC-SHA256, собранный ЗДЕСЬ из одного хеша.
+/// HMAC-SHA256 constructed HERE from a single hash.
 ///
-/// Крейта `hmac` у пробы нет — `[dev-dependencies]` у `oc-crypto` нет вовсе, — и
-/// это к лучшему: вторая реализация RFC 2104 рядом с первой стоит ровно столько,
-/// сколько нужно, чтобы вектор проверял спеку, а не общий с кодом примитив.
-/// Ключ здесь всегда 32 байта, то есть короче блока; ветка «ключ длиннее блока»
-/// не нужна и не пишется.
+/// The probe has no `hmac` crate; `oc-crypto` has no `[dev-dependencies]` at all.
+/// That is beneficial: a second RFC 2104 implementation beside the first costs exactly
+/// what is necessary for the vector to check the specification rather than a shared primitive.
+/// The key is always 32 bytes, shorter than the block; the "key longer than block" branch
+/// is unnecessary and omitted.
 fn spec_hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     let mut ipad = [0x36u8; 64];
     let mut opad = [0x5cu8; 64];
@@ -962,7 +962,7 @@ fn spec_hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     oc_crypto::sha256(&outer)
 }
 
-/// `HKDF-Expand` RFC 5869 §2.3 по буквам спеки.
+/// `HKDF-Expand` per RFC 5869 §2.3, following the specification literally.
 fn spec_hkdf_expand(prk: &[u8; 32], info: &[u8], len: usize) -> Vec<u8> {
     let mut out = Vec::new();
     let mut block = Vec::new();
@@ -979,7 +979,7 @@ fn spec_hkdf_expand(prk: &[u8; 32], info: &[u8], len: usize) -> Vec<u8> {
     out
 }
 
-/// Прообраз K30 по спеке: метка ‖ 0x00 ‖ засев ‖ вид ‖ i64be(now) ‖ отпечаток.
+/// K30 preimage per specification: label ‖ 0x00 ‖ seed ‖ kind ‖ i64be(now) ‖ fingerprint.
 fn spec_k30_prk(seed: &[u8], kind: u8, now: i64, device_fpr: &[u8]) -> [u8; 32] {
     let mut transcript = b"CC/v1/server-fresh".to_vec();
     transcript.push(0x00);
@@ -990,12 +990,12 @@ fn spec_k30_prk(seed: &[u8], kind: u8, now: i64, device_fpr: &[u8]) -> [u8; 32] 
     oc_crypto::sha256(&transcript)
 }
 
-/// Свежее значение сервера по спеке и функцией крейта — против одного вектора.
+/// Fresh server value per specification and crate function, against one vector.
 ///
-/// Вектор посчитан вне Rust (шапка файла), здесь он пересчитывается ВТОРОЙ раз —
-/// байтами спеки, своим HMAC и своим Expand, — и только потом сверяется с
-/// `server_fresh`. Проба, зовущая одну функцию и сравнивающая её с собой,
-/// зеленела бы на любой перестановке полей прообраза.
+/// The vector was computed outside Rust (file header); here it is recomputed a SECOND time,
+/// using specification bytes, our own HMAC, and our own Expand, before comparison with
+/// `server_fresh`. A probe calling one function and comparing it with itself
+/// would pass after any preimage-field reordering.
 #[test]
 fn the_server_freshness_value_matches_its_frozen_vector() {
     let v = load("server_fresh.kat");
@@ -1061,11 +1061,11 @@ fn the_server_freshness_value_matches_its_frozen_vector() {
 // РАЗГОВОРУ 2026-09-21») — echo_transcript.kat
 // --------------------------------------------------------------------------
 
-/// Байты транскрипта рукопожатия по спеке, собранные ЗДЕСЬ.
+/// Handshake-transcript bytes per specification, constructed HERE.
 ///
-/// Без `Transcript`: тип крейта — как раз то, что вектор обязан проверять, и
-/// собрав им же, проба сверяла бы код с самим собой. Поэтому метка, нулевой
-/// байт и два префикса длины выписаны руками.
+/// Without `Transcript`: the crate's type is exactly what this vector must test;
+/// using it for construction would compare code with itself. The label, zero
+/// byte, and two length prefixes are therefore written manually.
 fn spec_k31_transcript(hello: &[u8], challenge: &[u8]) -> Vec<u8> {
     let mut out = b"CC/v1/echo-transcript".to_vec();
     out.push(0x00);
@@ -1076,7 +1076,7 @@ fn spec_k31_transcript(hello: &[u8], challenge: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Эхо по спеке: HMAC от секрета над меткой, отпечатком и хешем транскрипта.
+/// Echo per specification: HMAC keyed by the secret over label, fingerprint, and transcript hash.
 fn spec_k31_echo(secret: &[u8], device_fpr: &[u8], handshake: &[u8]) -> [u8; 32] {
     let mut message = b"CC/v1/echo-transcript".to_vec();
     message.extend_from_slice(device_fpr);
@@ -1084,11 +1084,11 @@ fn spec_k31_echo(secret: &[u8], device_fpr: &[u8], handshake: &[u8]) -> [u8; 32]
     spec_hmac_sha256_any(secret, &message)
 }
 
-/// HMAC-SHA256 с ключом ЛЮБОЙ длины до блока.
+/// HMAC-SHA256 with a key of ANY length up to one block.
 ///
-/// `spec_hmac_sha256` выше держит ключ ровно в 32 байта; у эха ключом служит
-/// склеенный секрет вызова, а он 32 байта при одном предъявленном ключе и 64
-/// при двух. Ветка «ключ длиннее блока» по-прежнему не нужна: 64 = блок.
+/// `spec_hmac_sha256` above fixes key length at 32 bytes; the echo uses
+/// the concatenated challenge secret, 32 bytes for one presented key and 64
+/// for two. The "key longer than block" branch remains unnecessary: 64 equals one block.
 fn spec_hmac_sha256_any(key: &[u8], message: &[u8]) -> [u8; 32] {
     assert!(key.len() <= 64, "вектор не покрывает ключ длиннее блока");
     let mut ipad = [0x36u8; 64];
@@ -1105,11 +1105,11 @@ fn spec_hmac_sha256_any(key: &[u8], message: &[u8]) -> [u8; 32] {
     oc_crypto::sha256(&outer)
 }
 
-/// Эхо, привязанное к разговору, — по спеке и функциями крейта.
+/// Conversation-bound echo per specification and crate functions.
 ///
-/// Вектор посчитан вне Rust (шапка файла); здесь он пересчитывается вторым
-/// независимым путём — байтами спеки и своим HMAC — и только потом сверяется с
-/// `handshake_transcript` и `echo_transcript`.
+/// The vector was computed outside Rust (file header); here a second
+/// independent path recomputes it using specification bytes and our own HMAC before comparison with
+/// `handshake_transcript` and `echo_transcript`.
 #[test]
 fn the_transcript_bound_echo_matches_its_frozen_vector() {
     let v = load("echo_transcript.kat");
@@ -1173,10 +1173,10 @@ fn the_transcript_bound_echo_matches_its_frozen_vector() {
     );
 }
 
-/// Свежие значения учётных данных TPM (K30, виды 3–5) — против своего вектора.
+/// Fresh TPM credential values (K30, kinds 3–5), against their own vector.
 ///
-/// Тот же счёт по спеке, что у `server_fresh.kat`, и на ТЕХ ЖЕ входах: при одном
-/// засеве, одном времени и одном отпечатке пять назначений обязаны разойтись.
+/// Same specification computation as `server_fresh.kat`, with the SAME inputs: with one
+/// seed, time, and fingerprint, all five purposes must diverge.
 #[test]
 fn the_credential_freshness_values_match_their_frozen_vector() {
     let v = load("server_fresh_credential.kat");

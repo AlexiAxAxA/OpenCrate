@@ -1,26 +1,26 @@
-//! Контрольные документы authority (E2, B2; `docs/protocol.md` §9.16).
+//! Authority control documents (E2, B2; `docs/protocol.md` §9.16).
 //!
-//! Три документа, один кодек:
+//! Three documents, one codec:
 //!
-//! * [`Binding`] — привязка сервера: организация, стабильное тождество,
-//!   эпоха и ревизия, ключи, адреса и отпечатки TLS, профиль сохранности,
-//!   режим восстановления, состояние обслуживания и состав управляющих ключей.
-//!   Подписан ключом подписи лизингов — тем, что автор закрепил в заголовке.
-//!   **Сам документ доверия не создаёт**: проверяется ключом, известным
-//!   проверяющему заранее ([`Binding::open`]), а поле ключа внутри обязано с ним
-//!   совпасть.
-//! * [`ControlRequest`] — намерение управляющих: область (организация,
-//!   тождество, эпоха), тождество операции, ожидаемая ревизия, срок и точное
-//!   содержание. Подписей может быть несколько — все над ОДНИМ телом: для
-//!   кворума подписывается одно намерение, и подписи разных намерений не
-//!   складываются.
-//! * [`Receipt`] — квитанция сервера: чем кончилась операция, какой стала
-//!   ревизия и что именно зафиксировано. Отличает принятое от исполненного и
-//!   от отложенного до подтверждения реплики.
+//! * [`Binding`]: server binding: organization, stable identity,
+//!   epoch and revision, keys, addresses and TLS fingerprints, durability profile,
+//!   recovery mode, service state and control-key roster.
+//!   Signed with the lease-signing key pinned by the author in the header.
+//!   **The document itself creates no trust**: it is verified with a key known
+//!   to the verifier beforehand ([`Binding::open`]); the embedded key field must
+//!   match it.
+//! * [`ControlRequest`]: controller intent: scope (organization,
+//!   identity, epoch), operation identity, expected revision, lifetime and exact
+//!   content. Multiple signatures are allowed, all over ONE body: a
+//!   quorum signs one intent, and signatures over different intents cannot
+//!   be combined.
+//! * [`Receipt`]: server receipt: operation outcome, resulting
+//!   revision and precisely what was committed. Distinguishes acceptance from execution
+//!   and from deferral pending replica acknowledgment.
 //!
-//! Раскладки — TLV с тегами по возрастанию (И-7), все поля критичны.
-//! Транскрипты подписей — `CC/v1/authority-binding`, `CC/v1/control-request`,
-//! `CC/v1/operation-receipt` поверх тела.
+//! Layouts are TLV with ascending tags (I-7), all fields critical.
+//! Signature transcripts are `CC/v1/authority-binding`, `CC/v1/control-request`,
+//! `CC/v1/operation-receipt` over the body.
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
@@ -28,24 +28,24 @@ use oc_crypto::sign::Signer;
 use oc_crypto::transcript::Transcript;
 use oc_crypto::{label, sha256};
 
-/// Версия раскладки всех трёх документов.
+/// Layout version of all three documents.
 pub const VERSION: u8 = 1;
-/// Адресов в привязке.
+/// Addresses per binding.
 pub const MAX_URLS: usize = 8;
-/// Длина адреса, байт.
+/// Address length, bytes.
 pub const MAX_URL_LEN: usize = 256;
-/// Отпечатков TLS в привязке.
+/// TLS fingerprints per binding.
 pub const MAX_PINS: usize = 8;
-/// Ключей в составе управляющих.
+/// Keys in the controller roster.
 pub const MAX_ROSTER: usize = 16;
-/// Подписей под одним намерением.
+/// Signatures over one intent.
 pub const MAX_SIGNERS: usize = 16;
-/// Наибольший срок намерения: сутки. Долгоживущее подписанное намерение —
-/// заготовка для повтора, а порядок держит ревизия, не время.
+/// Maximum intent lifetime: one day. A long-lived signed intent is
+/// replay material; the revision, not time, maintains order.
 pub const MAX_REQUEST_LIFETIME: i64 = 86_400;
-/// Причина отказа или прекращения, знаков.
+/// Rejection or termination reason, characters.
 pub const MAX_REASON_CHARS: usize = 512;
-/// Предел документа целиком.
+/// Whole-document size limit.
 pub const MAX_DOCUMENT_LEN: usize = 64 * 1024;
 
 const SIG: usize = oc_crypto::sign::SIGNATURE_LEN;
@@ -55,20 +55,20 @@ fn bad(tag: u16, len: usize) -> FormatError {
     FormatError::BadFieldLength { tag, len }
 }
 
-/// Профиль сохранности (`docs/authority-lifecycle-design.md` §7).
+/// Durability profile (`docs/authority-lifecycle-design.md` §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Durability {
-    /// Успех — после устойчивой записи сервера.
+    /// Success follows durable server storage.
     Local = 0,
-    /// Копия уходит реплике после успеха; хвост может быть не подтверждён.
+    /// A copy goes to the replica after success; the tail may be unacknowledged.
     Mirrored = 1,
-    /// Успех — только после устойчивого подтверждения реплики.
+    /// Success only after durable replica acknowledgment.
     Witnessed = 2,
 }
 
 impl Durability {
-    /// Из байта; незнакомый — отказ (И-10).
+    /// From a byte; unknown means rejection (I-10).
     #[must_use]
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
@@ -80,15 +80,15 @@ impl Durability {
     }
 }
 
-/// Объявленный режим восстановления сервера.
+/// Declared server recovery mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Recovery {
-    /// Не объявлен: обещания нет.
+    /// Undeclared: no promise.
     Undeclared = 0,
-    /// Есть проверенный пакет восстановления (`cca recovery`).
+    /// A verified recovery package exists (`cca recovery`).
     Package = 1,
-    /// Сервер объявлен невосстановимым: потеря ключей — конец выдач.
+    /// Server declared unrecoverable: lost keys end issuance.
     NotRecoverable = 2,
 }
 
@@ -104,17 +104,17 @@ impl Recovery {
     }
 }
 
-/// Обслуживает ли сервер.
+/// Whether the server provides service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Status {
-    /// Обычная работа.
+    /// Normal operation.
     Serving = 0,
-    /// Обслуживание прекращено: новых регистраций и выдач нет.
+    /// Service stopped: no new registrations or issuance.
     Stopped = 1,
-    /// Только архив: отзывные и головы журнала, выдач нет.
+    /// Archive only: revocations and journal heads, no issuance.
     ArchiveOnly = 2,
-    /// Полномочия переданы преемнику (B7).
+    /// Authority transferred to a successor (B7).
     Transferred = 3,
 }
 
@@ -131,8 +131,8 @@ impl Status {
     }
 }
 
-/// Имя организации: `[a-z0-9._-]`, 1..=64 байт — то же правило, что у
-/// каталога ключей (D4).
+/// Organization name: `[a-z0-9._-]`, 1..=64 bytes, the same rule as the
+/// key directory (D4).
 fn check_tenant(tenant: &str, tag: u16) -> Result<(), FormatError> {
     let ok = !tenant.is_empty()
         && tenant.len() <= crate::directory::MAX_TENANT
@@ -140,7 +140,7 @@ fn check_tenant(tenant: &str, tag: u16) -> Result<(), FormatError> {
     if ok { Ok(()) } else { Err(bad(tag, tenant.len())) }
 }
 
-/// Адрес: печатный ASCII без пробелов, 1..=256 байт.
+/// Address: printable ASCII without spaces, 1..=256 bytes.
 fn check_url(url: &str, tag: u16) -> Result<(), FormatError> {
     let ok = !url.is_empty() && url.len() <= MAX_URL_LEN && url.bytes().all(|b| b.is_ascii_graphic());
     if ok { Ok(()) } else { Err(bad(tag, url.len())) }
@@ -193,8 +193,8 @@ fn decode_urls(mut rest: &[u8], tag: u16) -> Result<Vec<String>, FormatError> {
     Ok(urls)
 }
 
-/// Ключи подряд по 32 байта: строго по возрастанию — одна запись на ключ и
-/// одно представление набора.
+/// Consecutive 32-byte keys, strictly ascending: one entry per key and
+/// one representation per set.
 fn encode_keys(keys: &[[u8; 32]], max: usize, tag: u16) -> Result<Vec<u8>, FormatError> {
     if keys.len() > max || keys.windows(2).any(|w| w.first() >= w.get(1)) {
         return Err(bad(tag, keys.len()));
@@ -251,7 +251,7 @@ fn transcript(label: oc_crypto::Label, body: &[u8]) -> Transcript {
     t
 }
 
-/// Отпечаток подписанного документа — для цепочки ревизий и квитанций.
+/// Signed document fingerprint, for the revision and receipt chain.
 #[must_use]
 pub fn digest(bytes: &[u8]) -> [u8; 32] {
     sha256(bytes)
@@ -281,35 +281,35 @@ mod binding_tag {
     pub const EXPIRES_AT: u16 = 18;
 }
 
-/// Привязка сервера — см. шапку модуля.
+/// Server binding; see the module documentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
     pub tenant: String,
-    /// Стабильное тождество сервера: не меняется при смене ключей (B7).
+    /// Stable server identity: unchanged across key changes (B7).
     pub authority_id: [u8; 16],
-    /// Эпоха полномочий: растёт только при передаче (B7).
+    /// Authority epoch: increases only on transfer (B7).
     pub epoch: u64,
-    /// Ревизия привязки внутри эпохи: растёт на каждой управляющей операции.
+    /// Binding revision within an epoch: increases on each control operation.
     pub revision: u64,
     pub lease_public: [u8; KEY],
     pub sealing_public: [u8; 32],
     pub urls: Vec<String>,
-    /// SHA-256 от SubjectPublicKeyInfo сертификатов TLS, которым клиент верит.
+    /// SHA-256 of SubjectPublicKeyInfo of TLS certificates trusted by the client.
     pub pins: Vec<[u8; 32]>,
     pub durability: Durability,
     pub recovery: Recovery,
     pub status: Status,
-    /// Ключи управляющих, по возрастанию. Пусто — удалённого управления нет.
+    /// Controller keys in ascending order. Empty means no remote control.
     pub roster: Vec<[u8; KEY]>,
-    /// Сколько подписей состава нужно намерению; ноль — при пустом составе.
+    /// Roster signatures required for an intent; zero for an empty roster.
     pub threshold: u8,
-    /// Операция, породившая эту ревизию; нули — заведение.
+    /// Operation that produced this revision; zero for creation.
     pub operation_id: [u8; 16],
-    /// Отпечаток предыдущей ревизии; нули у ревизии 0.
+    /// Previous revision fingerprint; zero at revision 0.
     pub previous: [u8; 32],
     pub issued_at: i64,
-    /// После этого момента привязка не действует как текущая: её надо
-    /// перечитать. Выданных лизингов срок привязки не касается.
+    /// After this time, the binding is no longer current and must be
+    /// reread. Binding expiration does not affect issued leases.
     pub expires_at: i64,
 }
 
@@ -340,10 +340,10 @@ impl Binding {
         Ok(())
     }
 
-    /// Тело без подписи.
+    /// Unsigned body.
     ///
     /// # Errors
-    /// [`FormatError`] — поле вне правил.
+    /// [`FormatError`]: a field violates the rules.
     pub fn body(&self) -> Result<Vec<u8>, FormatError> {
         use binding_tag as t;
         self.check()?;
@@ -369,11 +369,11 @@ impl Binding {
         Ok(w.finish().to_vec())
     }
 
-    /// Подписать ключом подписи лизингов, названным в самой привязке.
+    /// Sign with the lease-signing key named in the binding itself.
     ///
     /// # Errors
-    /// [`FormatError`] — поле вне правил, ключ подписанта не тот, подпись не
-    /// удалась.
+    /// [`FormatError`]: invalid field, wrong signing key or failed
+    /// signature.
     pub fn sign(&self, signer: &dyn Signer) -> Result<Vec<u8>, FormatError> {
         if signer.public_key() != self.lease_public {
             return Err(bad(binding_tag::LEASE_PUBLIC, KEY));
@@ -387,24 +387,24 @@ impl Binding {
         Ok(out)
     }
 
-    /// Разобрать и проверить ключом, которому проверяющий верит ЗАРАНЕЕ.
+    /// Parse and verify using a key the verifier trusts BEFOREHAND.
     ///
-    /// Ключ внутри привязки обязан совпасть с якорем: иначе привязка
-    /// называла бы доверенным ключ, которым сама подписана.
+    /// The binding's embedded key must match the anchor; otherwise the binding
+    /// would declare its own signing key trusted.
     ///
-    /// # Почему подпись РАНЬШЕ разбора
+    /// # Why signature verification PRECEDES parsing
     ///
-    /// Тот же довод И-5, что у [`open_request`]: разбор незаверенных байтов
-    /// сообщает различимые коды отказа о том, чего никто не подписывал. Ключ
-    /// здесь приходит СНАРУЖИ (`anchor`), поэтому разбирать тело до проверки
-    /// не нужно; [`Self::peek`] отделяет подпись сам и зовётся уже над
-    /// заверенными байтами. Там, где якорь брать неоткуда, ключ достают
-    /// именно `peek`-ом и знают цену: в [`verify_chain`] привязка новой эпохи
-    /// сначала `peek`-ается ради своего же ключа, а доверие ей даёт не эта
-    /// подпись, а подпись состава под сертификатом, несущим её байты.
+    /// The same I-5 rationale as [`open_request`]: parsing unauthenticated bytes
+    /// returns distinguishable rejection codes for data nobody signed. The key
+    /// comes from OUTSIDE (`anchor`), so the body need not be parsed before verification;
+    /// [`Self::peek`] separates the signature itself and is called over already
+    /// authenticated bytes. Where no anchor exists, `peek` extracts the key,
+    /// with a known tradeoff: in [`verify_chain`], the new epoch binding is first
+    /// read with `peek` to obtain its own key, but trust comes not from that
+    /// signature; it comes from the roster's signature over the certificate carrying those bytes.
     ///
     /// # Errors
-    /// [`FormatError`] — раскладка, подпись, несовпадение с якорем.
+    /// [`FormatError`]: layout, signature or anchor mismatch.
     pub fn open(bytes: &[u8], anchor: &[u8; KEY]) -> Result<Self, FormatError> {
         let (sig, body) = split_signed(bytes)?;
         oc_crypto::sign::verify(anchor, &transcript(label::AUTHORITY_BINDING, body), &sig)
@@ -416,10 +416,10 @@ impl Binding {
         Ok(binding)
     }
 
-    /// Разобрать БЕЗ проверки подписи — для того, кто сам её выпустил и хранит.
+    /// Parse WITHOUT signature verification, for the issuer storing its own document.
     ///
     /// # Errors
-    /// [`FormatError`] — раскладка.
+    /// [`FormatError`]: layout.
     pub fn peek(bytes: &[u8]) -> Result<Self, FormatError> {
         use binding_tag as t;
         let (_, body) = split_signed(bytes)?;
@@ -494,30 +494,30 @@ impl Binding {
         Ok(binding)
     }
 
-    /// Адрес назван в привязке — сравнение побайтное.
+    /// Whether the address is named in the binding: bytewise comparison.
     #[must_use]
     pub fn names_url(&self, url: &str) -> bool {
         self.urls.iter().any(|u| u == url)
     }
 }
 
-/// Как новая привязка соотносится с виденной ранее.
+/// How the new binding relates to a previously seen one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Continuity {
-    /// Та же ревизия, те же байты.
+    /// Same revision, same bytes.
     Same,
-    /// Новее. `adjacent` — следующая по номеру и ссылается на виденную.
+    /// Newer. `adjacent` means the next numbered revision, referencing the previously seen one.
     Newer { adjacent: bool },
-    /// Старее виденной: откат.
+    /// Older than previously seen: rollback.
     Rollback,
-    /// Та же ревизия, другие байты, либо следующая ревизия не ссылается на
-    /// виденную: развилка истории.
+    /// Same revision with different bytes, or the next revision does not reference the
+    /// previously seen one: a history fork.
     Fork,
-    /// Другой сервер, другая организация или другая эпоха.
+    /// Different server, organization or epoch.
     Unrelated,
 }
 
-/// Сравнить привязку с виденной ранее.
+/// Compare a binding with a previously seen one.
 #[must_use]
 pub fn continuity(seen: &Binding, seen_bytes: &[u8], new: &Binding, new_bytes: &[u8]) -> Continuity {
     if seen.authority_id != new.authority_id || seen.tenant != new.tenant || seen.epoch != new.epoch {
@@ -560,26 +560,26 @@ mod request_tag {
     pub const PAYLOAD: u16 = 11;
 }
 
-/// Область намерения. Один вид сегодня — сервер целиком; поле есть, чтобы
-/// намерение по одному файлу нельзя было принять за намерение по серверу.
+/// Intent scope. One kind today, the entire server; the field prevents
+/// an intent for one file being mistaken for an intent for the whole server.
 pub const SCOPE_AUTHORITY: u8 = 1;
 
-/// Что велено.
+/// What was ordered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Payload {
-    /// Адреса и отпечатки TLS (P12).
+    /// Addresses and TLS fingerprints (P12).
     SetEndpoints { urls: Vec<String>, pins: Vec<[u8; 32]> },
-    /// Профиль сохранности. Понижение — тем же подписанным решением.
+    /// Durability profile. Downgrades use the same signed decision.
     SetDurability(Durability),
-    /// Состав управляющих и порог.
+    /// Controller roster and threshold.
     SetRoster { keys: Vec<[u8; KEY]>, threshold: u8 },
-    /// Объявленный режим восстановления.
+    /// Declared recovery mode.
     SetRecovery(Recovery),
-    /// Прекращение обслуживания (P16): `Stopped` или `ArchiveOnly`.
+    /// Service termination (P16): `Stopped` or `ArchiveOnly`.
     Decommission { status: Status, reason: String },
-    /// Допустить ключ автора к регистрации по проводу (P01).
+    /// Authorize an author key for registration over the wire (P01).
     AddAuthor([u8; KEY]),
-    /// Снять допуск ключа автора.
+    /// Remove an author key's authorization.
     RemoveAuthor([u8; KEY]),
 }
 
@@ -670,37 +670,37 @@ impl Payload {
     }
 }
 
-/// Намерение управляющих — см. шапку модуля.
+/// Controller intent; see the module documentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlRequest {
     pub tenant: String,
     pub authority_id: [u8; 16],
     pub epoch: u64,
-    /// Случайные 128 бит от составителя: повтор с теми же байтами — тот же
-    /// исход, с другими — `IdConflict`.
+    /// 128 random bits supplied by the creator: replay with the same bytes has the same
+    /// outcome; different bytes yield `IdConflict`.
     pub operation_id: [u8; 16],
-    /// Ревизия привязки, поверх которой намерение составлено.
+    /// Binding revision on which the intent was based.
     pub expected_revision: u64,
     pub issued_at: i64,
     pub expires_at: i64,
     pub payload: Payload,
 }
 
-/// Намерение с проверенными подписями.
+/// An intent with verified signatures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedRequest {
     pub request: ControlRequest,
-    /// Отпечаток тела: общий для всех подписавших.
+    /// Body fingerprint, shared by all signers.
     pub body_hash: [u8; 32],
-    /// Подписавшие, по возрастанию.
+    /// Signers in ascending order.
     pub signers: Vec<[u8; KEY]>,
 }
 
 impl ControlRequest {
-    /// Тело без подписей.
+    /// Body without signatures.
     ///
     /// # Errors
-    /// [`FormatError`] — поле вне правил.
+    /// [`FormatError`]: a field violates the rules.
     pub fn body(&self) -> Result<Vec<u8>, FormatError> {
         use request_tag as t;
         check_tenant(&self.tenant, t::TENANT)?;
@@ -771,10 +771,10 @@ impl ControlRequest {
         Ok(request)
     }
 
-    /// Подписать одним ключом.
+    /// Sign with one key.
     ///
     /// # Errors
-    /// [`FormatError`] — тело или подпись.
+    /// [`FormatError`]: body or signature.
     pub fn sign(&self, signer: &dyn Signer) -> Result<Vec<u8>, FormatError> {
         assemble(&self.body()?, &[sign_body(&self.body()?, signer)?])
     }
@@ -803,7 +803,7 @@ fn assemble(body: &[u8], signatures: &[([u8; KEY], [u8; SIG])]) -> Result<Vec<u8
     Ok(out)
 }
 
-/// Подпись под намерением: ключ и подпись.
+/// Intent signature: key and signature.
 type Signature = ([u8; KEY], [u8; SIG]);
 
 fn split_request(bytes: &[u8]) -> Result<(Vec<Signature>, &[u8]), FormatError> {
@@ -828,38 +828,38 @@ fn split_request(bytes: &[u8]) -> Result<(Vec<Signature>, &[u8]), FormatError> {
     Ok((signatures, rest))
 }
 
-/// Разобрать намерение и проверить КАЖДУЮ подпись.
+/// Parse an intent and verify EVERY signature.
 ///
-/// Кто вправе подписывать — решает сервер по составу привязки; здесь только
-/// «подпись сходится с названным ключом».
+/// The server determines who may sign from the binding roster; this only checks
+/// that "the signature verifies with the named key".
 ///
-/// # Почему подпись РАНЬШЕ разбора
+/// # Why signature verification PRECEDES parsing
 ///
-/// Тот же довод И-5, что у [`crate::revocation::verify_signed`] и соседей:
-/// разбор незаверенных байтов сам по себе оракул — различимые коды отказа
-/// (`MissingField`, `UnknownCriticalField`, `BadFieldLength` с номером тега)
-/// сообщаются о том, чего никто не подписывал, и подделка становится отличима
-/// от обрезания. Здесь разбор до проверки ничем не ВЫНУЖДЕН: ключи проверки
-/// лежат в КОНВЕРТЕ, который `split_request` отделяет до всякого TLV, — в
-/// отличие от заголовка контейнера, где ключ подписи лежит внутри
-/// подписываемого и снаружи его взять неоткуда.
+/// The same I-5 rationale as [`crate::revocation::verify_signed`] and its neighbors:
+/// parsing unauthenticated bytes is itself an oracle; distinguishable rejection codes
+/// (`MissingField`, `UnknownCriticalField`, `BadFieldLength` with a tag number)
+/// report on data nobody signed, distinguishing forgery
+/// from truncation. Nothing here REQUIRES parsing before verification: verification keys
+/// are in the ENVELOPE, which `split_request` separates before any TLV,
+/// unlike the container header, whose signing key resides within the
+/// signed material and cannot be obtained from outside.
 ///
-/// # Пустой конверт
+/// # Empty envelope
 ///
-/// Ноль подписей означал бы тривиально пройденный цикл: тело разобралось бы
-/// незаверенным, и перестановка строк внутри этой функции от такого не спасает
-/// — спасать обязан рубеж РАНЬШЕ. Он есть: `split_request` отвергает
-/// `count == 0` до чтения самих подписей (проба
-/// `documents_beyond_the_size_limits_are_refused_before_parsing`), так что до
-/// цикла документ без подписей не доходит и улучшать здесь нечего.
+/// Zero signatures would trivially pass the loop, allowing unauthenticated body parsing;
+/// reordering lines within this function would not prevent that.
+/// An EARLIER boundary must prevent it. It exists: `split_request` rejects
+/// `count == 0` before reading signatures (test
+/// `documents_beyond_the_size_limits_are_refused_before_parsing`), so an unsigned
+/// document never reaches the loop, leaving nothing to improve here.
 ///
-/// Кворум — сколько подписей и ЧЬИ — считает вызывающий, и оба места известны:
-/// `quorum_met` в `cc-authority/src/control.rs` (по составу текущей ревизии) и
-/// сверка с `roster`/`threshold` прежней эпохи в [`verify_chain`], куда ведёт
+/// The caller counts the quorum, how many signatures and WHOSE; both sites are known:
+/// `quorum_met` in `cc-authority/src/control.rs` (using the current revision's roster), and
+/// comparison with the previous epoch's `roster`/`threshold` in [`verify_chain`], reached by
 /// `cc_cli::chain::check`.
 ///
 /// # Errors
-/// [`FormatError`] — раскладка или любая несходящаяся подпись.
+/// [`FormatError`]: layout or any failed signature.
 pub fn open_request(bytes: &[u8]) -> Result<SignedRequest, FormatError> {
     let (signatures, body) = split_request(bytes)?;
     let t = transcript(label::CONTROL_REQUEST, body);
@@ -870,10 +870,10 @@ pub fn open_request(bytes: &[u8]) -> Result<SignedRequest, FormatError> {
     Ok(SignedRequest { request, body_hash: sha256(body), signers: signatures.into_iter().map(|(k, _)| k).collect() })
 }
 
-/// Дописать подпись ещё одного управляющего под тем же телом.
+/// Append another controller's signature over the same body.
 ///
 /// # Errors
-/// [`FormatError`] — раскладка, подпись, подписант уже подписал.
+/// [`FormatError`]: layout, signature or duplicate signer.
 pub fn cosign(bytes: &[u8], signer: &dyn Signer) -> Result<Vec<u8>, FormatError> {
     let (mut signatures, body) = split_request(bytes)?;
     open_request(bytes)?;
@@ -900,20 +900,20 @@ mod receipt_tag {
     pub const AT: u16 = 10;
 }
 
-/// Чем кончилась операция.
+/// Operation outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Outcome {
-    /// Исполнено и зафиксировано по профилю сохранности.
+    /// Executed and committed under the durability profile.
     Committed = 1,
-    /// Отвергнуто; состояние не менялось. Причина — в `reason`.
+    /// Rejected; state unchanged. Reason in `reason`.
     Rejected = 2,
-    /// Зафиксировано у сервера, но подтверждение реплики не получено:
-    /// успехом НЕ считается; повтор того же намерения спросит снова.
+    /// Committed on the server, but replica acknowledgment has not arrived:
+    /// NOT success; replaying the same intent asks again.
     PendingDurability = 3,
-    /// Тождество операции уже занято другим телом.
+    /// Operation identity already occupied by another body.
     IdConflict = 4,
-    /// Намерение составлено поверх другой ревизии.
+    /// The intent was based on another revision.
     StaleRevision = 5,
 }
 
@@ -931,28 +931,28 @@ impl Outcome {
     }
 }
 
-/// Квитанция сервера — см. шапку модуля.
+/// Server receipt; see the module documentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Receipt {
     pub request_hash: [u8; 32],
     pub operation_id: [u8; 16],
     pub outcome: Outcome,
-    /// Ревизия привязки ПОСЛЕ операции (у отказа — текущая).
+    /// Binding revision AFTER the operation (current revision for rejection).
     pub revision: u64,
-    /// Отпечаток зафиксированной привязки; нули, если фиксации не было.
+    /// Committed binding fingerprint; zero if nothing was committed.
     pub commit: [u8; 32],
     pub epoch: u64,
-    /// Достигнутая сохранность: профиль, по которому фиксация подтверждена.
+    /// Achieved durability: the profile under which the commit was acknowledged.
     pub durability: Durability,
     pub reason: String,
     pub at: i64,
 }
 
 impl Receipt {
-    /// Тело без подписи.
+    /// Unsigned body.
     ///
     /// # Errors
-    /// [`FormatError`] — причина вне правил.
+    /// [`FormatError`]: the reason violates the rules.
     pub fn body(&self) -> Result<Vec<u8>, FormatError> {
         use receipt_tag as t;
         check_reason(&self.reason, t::REASON)?;
@@ -970,10 +970,10 @@ impl Receipt {
         Ok(w.finish().to_vec())
     }
 
-    /// Подписать ключом подписи лизингов.
+    /// Sign with the lease-signing key.
     ///
     /// # Errors
-    /// [`FormatError`] — тело или подпись.
+    /// [`FormatError`]: body or signature.
     pub fn sign(&self, signer: &dyn Signer) -> Result<Vec<u8>, FormatError> {
         let body = self.body()?;
         let sig = signer
@@ -984,10 +984,10 @@ impl Receipt {
         Ok(out)
     }
 
-    /// Разобрать и проверить ключом сервера.
+    /// Parse and verify with the server key.
     ///
     /// # Errors
-    /// [`FormatError`] — раскладка или подпись.
+    /// [`FormatError`]: layout or signature.
     pub fn open(bytes: &[u8], lease_public: &[u8; KEY]) -> Result<Self, FormatError> {
         use receipt_tag as t;
         let (sig, body) = split_signed(bytes)?;
@@ -1054,19 +1054,19 @@ mod transfer_tag {
     pub const BINDING: u16 = 10;
 }
 
-/// Что делать с лизингами, выданными прежним сервером.
+/// How to handle leases issued by the previous server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum OldLeases {
-    /// Действуют до своего срока: обычный плановый перенос.
+    /// Remain valid until expiration: ordinary planned migration.
     Honour = 0,
-    /// Не принимаются, если выданы ПОСЛЕ точки перехода: так отсекается
-    /// прежний писатель, продолживший выдавать из резерва.
+    /// Rejected if issued AFTER the transition point, cutting off
+    /// an old writer that continued issuing from a backup.
     RejectAfterTransition = 1,
 }
 
 impl OldLeases {
-    /// Из байта; незнакомый — отказ (И-10).
+    /// From a byte; unknown means rejection (I-10).
     #[must_use]
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
@@ -1077,33 +1077,33 @@ impl OldLeases {
     }
 }
 
-/// Сертификат передачи полномочий: прежняя эпоха называет следующую.
+/// Authority transfer certificate: the previous epoch names the next.
 ///
-/// Подписывает его состав управляющих ПРЕЖНЕЙ эпохи — тот, что назван в её
-/// привязке. Новая привязка едет внутри: её подпись своим ключом сама по себе
-/// ничего не значит, значение ей даёт подпись состава под этим сертификатом.
+/// Signed by the PREVIOUS epoch's controller roster, the one named in its
+/// binding. The new binding is carried inside: its self-signature means nothing
+/// by itself; the roster's signature over this certificate gives it authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transfer {
-    /// Тождество сервера: при передаче НЕ меняется.
+    /// Server identity: does NOT change on transfer.
     pub authority_id: [u8; 16],
     pub from_epoch: u64,
     pub to_epoch: u64,
-    /// Ключ подписи лизингов прежней эпохи — им проверена прежняя привязка.
+    /// Previous epoch's lease-signing key, used to verify the previous binding.
     pub from_lease: [u8; KEY],
-    /// С какого момента полномочия у новой эпохи.
+    /// When the new epoch takes authority.
     pub transition_at: i64,
     pub old_leases: OldLeases,
     pub issued_at: i64,
     pub expires_at: i64,
-    /// Подписанная привязка НОВОЙ эпохи.
+    /// Signed binding of the NEW epoch.
     pub binding: Vec<u8>,
 }
 
 impl Transfer {
-    /// Тело без подписей.
+    /// Body without signatures.
     ///
     /// # Errors
-    /// [`FormatError`] — эпохи не подряд, срок обратный, привязка вне пределов.
+    /// [`FormatError`]: nonconsecutive epochs, reversed time interval or out-of-bounds binding.
     pub fn body(&self) -> Result<Vec<u8>, FormatError> {
         use transfer_tag as t;
         if self.to_epoch != self.from_epoch.checked_add(1).ok_or(bad(t::TO_EPOCH, 8))? {
@@ -1129,10 +1129,10 @@ impl Transfer {
         Ok(w.finish().to_vec())
     }
 
-    /// Подписать одним ключом состава.
+    /// Sign with one roster key.
     ///
     /// # Errors
-    /// [`FormatError`] — тело или подпись.
+    /// [`FormatError`]: body or signature.
     pub fn sign(&self, signer: &dyn Signer) -> Result<Vec<u8>, FormatError> {
         let body = self.body()?;
         let sig = signer
@@ -1185,21 +1185,21 @@ impl Transfer {
     }
 }
 
-/// Разобрать сертификат передачи и проверить КАЖДУЮ подпись.
+/// Parse a transfer certificate and verify EVERY signature.
 ///
-/// Кто вправе подписывать — решает проверяющий по составу прежней привязки;
-/// здесь только «подпись сходится с названным ключом».
+/// The verifier determines who may sign from the previous binding's roster;
+/// this only checks that "the signature verifies with the named key".
 ///
-/// # Почему подпись РАНЬШЕ разбора
+/// # Why signature verification PRECEDES parsing
 ///
-/// Довод и оговорка о пустом конверте — те же, что у [`open_request`], и
-/// записаны там: конверт у обоих один (`split_request`), а разошлись эти два
-/// комбинатора уже однажды — ровно та болезнь «один путь чинят, соседний
-/// забывают», о которой говорит проба
+/// The rationale and empty-envelope caveat are the same as [`open_request`], documented
+/// there: both use the same envelope (`split_request`), yet these two
+/// combinators already diverged once, precisely the "one path fixed, its neighbor
+/// forgotten" problem captured by the test
 /// `a_transfer_opens_only_while_every_signature_holds`.
 ///
 /// # Errors
-/// [`FormatError`] — раскладка или любая несходящаяся подпись.
+/// [`FormatError`]: layout or any failed signature.
 pub fn open_transfer(bytes: &[u8]) -> Result<(Transfer, Vec<[u8; KEY]>), FormatError> {
     let (signatures, body) = split_request(bytes)?;
     let t = transcript(label::AUTHORITY_TRANSFER, body);
@@ -1210,10 +1210,10 @@ pub fn open_transfer(bytes: &[u8]) -> Result<(Transfer, Vec<[u8; KEY]>), FormatE
     Ok((transfer, signatures.into_iter().map(|(k, _)| k).collect()))
 }
 
-/// Дописать подпись ещё одного управляющего под тем же сертификатом.
+/// Append another controller's signature over the same certificate.
 ///
 /// # Errors
-/// [`FormatError`] — раскладка, подпись, подписант уже подписал.
+/// [`FormatError`]: layout, signature or duplicate signer.
 pub fn cosign_transfer(bytes: &[u8], signer: &dyn Signer) -> Result<Vec<u8>, FormatError> {
     let (mut signatures, body) = split_request(bytes)?;
     open_transfer(bytes)?;
@@ -1227,33 +1227,33 @@ pub fn cosign_transfer(bytes: &[u8], signer: &dyn Signer) -> Result<Vec<u8>, For
     assemble(body, &signatures)
 }
 
-/// Кем сервер стал после цепочки передач.
+/// What the server became after a transfer chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effective {
-    /// Привязка действующей эпохи.
+    /// Binding of the active epoch.
     pub binding: Binding,
-    /// Её подписанные байты.
+    /// Its signed bytes.
     pub bytes: Vec<u8>,
-    /// Момент последнего перехода; `None` — передач не было.
+    /// Time of the last transition; `None` means no transfers.
     pub transition_at: Option<i64>,
-    /// Судьба лизингов прежней эпохи.
+    /// Treatment of the previous epoch's leases.
     pub old_leases: Option<OldLeases>,
-    /// Ключи прежних эпох по порядку: ими проверяются старые лизинги.
+    /// Previous epoch keys in order, used to verify old leases.
     pub previous_keys: Vec<[u8; KEY]>,
 }
 
-/// Почему цепочка не принята.
+/// Why the chain was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainError {
-    /// Первая привязка не проверяется якорем.
+    /// The first binding does not verify against the anchor.
     NotAnchored,
-    /// Сертификат подписан не составом прежней эпохи.
+    /// The certificate was not signed by the previous epoch's roster.
     NotAuthorized { have: u8, need: u8 },
-    /// Эпохи не подряд, тождество сменилось или ключ не тот.
+    /// Nonconsecutive epochs, changed identity or wrong key.
     Broken(&'static str),
-    /// Раскладка документа.
+    /// Document layout.
     Malformed(String),
-    /// Сертификат просрочен на момент проверки.
+    /// The certificate was expired at verification time.
     Expired { expires_at: i64, now: i64 },
 }
 
@@ -1277,15 +1277,15 @@ impl core::fmt::Display for ChainError {
     }
 }
 
-/// Проверить цепочку: первую привязку — якорем, каждую передачу — составом
-/// прежней эпохи.
+/// Verify a chain: the first binding against the anchor, each transfer against the
+/// previous epoch's roster.
 ///
-/// `anchor` — ключ подписи лизингов из ЗАГОЛОВКА контейнера. Ни один документ
-/// цепочки не назначает себе доверие сам: сертификат проверяется составом,
-/// названным в привязке, которая проверена раньше.
+/// `anchor` is the lease-signing key from the container HEADER. No document
+/// in the chain declares itself trusted: a certificate is verified against the roster
+/// named in the already verified binding.
 ///
 /// # Errors
-/// [`ChainError`] — якорь, полномочие, непрерывность, срок или раскладка.
+/// [`ChainError`]: anchor, authority, continuity, lifetime or layout.
 pub fn verify_chain(
     first: &[u8],
     transfers: &[Vec<u8>],
@@ -1509,21 +1509,21 @@ mod tests {
         assert!(Receipt::open(&bytes, &other.public_key()).is_err());
     }
 
-    /// СЕРТИФИКАТ ПЕРЕДАЧИ ОТКРЫВАЕТСЯ, ПОКА КАЖДАЯ ЕГО ПОДПИСЬ СХОДИТСЯ.
+    /// A TRANSFER CERTIFICATE OPENS ONLY WHILE EVERY SIGNATURE VERIFIES.
     ///
-    /// # Почему проба заведена отдельно от намерения
+    /// # Why a separate test from the intent
     ///
-    /// Потому что `open_transfer` и `open_request` — два РАЗНЫХ комбинатора, и
-    /// сторож был только у второго. Снятие `oc_crypto::sign::verify` из
-    /// `open_transfer` не роняло ни одной пробы: сертификат разбирался,
-    /// сверялся сам с собой (`transfer.body()? != body`) и объявлялся открытым —
-    /// то есть переход полномочий к новой эпохе принимался бы без подписи
-    /// прежнего состава. Ровно эта болезнь описана в CLAUDE.md как «один путь
-    /// чинят, соседний забывают».
+    /// Because `open_transfer` and `open_request` are two DIFFERENT combinators,
+    /// and only the second was guarded. Removing `oc_crypto::sign::verify` from
+    /// `open_transfer` broke no tests: the certificate was parsed,
+    /// compared with itself (`transfer.body()? != body`) and declared open,
+    /// so a transfer of authority to a new epoch would be accepted without a signature
+    /// from the previous roster. CLAUDE.md describes precisely this problem as "one path
+    /// fixed, its neighbor forgotten".
     ///
-    /// Перебор по КАЖДОМУ байту, а не по трём выбранным: байты подписей и байты
-    /// названных ключей тело собой не проверяет, и единственное, что их
-    /// стережёт, — та самая проверка подписи.
+    /// EVERY byte is tested, not three selected positions: the body does not authenticate
+    /// signature bytes or named-key bytes itself; their only guard
+    /// is that signature check.
     #[test]
     fn a_transfer_opens_only_while_every_signature_holds() {
         let s = server();
@@ -1558,23 +1558,23 @@ mod tests {
         }
     }
 
-    /// НЕРАЗБИРАЕМОЕ ТЕЛО ОТВЕРГАЕТСЯ ПОДПИСЬЮ, А НЕ РАЗБОРОМ.
+    /// AN UNPARSEABLE BODY IS REJECTED BY SIGNATURE VERIFICATION, NOT PARSING.
     ///
-    /// Довод — И-5 для подписанных документов: различимый код отказа разбора,
-    /// выданный о теле, которого никто не подписывал, и есть оракул. Тело здесь
-    /// заведомо неразбираемое (незнакомый КРИТИЧНЫЙ тег `0x7ABC`), поэтому оба
-    /// рубежа хотят ответить — и видно, который отвечает первым.
+    /// The rationale is I-5 for signed documents: a distinguishable parsing rejection
+    /// for a body nobody signed is an oracle. The body here is deliberately
+    /// unparseable (unknown CRITICAL tag `0x7ABC`), so both
+    /// boundaries want to reject it, revealing which responds first.
     ///
-    /// # Почему без положительного контроля проба была бы слепа
+    /// # Why the test would be blind without a positive control
     ///
-    /// Потому что `BadHeaderSignature` при неверной подписи вернётся и при
-    /// обратном порядке — для ЛЮБОГО тела, которое разбирается. Различает
-    /// порядок только пара: то же самое тело с ВЕРНОЙ подписью обязано дать
-    /// именно [`FormatError::UnknownCriticalField`]. Пройди обе половины при
-    /// обратном порядке — проба не про порядок.
+    /// Because an invalid signature returns `BadHeaderSignature` even with
+    /// reversed ordering, for ANY parseable body. Only a pair distinguishes
+    /// the order: that same body with a VALID signature must yield
+    /// exactly [`FormatError::UnknownCriticalField`]. If both halves passed under
+    /// reversed ordering, the test would not be testing order.
     ///
-    /// Обе двери в одной пробе намеренно: конверт у них общий, а разошлись они
-    /// уже однажды.
+    /// Both entry points intentionally share one test: their envelope is shared, yet they
+    /// have already diverged once.
     #[test]
     fn an_unparsable_body_is_refused_by_the_signature_first() {
         let a = Ed25519Signer::from_seed(&[0x71; 32]);
@@ -1582,8 +1582,8 @@ mod tests {
         w.put(0x7ABC, b"no reader knows this tag").unwrap();
         let body = w.finish().to_vec();
 
-        /// Дверь: как зовётся, под какой меткой подписана, чем открывается.
-        /// Итог сводится к `()` — пробу занимает КОД отказа, а не содержимое.
+        /// Entry point: its name, signing label and opening function.
+        /// The result is reduced to `()`: the test cares about the rejection CODE, not contents.
         type Door<'a> = (&'a str, oc_crypto::Label, &'a dyn Fn(&[u8]) -> Result<(), FormatError>);
 
         let request_door = |bytes: &[u8]| open_request(bytes).map(|_| ());
@@ -1613,9 +1613,9 @@ mod tests {
         }
     }
 
-    /// ГРАНИЦЫ РАЗМЕРА — у документа, приходящего с провода, они обязаны быть
-    /// проверены ДО разбора, а не после: разбор мусора длиной в мегабайты и
-    /// есть отказ в обслуживании.
+    /// SIZE BOUNDARIES: for a document arriving from the wire, these must be
+    /// checked BEFORE parsing, not afterward: parsing megabytes of garbage
+    /// is itself denial of service.
     #[test]
     fn documents_beyond_the_size_limits_are_refused_before_parsing() {
         let a = Ed25519Signer::from_seed(&[0x51; 32]);

@@ -1,39 +1,39 @@
-//! Документы AGENT PROTOCOL: грант агента и делегирование потомку.
+//! AGENT PROTOCOL documents: agent grant and delegation to a descendant.
 //!
-//! # Что это за разговор и чем он отличается от одобрения
+//! # What this conversation is and how it differs from approval
 //!
-//! Одобрение ([`crate::access::Decision`]) отвечает на вопрос «этот человек из
-//! числа тех, кому предназначен ЭТОТ файл»: один `file_id`, одна подпись, ни
-//! слова о сроке. Грант агента отвечает на другой — «этой двери на это ПОДДЕРЕВО
-//! и до этого часа», — и свести его к пачке одобрений нельзя: пачка была бы N
-//! решениями человека, N подписями и ни одним местом для ключа подписи двери,
-//! срока и глубины делегирования.
+//! Approval ([`crate::access::Decision`]) asks "is this person among
+//! the intended recipients of THIS file?": one `file_id`, one signature, no
+//! mention of expiration. An agent grant asks instead "this door, this SUBTREE,
+//! until this time". It cannot be reduced to a batch of approvals: that would be N
+//! human decisions, N signatures and nowhere for the door signing key,
+//! expiration or delegation depth.
 //!
-//! # Почему у двери ДВЕ пары ключей
+//! # Why the door has TWO key pairs
 //!
-//! Устройство в протоколе — согласовательный ключ (`activation.rs`), и
-//! подписывать им нечем. Дверь же обязана подписывать делегирования потомкам,
-//! иначе заверить их нечем вовсе. Поэтому у двери вторая пара, Ed25519, и автор
-//! называет её открытую половину в гранте: `door_verify`. Ключ этот попадает
-//! под подпись автора — значит подменить его посредник не может, не сломав
-//! подпись.
+//! A device in the protocol is a key-agreement public key (`activation.rs`), which
+//! cannot sign. A door must sign delegations to descendants,
+//! otherwise there is nothing to authenticate them with. Thus it has a second pair, Ed25519;
+//! the author names its public half in the grant as `door_verify`. This key is covered
+//! by the author's signature, so an intermediary cannot replace it without breaking
+//! the signature.
 //!
-//! # Что подписывается
+//! # What is signed
 //!
-//! **Сырые байты тела, а не пересобранная структура**, и подпись лежит ВПЕРЕДИ
-//! тела — та же раскладка, что у лиза, отзывной и распоряжения
-//! (`подпись(64) ‖ тело`). Проверяется она ДО разбора TLV (И-5, И-6): разбор
-//! незаверенных байтов сам по себе оракул — различимые коды ошибок сообщают о
-//! том, чего никто не подписывал.
+//! **Raw body bytes, not a reconstructed structure**; the signature PRECEDES
+//! the body, matching the layout of leases, revocations and orders
+//! (`signature(64) ‖ body`). It is checked BEFORE TLV parsing (I-5, I-6): parsing
+//! unauthenticated bytes is itself an oracle, yielding distinguishable error codes about
+//! material nobody signed.
 //!
-//! # Чей ключ проверяет грант
+//! # Whose key verifies the grant
 //!
-//! `author_key` берётся ВЫЗЫВАЮЩИМ — из заголовка контейнера или из записи
-//! сервера о файле, — а не из принесённого документа. Ключ, лежащий внутри
-//! документа, сверяется с переданным константным временем и служит ровно одному:
-//! сделать «кому адресован этот грант» частью подписанного тела. Тот же приём,
-//! которым закреплён ключ подписи лиза: истина о том, кто вправе решать,
-//! приходит из подписанного заголовка, а не из слов собеседника.
+//! The CALLER obtains `author_key` from the container header or the server's file
+//! record, not the submitted document. The embedded key
+//! is compared with the supplied key in constant time and serves just one purpose:
+//! making "to whom this grant is addressed" part of the signed body. The same technique
+//! pins the lease-signing key: authority to decide
+//! comes from the signed header, not the peer's claims.
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
@@ -41,108 +41,108 @@ use oc_policy::Policy;
 
 use crate::access::Blob;
 
-/// Длина подписи в начале документа — как у лиза ([`crate::lease::SIGNATURE_LEN`]).
+/// Signature length at the document start, as for leases ([`crate::lease::SIGNATURE_LEN`]).
 ///
-/// Подпись впереди тела намеренно: её длина фиксирована, и читатель добирается до
-/// неё, не разобрав ни байта тела.
+/// The signature deliberately precedes the body: its length is fixed, so the reader reaches
+/// it without parsing any body bytes.
 pub const SIGNATURE_LEN: usize = 64;
 
-/// Сколько файлов помещается в один грант.
+/// Maximum files in one grant.
 ///
-/// Предел нужен потому, что длину списка называет ЧУЖАЯ сторона: без него
-/// «разбери грант» означало бы «выдели столько записей, сколько скажет
-/// собеседник». Двести пятьдесят шесть — поддерево, которое человек в состоянии
-/// выдать одним решением; дерево крупнее режется на несколько грантов, и это
-/// честнее одного гранта, о составе которого автор судить уже не может.
+/// The limit is needed because a FOREIGN party supplies the list length; without it,
+/// "parse the grant" would mean "allocate as many entries as the peer
+/// asks for". Two hundred fifty-six is a subtree a person can
+/// authorize in one decision; a larger tree is split into several grants,
+/// more honestly than one grant whose contents the author can no longer assess.
 pub const MAX_GRANT_FILES: usize = 256;
 
-/// Наибольшая глубина делегирования, какую грант вправе разрешить.
+/// Maximum delegation depth a grant may allow.
 ///
-/// Потолок стоит в ФОРМАТЕ, а не только в сервере, и это не дублирование: длина
-/// цепочки — это длина списка, который проверяющий обязан обойти, а обход этот
-/// делает и клиент. Четыре звена — предел, за которым человек, выдавший грант,
-/// уже не представляет, у кого оказался доступ.
+/// The cap belongs to the FORMAT, not just the server; this is not duplication: chain
+/// length is the length of a list the verifier must traverse, and clients
+/// also traverse it. Four links is the limit beyond which the person issuing the grant
+/// can no longer picture who has access.
 pub const MAX_GRANT_DEPTH: u8 = 4;
 
-/// Единственный механизм согласования, который этап 1 ИСПОЛНЯЕТ у двери.
+/// The only key-agreement mechanism stage 1 EXECUTES for a door.
 ///
-/// Ключи двери эфемерны и живут в памяти процесса; TPM здесь не участвует, а
-/// постквантовой половины у двери нет. Разобрать номер и суметь его исполнить —
-/// разные вещи (CLAUDE.md, «Как менять формат», правило 4), поэтому иной номер
-/// отвергается НА РАЗБОРЕ, а не на первой попытке распечатать долю.
+/// Door keys are ephemeral and reside in process memory; TPM is not involved,
+/// and the door has no post-quantum half. Parsing a number and being able to execute it
+/// are different things (CLAUDE.md, "How to change the format", rule 4), so another number
+/// is rejected DURING PARSING, not on the first attempt to unseal a share.
 const DOOR_KEM_X25519: u8 = 1;
 
-/// Реестр тегов гранта. Возрастание строгое, критичность по диапазону (И-7).
+/// Grant tag registry. Strictly ascending; criticality by range (I-7).
 ///
-/// Номера нормативны: тело подписывается сырыми байтами, поэтому реализация,
-/// пронумеровавшая поля иначе, соберёт другую подпись и молча разойдётся.
+/// Numbers are normative: raw body bytes are signed, so an implementation
+/// numbering fields differently would produce another signature and silently diverge.
 pub mod tag {
-    /// Имя гранта: на него ссылаются отзыв и делегирования. `bytes[16]`.
+    /// Grant name, referenced by revocation and delegations. `bytes[16]`.
     pub const GRANT_ID: u16 = 1;
-    /// Отпечаток согласовательного ключа двери. `bytes[32]`.
+    /// Fingerprint of the door's key-agreement public key. `bytes[32]`.
     pub const DOOR_FPR: u16 = 2;
-    /// Механизм согласования двери. `u8`.
+    /// Door key-agreement mechanism. `u8`.
     pub const DOOR_KEM: u16 = 3;
-    /// Согласовательный ключ двери: на него запечатаны доли B.
+    /// Door key-agreement public key, to which shares B are sealed.
     pub const DOOR_PUBLIC: u16 = 4;
-    /// Ключ Ed25519 двери — им дверь подписывает делегирования. `bytes[32]`.
+    /// Door Ed25519 key, used to sign delegations. `bytes[32]`.
     pub const DOOR_VERIFY: u16 = 5;
-    /// Список `(file_id, доля B)`, вложенный TLV с нумерацией позицией.
+    /// List of `(file_id, share B)`, nested TLV numbered by position.
     pub const ENTRIES: u16 = 6;
-    /// Момент выдачи. `i64le`, секунды.
+    /// Issuance time. `i64le`, seconds.
     pub const ISSUED_AT: u16 = 7;
-    /// Момент истечения. `i64le`, секунды.
+    /// Expiration time. `i64le`, seconds.
     pub const EXPIRES_AT: u16 = 8;
-    /// Ужесточение политики, кодек `policy_codec`. Необязательно: нет поля —
-    /// грант не ужесточает ничего.
+    /// Policy restriction using `policy_codec`. Optional: absence means
+    /// the grant adds no restrictions.
     pub const TIGHTENING: u16 = 9;
-    /// Предел глубины делегирования. `u8`; 0 — делегировать нельзя.
+    /// Delegation depth limit. `u8`; 0 forbids delegation.
     pub const MAX_DEPTH: u16 = 10;
-    /// Ключ автора, которым подписан грант. `bytes[32]`.
+    /// Author key signing the grant. `bytes[32]`.
     pub const AUTHOR_KEY: u16 = 11;
 }
 
-/// Реестр тегов делегирования. Свой, а не общий с грантом.
+/// Delegation tag registry, separate from the grant's.
 ///
-/// Общий реестр сэкономил бы десяток строк и стоил бы дорого: у двух документов
-/// разный состав полей, и тег, означающий в одном «ключ автора», а в другом
-/// «глубина», — это приглашение перепутать их при чтении.
+/// A shared registry would save a dozen lines at a high cost: the documents have
+/// different field sets, and a tag meaning "author key" in one and
+/// "depth" in the other invites confusion when reading.
 pub mod link_tag {
-    /// Корень цепочки. `bytes[16]`.
+    /// Chain root. `bytes[16]`.
     pub const GRANT_ID: u16 = 1;
-    /// Кто делегирует. `bytes[32]`.
+    /// Who delegates. `bytes[32]`.
     pub const PARENT_FPR: u16 = 2;
-    /// Отпечаток двери потомка. `bytes[32]`.
+    /// Descendant door fingerprint. `bytes[32]`.
     pub const CHILD_FPR: u16 = 3;
-    /// Механизм согласования потомка. `u8`.
+    /// Descendant key-agreement mechanism. `u8`.
     pub const CHILD_KEM: u16 = 4;
-    /// Согласовательный ключ потомка.
+    /// Descendant key-agreement public key.
     pub const CHILD_PUBLIC: u16 = 5;
-    /// Ключ Ed25519 потомка. `bytes[32]`.
+    /// Descendant Ed25519 key. `bytes[32]`.
     pub const CHILD_VERIFY: u16 = 6;
-    /// Подмножество списка родителя, доли перепечатаны на ключ потомка.
+    /// Subset of the parent's list; shares resealed to the descendant key.
     pub const ENTRIES: u16 = 7;
-    /// Момент истечения. `i64le`, секунды.
+    /// Expiration time. `i64le`, seconds.
     pub const EXPIRES_AT: u16 = 8;
-    /// Ужесточение политики, тот же кодек.
+    /// Policy restriction using the same codec.
     pub const TIGHTENING: u16 = 9;
-    /// Сколько ещё звеньев разрешено НИЖЕ этого. `u8`.
+    /// Further links allowed BELOW this one. `u8`.
     pub const DEPTH: u16 = 10;
-    /// Список действий потомка — ПОДМНОЖЕСТВО родительских правил
-    /// (`oc_protocol::action::ActionRule`, Agent Protocol, этап 2).
+    /// Descendant action list: a SUBSET of the parent's rules
+    /// (`oc_protocol::action::ActionRule`, Agent Protocol, stage 2).
     ///
-    /// Тег НЕОБЯЗАТЕЛЬНЫЙ (> `0x7FFF`), и это условие задачи, а не украшение:
-    /// читатель первого этапа обязан пропустить его мимо и проверить цепочку
-    /// ФАЙЛОВ ровно как прежде (И-7). Отсутствие поля и пустой список значат
-    /// одно — «действий потомку не передано», — и умолчание это ЗАПРЕТ (И-10).
+    /// The tag is OPTIONAL (> `0x7FFF`), a requirement rather than decoration:
+    /// a stage 1 reader must skip it and verify the FILE
+    /// chain exactly as before (I-7). An absent field and an empty list both mean
+    /// "no actions delegated to the descendant"; this default is DENIAL (I-10).
     ///
-    /// Кодек тот же, что у списка правил гранта действий (`action::encode_rules`):
-    /// второе представление того же смысла разошлось бы с первым на первой же
-    /// новой строке.
+    /// The codec is the same as the action grant rule list (`action::encode_rules`):
+    /// a second representation of the same meaning would diverge from the first upon the very
+    /// first new line.
     pub const ACTIONS: u16 = 0x8001;
 }
 
-/// Теги ОДНОЙ записи списка файлов.
+/// Tags for ONE file-list entry.
 mod entry_tag {
     pub const FILE_ID: u16 = 1;
     pub const ENC: u16 = 2;
@@ -150,53 +150,53 @@ mod entry_tag {
     pub const CT: u16 = 4;
 }
 
-/// Один файл гранта: его имя и доля B, запечатанная на ключ держателя.
+/// One grant file: its name and share B, sealed to the holder's key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub file_id: [u8; 16],
-    /// Та же форма запечатанного блока, что у слота и у доли сервера.
+    /// The same sealed-block shape as a slot and the server share.
     pub share_b: Blob,
 }
 
-/// Грант агента — подписан автором.
+/// An agent grant, signed by the author.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentGrant {
     pub grant_id: [u8; 16],
-    /// `fpr == device_fpr(kem, public)` сверяется константным временем на
-    /// разборе (K27): тройка `(fpr, kem, public)` приходит от чужой стороны, и
-    /// посредник, приславший чужой отпечаток со своим ключом, получил бы долю на
-    /// свой ключ под чужим именем.
+    /// `fpr == device_fpr(kem, public)` is checked in constant time during
+    /// parsing (K27): the triple `(fpr, kem, public)` comes from a foreign party;
+    /// an intermediary supplying someone else's fingerprint with its own key would receive the share
+    /// under someone else's name, sealed to its own key.
     pub door_fpr: [u8; 32],
     pub door_kem: u8,
     pub door_public: Vec<u8>,
     pub door_verify: [u8; 32],
-    /// По возрастанию `file_id`, без повторов. Порядок нормативен: он делает
-    /// «тот же набор файлов» одной последовательностью байтов, а не многими.
+    /// Ascending `file_id`, no duplicates. Ordering is normative: it gives
+    /// "the same file set" one byte sequence rather than many.
     pub entries: Vec<Entry>,
     pub issued_at: i64,
     pub expires_at: i64,
-    /// Ужесточение политики; `None` — «не ужесточает ничего».
+    /// Policy restriction; `None` means "no additional restrictions".
     ///
-    /// Кодек ТОТ ЖЕ, что у политики сервера в лизе и у политики автора в
-    /// заголовке (`oc_format::policy_codec`): второе представление того же
-    /// смысла разошлось бы с первым на первой же новой строке.
+    /// The codec is THE SAME as the server policy in leases and author policy in
+    /// headers (`oc_format::policy_codec`): a second representation of the same
+    /// meaning would diverge upon the first new line.
     pub tightening: Option<Policy>,
     pub max_depth: u8,
     pub author_key: [u8; 32],
     pub signature: [u8; SIGNATURE_LEN],
 }
 
-/// Байты гранта БЕЗ подписи — то, что подписывается и проверяется.
+/// Grant bytes WITHOUT the signature: what is signed and verified.
 ///
-/// Отдельной функцией, потому что подписывающий и проверяющий обязаны собрать
-/// одни и те же байты. Две сборки разошлись бы молча, и подпись перестала бы
-/// значить то, что обещает.
+/// A separate function because signer and verifier must construct
+/// identical bytes. Two constructions would silently diverge, and the signature would cease
+/// to mean what it promises.
 ///
 /// # Errors
-/// [`FormatError`], если грант не той формы, которую наш же читатель примет:
-/// имя двери не называет её ключ, механизм не исполняется, список не по
-/// возрастанию или длиннее [`MAX_GRANT_FILES`], глубина выше
-/// [`MAX_GRANT_DEPTH`], срок кончается раньше начала.
+/// [`FormatError`] if the grant has a shape our reader would reject:
+/// door name does not identify its key, unsupported mechanism, unsorted file list
+/// or more than [`MAX_GRANT_FILES`] entries, depth exceeding
+/// [`MAX_GRANT_DEPTH`], or expiration before issuance.
 pub fn grant_body(grant: &AgentGrant) -> Result<Vec<u8>, FormatError> {
     // Форма проверяется НА ЗАПИСИ, а не только на чтении: наш писатель не должен
     // уметь произвести документ, который наш же читатель обязан отвергнуть, —
@@ -223,11 +223,11 @@ pub fn grant_body(grant: &AgentGrant) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Транскрипт подписи гранта.
+/// Grant signature transcript.
 ///
-/// Через [`oc_crypto::Transcript`], а не ручной сборкой: его конструктор ТРЕБУЕТ
-/// метку и сам ставит разделитель. Собери мы байты руками — метку можно было бы
-/// забыть, и подпись гранта столкнулась бы с подписью заголовка в одном домене.
+/// Uses [`oc_crypto::Transcript`] rather than manual construction: its constructor REQUIRES
+/// a label and inserts the separator. Hand-building bytes could omit
+/// the label, placing grant and header signatures in the same domain.
 #[must_use]
 pub fn grant_transcript(body: &[u8]) -> oc_crypto::Transcript {
     let mut t = oc_crypto::Transcript::new(oc_crypto::label::AGENT_GRANT);
@@ -235,10 +235,10 @@ pub fn grant_transcript(body: &[u8]) -> oc_crypto::Transcript {
     t
 }
 
-/// Закодировать грант целиком: `подпись(64) ‖ тело`.
+/// Encode the complete grant: `signature(64) ‖ body`.
 ///
 /// # Errors
-/// [`FormatError`], если тело не собирается — см. [`grant_body`].
+/// [`FormatError`] if the body cannot be built; see [`grant_body`].
 pub fn encode_grant(grant: &AgentGrant) -> Result<Vec<u8>, FormatError> {
     let body = grant_body(grant)?;
     let mut out = Vec::with_capacity(SIGNATURE_LEN.saturating_add(body.len()));
@@ -247,17 +247,17 @@ pub fn encode_grant(grant: &AgentGrant) -> Result<Vec<u8>, FormatError> {
     Ok(out)
 }
 
-/// Проверить подпись автора, потом разобрать — в этом порядке, и только в этом.
+/// Verify the author's signature, then parse: in this order only.
 ///
-/// `bytes` — документ целиком: `подпись(64) ‖ тело`. `author_key` передаёт
-/// ВЫЗЫВАЮЩИЙ: ключ берётся из заголовка контейнера или из записи сервера о
-/// файле, а не из принесённого документа. Ключ внутри документа сверяется с
-/// переданным константным временем (И-13) — он часть подписанного тела, то есть
-/// утверждение «грант выпущен для этого автора», а не источник истины.
+/// `bytes` is the complete document: `signature(64) ‖ body`. `author_key` comes from
+/// the CALLER, obtained from the container header or the server's file
+/// record, not the submitted document. The embedded key is compared with
+/// the supplied key in constant time (I-13): it belongs to the signed body,
+/// asserting "grant issued for this author", not serving as a source of truth.
 ///
 /// # Errors
-/// [`FormatError::BadHeaderSignature`] при коротком документе и при
-/// несошедшейся подписи; иначе — ошибки разбора и проверки формы.
+/// [`FormatError::BadHeaderSignature`] for a short document or a
+/// failed signature; otherwise parsing and shape-validation errors.
 pub fn decode_grant(bytes: &[u8], author_key: &[u8; 32]) -> Result<AgentGrant, FormatError> {
     let (signature, body) = split_signature(bytes)?;
     oc_crypto::sign::verify(author_key, &grant_transcript(body), &signature)
@@ -274,26 +274,26 @@ pub fn decode_grant(bytes: &[u8], author_key: &[u8; 32]) -> Result<AgentGrant, F
     Ok(grant)
 }
 
-/// Тело гранта из подписанных байтов — БЕЗ проверки подписи.
+/// Grant body from signed bytes, WITHOUT signature verification.
 ///
-/// # Кому это нужно и почему это не дыра
+/// # Who needs this, and why it is not a vulnerability
 ///
-/// Серверу, и ровно затем же, зачем ему [`crate::order::peek`]: ключ проверки он
-/// ищет ПО СОДЕРЖИМОМУ документа — по списку файлов, у записей которых записан
-/// ключ автора, — а искать его, не прочитав список, нечем. Курица и яйцо
-/// разрешаются тем же приёмом, что у распоряжений: здесь разбирают, чтобы
-/// НАЙТИ ключ, и только [`decode_grant`] — чтобы поверить.
+/// The server, for exactly the same reason as [`crate::order::peek`]: it looks up the verification key
+/// FROM DOCUMENT CONTENTS, using the file list whose records contain the
+/// author key. No lookup is possible without reading the list. The chicken-and-egg
+/// problem is resolved as with orders: parsing here serves to
+/// FIND the key; only [`decode_grant`] establishes trust.
 ///
-/// Всё, что отсюда возвращается, годится ровно для поиска ключа. Исполнять по
-/// этому значению нельзя ничего: подпись не проверена, и любое поле выбрал тот,
-/// кто документ прислал.
+/// Everything returned here is suitable only for key lookup. Nothing may be executed
+/// based on this value: the signature is unverified, and whoever sent the document
+/// chose every field.
 ///
-/// Форма при этом проверяется полностью (`check_grant_shape`): И-9 запрещает
-/// выпускать из крейта байты, которых мы не проверили, и «почти разобранный»
-/// грант наружу не уходит.
+/// Shape is nevertheless fully checked (`check_grant_shape`): I-9 forbids
+/// releasing unchecked bytes from the crate; an "almost parsed"
+/// grant does not escape.
 ///
 /// # Errors
-/// [`FormatError`], если байты короче подписи или тело не разбирается.
+/// [`FormatError`] if bytes are shorter than the signature or the body cannot be parsed.
 pub fn peek_grant(bytes: &[u8]) -> Result<AgentGrant, FormatError> {
     let (signature, body) = split_signature(bytes)?;
     let mut grant = decode_grant_body(body)?;
@@ -301,14 +301,14 @@ pub fn peek_grant(bytes: &[u8]) -> Result<AgentGrant, FormatError> {
     Ok(grant)
 }
 
-/// Тело звена из подписанных байтов — БЕЗ проверки подписи.
+/// Link body from signed bytes, WITHOUT signature verification.
 ///
-/// Тот же довод, что у [`peek_grant`], и он здесь даже прямее: ключ проверки
-/// звена — `verify` РОДИТЕЛЯ, а кто родитель, сказано внутри самого звена
-/// (`parent_fpr`). Прочесть это поле, не разобрав тело, нельзя.
+/// The same rationale as [`peek_grant`], more directly here: the link's verification key
+/// is the PARENT's `verify`, and the link itself names its parent
+/// (`parent_fpr`). This field cannot be read without parsing the body.
 ///
 /// # Errors
-/// [`FormatError`], если байты короче подписи или тело не разбирается.
+/// [`FormatError`] if bytes are shorter than the signature or the body cannot be parsed.
 pub fn peek_delegation(bytes: &[u8]) -> Result<Delegation, FormatError> {
     let (signature, body) = split_signature(bytes)?;
     let mut link = decode_delegation_body(body)?;
@@ -360,10 +360,10 @@ fn decode_grant_body(body: &[u8]) -> Result<AgentGrant, FormatError> {
     Ok(grant)
 }
 
-/// Проверки формы, общие для записи и чтения.
+/// Shape checks shared by writing and reading.
 ///
-/// Одной функцией, а не двумя списками: разойдись они — и появился бы документ,
-/// который мы пишем и не читаем, либо читаем и не пишем.
+/// One function, not two lists: divergence would create documents
+/// we write but cannot read, or read but cannot write.
 fn check_grant_shape(grant: &AgentGrant) -> Result<(), FormatError> {
     check_holder_name(
         &grant.door_fpr,
@@ -388,8 +388,8 @@ fn check_grant_shape(grant: &AgentGrant) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Имя держателя называет предъявленный ключ — правило K27, для любого
-/// механизма и ДО всякого использования тройки `(fpr, kem, public)`.
+/// The holder name identifies the presented key: K27 for every
+/// mechanism, BEFORE any use of `(fpr, kem, public)`.
 fn check_holder_name(
     fpr: &[u8; 32],
     kem: u8,
@@ -415,7 +415,7 @@ fn check_holder_name(
     Ok(())
 }
 
-/// Список файлов: не длиннее потолка, строго по возрастанию `file_id`.
+/// File list: within the cap, strictly increasing by `file_id`.
 fn check_entries(entries: &[Entry], list_tag: u16) -> Result<(), FormatError> {
     if entries.len() > MAX_GRANT_FILES {
         return Err(FormatError::BadFieldLength { tag: list_tag, len: entries.len() });
@@ -436,11 +436,11 @@ fn check_entries(entries: &[Entry], list_tag: u16) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Записи списка: вложенный TLV, тег = номер записи.
+/// List entries: nested TLV, tag = entry number.
 ///
-/// Нумерация ПОЗИЦИЕЙ — тот же приём, которым заголовок кодирует слоты
-/// (`oc-format`, запись 10). Своего счётчика записей нет намеренно: он был бы
-/// вторым источником истины о том, сколько их, и разошёлся бы с телом.
+/// Numbering by POSITION uses the same technique as header slots
+/// (`oc-format`, entry 10). There is deliberately no separate entry count:
+/// it would be a second source of truth for the number, potentially diverging from the body.
 fn encode_entries(entries: &[Entry]) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
     for (index, entry) in entries.iter().enumerate() {
@@ -494,10 +494,10 @@ fn decode_entry(bytes: &[u8]) -> Result<Entry, FormatError> {
     })
 }
 
-/// Ужесточение — ТЕМ ЖЕ кодеком, каким кодируется политика сервера в лизе.
+/// Restrictions use THE SAME codec as the server policy in a lease.
 ///
-/// Второй формы политики на проводе быть не должно: она разошлась бы с первой на
-/// первой же новой строке, а хеш политики — межреализационная поверхность.
+/// There must not be a second wire representation of policy: it would diverge upon the
+/// first new line, while the policy hash is an interoperability surface.
 fn encode_tightening(policy: &Policy) -> Result<Vec<u8>, FormatError> {
     oc_format::policy_codec::encode(oc_format::header::CONTAINER_VERSION, policy)
 }
@@ -506,12 +506,12 @@ fn decode_tightening(bytes: &[u8]) -> Result<Policy, FormatError> {
     oc_format::policy_codec::decode(oc_format::header::SUPPORTED_READER_VERSION, bytes)
 }
 
-/// Делегирование — подписано ключом `door_verify` РОДИТЕЛЯ.
+/// Delegation, signed with the PARENT's `door_verify` key.
 ///
-/// Родитель не вправе выдать потомку больше, чем имеет сам, и проверяет это не
-/// он, а [`verify_grant_chain`]: список файлов — подмножество, срок не растёт,
-/// глубина убывает. Здесь, в документе, лежит только то, что родитель УТВЕРЖДАЕТ;
-/// сопоставление с родительским утверждением — работа цепочки.
+/// A parent cannot grant more than it holds; this is enforced not by the parent
+/// but by [`verify_grant_chain`]: the file list is a subset, expiration does not increase,
+/// and depth decreases. The document holds only what the parent ASSERTS;
+/// comparison with the parent's assertion is the chain's job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delegation {
     pub grant_id: [u8; 16],
@@ -520,25 +520,25 @@ pub struct Delegation {
     pub child_kem: u8,
     pub child_public: Vec<u8>,
     pub child_verify: [u8; 32],
-    /// Подмножество родительского списка; доли перепечатаны на ключ потомка.
+    /// Subset of the parent's list; shares resealed to the descendant key.
     pub entries: Vec<Entry>,
     pub expires_at: i64,
     pub tightening: Option<Policy>,
-    /// Сколько ещё звеньев разрешено НИЖЕ этого.
+    /// Further links allowed BELOW this one.
     pub depth: u8,
-    /// Действия, передаваемые потомку. Пустой список — «никаких», и это
-    /// умолчание: тег необязателен, а отсутствующее правило означает ЗАПРЕТ.
+    /// Actions passed to the descendant. An empty list means "none", which is
+    /// the default: the tag is optional, and an absent rule means DENIAL.
     ///
-    /// Здесь, как и у списка файлов, лежит лишь то, что родитель УТВЕРЖДАЕТ;
-    /// сопоставление с родительским правилом — работа [`verify_grant_chain_with_actions`].
+    /// As with the file list, this holds only what the parent ASSERTS;
+    /// comparison with the parent rule is the job of [`verify_grant_chain_with_actions`].
     pub actions: Vec<crate::action::ActionRule>,
     pub signature: [u8; SIGNATURE_LEN],
 }
 
-/// Байты делегирования БЕЗ подписи — то, что подписывается и проверяется.
+/// Delegation bytes WITHOUT the signature: what is signed and verified.
 ///
 /// # Errors
-/// [`FormatError`], если звено не той формы, которую наш же читатель примет.
+/// [`FormatError`] if the link has a shape our own reader would reject.
 pub fn delegation_body(link: &Delegation) -> Result<Vec<u8>, FormatError> {
     check_delegation_shape(link)?;
 
@@ -565,11 +565,11 @@ pub fn delegation_body(link: &Delegation) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Транскрипт подписи делегирования.
+/// Delegation signature transcript.
 ///
-/// Метка своя, а не [`oc_crypto::label::AGENT_GRANT`]: грант подписывает автор,
-/// делегирование — дверь своим эфемерным ключом. Совпади домены — дверь,
-/// получившая грант, выписала бы себе новый, то есть новую глубину и новый срок.
+/// A separate label, not [`oc_crypto::label::AGENT_GRANT`]: the author signs grants,
+/// while the door signs delegations with its ephemeral key. If the domains matched,
+/// a door receiving a grant could issue itself a new one with new depth and expiration.
 #[must_use]
 pub fn delegation_transcript(body: &[u8]) -> oc_crypto::Transcript {
     let mut t = oc_crypto::Transcript::new(oc_crypto::label::DELEGATION);
@@ -577,10 +577,10 @@ pub fn delegation_transcript(body: &[u8]) -> oc_crypto::Transcript {
     t
 }
 
-/// Закодировать делегирование целиком: `подпись(64) ‖ тело`.
+/// Encode the complete delegation: `signature(64) ‖ body`.
 ///
 /// # Errors
-/// [`FormatError`], если тело не собирается — см. [`delegation_body`].
+/// [`FormatError`] if the body cannot be built; see [`delegation_body`].
 pub fn encode_delegation(link: &Delegation) -> Result<Vec<u8>, FormatError> {
     let body = delegation_body(link)?;
     let mut out = Vec::with_capacity(SIGNATURE_LEN.saturating_add(body.len()));
@@ -589,16 +589,16 @@ pub fn encode_delegation(link: &Delegation) -> Result<Vec<u8>, FormatError> {
     Ok(out)
 }
 
-/// Проверить подпись родителя, потом разобрать — в этом порядке, и только в нём.
+/// Verify the parent's signature, then parse: in this order only.
 ///
-/// `parent_verify` — ключ `verify` РОДИТЕЛЯ, переданный вызывающим: у первого
-/// звена это `door_verify` гранта, у прочих — `child_verify` предыдущего. Внутри
-/// документа этого ключа нет и быть не должно — иначе звено само называло бы,
-/// чем его проверять.
+/// `parent_verify` is the PARENT's `verify` key supplied by the caller: for the first
+/// link it is the grant's `door_verify`, for subsequent links the previous link's `child_verify`.
+/// The document neither contains nor must contain this key; otherwise the link itself
+/// would choose its verification key.
 ///
 /// # Errors
-/// [`FormatError::BadHeaderSignature`] при коротком документе и при
-/// несошедшейся подписи; иначе — ошибки разбора и проверки формы.
+/// [`FormatError::BadHeaderSignature`] for a short document or a
+/// failed signature; otherwise parsing and shape-validation errors.
 pub fn decode_delegation(
     bytes: &[u8],
     parent_verify: &[u8; 32],
@@ -686,16 +686,16 @@ fn check_delegation_shape(link: &Delegation) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Итог проверки цепочки: на что и до когда вправе ПОСЛЕДНЕЕ звено.
+/// Chain verification result: what the LAST link may access, and until when.
 ///
-/// # Почему ужесточения отдаются ВСЕ, а не сравниваются между собой
+/// # Why ALL restrictions are returned instead of compared with each other
 ///
-/// Потому что отношения порядка на политиках не существует и заводить его ради
-/// одной проверки нельзя. Вместо «звено не ослабило родителя» цепочка отдаёт
-/// весь список, а решатель пересекает его целиком: `oc_policy::intersect`
-/// монотонна только в сторону ужесточения, поэтому лишнее звено способно
-/// УЖЕСТОЧИТЬ и неспособно ослабить — что бы в нём ни лежало. Проверка,
-/// которой нет, не может быть обойдена.
+/// Because no ordering relation exists on policies, and inventing one for
+/// one check is inappropriate. Rather than proving "the link did not weaken its parent", the chain returns
+/// the entire list, and the evaluator intersects it all: `oc_policy::intersect`
+/// is monotonic only toward restriction, so an additional link can
+/// TIGHTEN but cannot loosen permissions, whatever it contains. A check
+/// that does not exist cannot be bypassed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainFacts {
     pub grant_id: [u8; 16],
@@ -703,51 +703,51 @@ pub struct ChainFacts {
     pub holder_verify: [u8; 32],
     pub files: Vec<[u8; 16]>,
     pub expires_at: i64,
-    /// Все ужесточения цепочки, от корня. Пересекает их вызывающий.
+    /// All chain restrictions from the root onward. The caller intersects them.
     pub tightening: Vec<Policy>,
     pub depth_left: u8,
-    /// Действия, на которые вправе ПОСЛЕДНЕЕ звено.
+    /// Actions permitted for the LAST link.
     ///
-    /// Пусто, если грант действий вызывающий не передал: правило, которое не с
-    /// чем сверить, не действует (И-10). Поэтому старый вызов
-    /// [`verify_grant_chain`] отдаёт здесь пустой список даже на цепочке, звенья
-    /// которой несут тег действий, — и это не потеря, а умолчание «запрет».
+    /// Empty if the caller supplied no action grant: a rule with nothing to
+    /// verify against is ineffective (I-10). Thus the old
+    /// [`verify_grant_chain`] call returns an empty list even when chain links
+    /// carry action tags; this is the default denial, not data loss.
     pub actions: Vec<crate::action::ActionRule>,
 }
 
-/// Почему цепочка не принята.
+/// Why the chain was rejected.
 ///
-/// Свой род ошибки, а не вариант [`FormatError`]: разрыв цепочки — событие
-/// ОТНОШЕНИЯ между звеньями, а не поля TLV, и номера тега у него нет. Номер
-/// звена назван, потому что обе стороны показывают причину человеку, а «цепочка
-/// не сошлась» без места разрыва не говорит ничего.
+/// A separate error type rather than a [`FormatError`] variant: a chain break concerns
+/// the RELATIONSHIP between links, not a TLV field, so has no tag number. The link
+/// number is included because both sides show the reason to people, and "chain
+/// failed" without the break location says nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainRefusal {
-    /// Грант не разобрался, не подписан этим автором или не той формы.
+    /// The grant could not be parsed, was not signed by this author or has invalid shape.
     BadGrant,
-    /// Звено не разобралось или подписано не ключом родителя.
+    /// The link could not be parsed or was not signed by the parent key.
     BadLink { index: usize },
-    /// Звено называет файл, которого у родителя нет.
+    /// The link names a file absent from its parent.
     NotASubset { index: usize },
-    /// Звено живёт дольше родителя.
+    /// The link outlives its parent.
     OutlivesParent { index: usize },
-    /// Делегировать ниже уже нельзя: глубина исчерпана.
+    /// Further delegation is forbidden: depth exhausted.
     DepthExhausted { index: usize },
-    /// Звено называет другого родителя или другой корень.
+    /// The link names a different parent or root.
     WrongParent { index: usize },
-    /// Срок кончился по переданным часам.
+    /// Expired according to the supplied clock.
     Expired,
-    /// Срок ещё не начался по переданным часам.
+    /// Not yet valid according to the supplied clock.
     NotYetValid,
-    /// Грант ДЕЙСТВИЙ не разобрался, не подписан этим автором или не той формы.
+    /// The ACTION grant could not be parsed, was not signed by this author or has invalid shape.
     BadActionGrant,
-    /// Грант действий привязан к другому файловому гранту.
+    /// The action grant is bound to another file grant.
     ActionsWrongGrant,
-    /// Грант действий живёт дольше файлового гранта, к которому привязан.
+    /// The action grant outlives the file grant to which it is bound.
     ActionsOutliveGrant,
-    /// Звено взяло вид действия, которого у родителя нет вовсе.
+    /// The link takes an action kind the parent does not hold.
     ActionNotGranted { index: usize },
-    /// Звено расширило родительское правило. Причина — от `action`.
+    /// The link broadens a parent rule. Reason comes from `action`.
     ActionWidens { index: usize, why: crate::action::ActionRefusal },
 }
 
@@ -789,18 +789,18 @@ impl core::fmt::Display for ChainRefusal {
     }
 }
 
-/// Проверить цепочку: грант, затем звенья по порядку. Часы — ПАРАМЕТРОМ.
+/// Verify the chain: grant, then links in order. Clock supplied as a PARAMETER.
 ///
-/// `grant` и `links` — СЫРЫЕ байты: подписи проверяются здесь же, каждая до
-/// разбора своего тела. Ключ проверки очередного звена берётся из предыдущего
-/// звена, а самого первого — из гранта; ключ гранта приходит снаружи, из
-/// заголовка контейнера.
+/// `grant` and `links` are RAW bytes: signatures are verified here, each before
+/// its body is parsed. Each link's verification key comes from its predecessor;
+/// the first comes from the grant, whose key comes from outside,
+/// from the container header.
 ///
-/// Часы параметром, а не из системы: проба на истечение и на путешествие во
-/// времени обязана быть ДАННЫМИ, иначе она проверяет часы машины, а не правило.
+/// Clock as a parameter, not from the system: expiration and time-travel tests
+/// must be DATA; otherwise they test the machine clock rather than the rule.
 ///
 /// # Errors
-/// [`ChainRefusal`] с номером звена, на котором цепочка разорвалась.
+/// [`ChainRefusal`] with the link number where the chain broke.
 pub fn verify_grant_chain(
     author_key: &[u8; 32],
     grant: &[u8],
@@ -810,27 +810,27 @@ pub fn verify_grant_chain(
     verify_grant_chain_with_actions(author_key, grant, links, None, now)
 }
 
-/// То же, плюс ГРАНТ ДЕЙСТВИЙ (Agent Protocol, этап 2).
+/// The same, plus an ACTION GRANT (Agent Protocol, stage 2).
 ///
-/// # Почему отдельная функция, а не пятый довод у прежней
+/// # Why a separate function rather than a fifth argument to the old one
 ///
-/// Потому что прежний вызов обязан работать БЕЗ ПРАВОК — у него есть
-/// вызывающие на сервере, в двери и в пробах первого этапа, и правка каждого
-/// ради значения `None` была бы шумом, в котором теряется то единственное место,
-/// где действительно что-то изменилось. Прежняя функция осталась ровно тем, чем
-/// была, и делегирует сюда: две дороги к одной проверке, а не две проверки.
+/// Because the old call must work UNCHANGED: it has callers
+/// in the server, door and stage 1 tests. Updating all of them
+/// just to pass `None` would add noise obscuring the one place
+/// where behavior changed. The old function remains exactly what it was
+/// and delegates here: two routes to one check, not two checks.
 ///
-/// `actions` — СЫРЫЕ байты [`crate::action::ActionGrant`], подписанные ТЕМ ЖЕ
-/// ключом автора: у действия нет контейнера с заголовком, поэтому якорь —
-/// файловый грант, а ключ приходит снаружи, как и для него.
+/// `actions` contains RAW [`crate::action::ActionGrant`] bytes signed with THE SAME
+/// author key: actions have no container header, so the anchor is
+/// the file grant, with its key likewise supplied externally.
 ///
-/// `None` означает «о действиях ничего не известно», и факты тогда несут пустой
-/// список — в том числе когда звенья цепочки тег действий НЕСУТ. Проверить их
-/// не с чем, а непроверенное правило не действует (И-10); заодно это и есть
-/// обещание, что читатель первого этапа видит прежнюю цепочку.
+/// `None` means "nothing known about actions", and the facts then carry an empty
+/// list, even when chain links DO carry action tags. There is nothing
+/// to verify them against; unverified rules have no effect (I-10). This also
+/// fulfills the promise that a stage 1 reader sees the old chain.
 ///
 /// # Errors
-/// [`ChainRefusal`] с номером звена, на котором цепочка разорвалась.
+/// [`ChainRefusal`] with the link number where the chain broke.
 pub fn verify_grant_chain_with_actions(
     author_key: &[u8; 32],
     grant: &[u8],
@@ -949,20 +949,20 @@ pub fn verify_grant_chain_with_actions(
     Ok(facts)
 }
 
-/// Правила потомка против правил родителя: каждое обязано быть не шире.
+/// Child rules against parent rules: each must be no broader.
 ///
-/// # Почему «любое родительское того же вида», а не «первое»
+/// # Why "any parent rule of the same kind", not "the first"
 ///
-/// Потому что правил одного вида у родителя бывает несколько: два `tree.remove`
-/// на два разных поддерева — обычный грант, а не странность. Требовать
-/// совпадения ПОРЯДКА значило бы делать проверку зависимой от того, как автор
-/// перечислил правила, то есть отказывать в честном сужении по случайной
-/// причине.
+/// A parent may have multiple rules of one kind: two `tree.remove`
+/// rules for two subtrees are ordinary. Requiring
+/// matching ORDER would make verification depend on how the author
+/// listed rules, rejecting legitimate narrowing for an arbitrary
+/// reason.
 ///
-/// Причина отказа берётся от ПЕРВОГО родительского правила того же вида: отказ
-/// без объяснения проходит любую пробу вида «отказ случился», а человеку нужен
-/// ограничитель по имени. Когда такого вида у родителя нет вовсе, причина
-/// другая и точнее — [`ChainRefusal::ActionNotGranted`].
+/// Rejection reason comes from the FIRST parent rule of the same kind: a rejection
+/// without explanation passes any "rejected" test, but the user needs the
+/// limiting constraint's name. If the parent has no such kind, the reason is
+/// different and more precise: [`ChainRefusal::ActionNotGranted`].
 fn narrow_actions(
     parents: &[crate::action::ActionRule],
     children: &[crate::action::ActionRule],
@@ -1027,13 +1027,13 @@ mod tests {
         Ed25519Signer::from_seed(&[0x77; 32])
     }
 
-    /// Ключ ПОДПИСИ двери: им дверь заверяет делегирования.
+    /// Door SIGNING key, used to authenticate delegations.
     fn door() -> Ed25519Signer {
         Ed25519Signer::from_seed(&[0xd0; 32])
     }
 
-    /// Согласовательный ключ двери. У X25519 отпечаток И ЕСТЬ ключ (K27),
-    /// поэтому `door_fpr` совпадает с ним байт в байт.
+    /// Door key-agreement public key. For X25519, the fingerprint IS the key (K27),
+    /// so `door_fpr` matches it byte for byte.
     const DOOR_PUBLIC: [u8; 32] = [0xd1; 32];
 
     fn blob(seed: u8) -> Blob {
@@ -1074,7 +1074,7 @@ mod tests {
         g.signature = signer.sign(&grant_transcript(&body)).unwrap();
     }
 
-    /// Поля тела — парами «тег, значение», для пересборки руками.
+    /// Body fields as "tag, value" pairs, for manual reconstruction.
     fn fields_of(body: &[u8]) -> Vec<(u16, Vec<u8>)> {
         let mut reader = TlvReader::new(body);
         let mut out = Vec::new();
@@ -1084,9 +1084,9 @@ mod tests {
         out
     }
 
-    /// Пересобрать тело, заменив значение одного тега. Нужно затем, чтобы
-    /// получить документ, который наш писатель произвести отказывается: иначе
-    /// проверки чтения остались бы непроверенными.
+    /// Rebuild a body, replacing one tag's value, to obtain
+    /// a document our writer refuses to produce; otherwise
+    /// reader checks would remain untested.
     fn rebuild_with(body: &[u8], tag: u16, value: &[u8]) -> Vec<u8> {
         let mut w = TlvWriter::new();
         for (t, v) in fields_of(body) {
@@ -1099,7 +1099,7 @@ mod tests {
         w.finish().to_vec()
     }
 
-    /// Пересобрать тело, ДОБАВИВ тег (в конец, чтобы возрастание не нарушилось).
+    /// Rebuild a body, ADDING a tag (at the end to preserve ordering).
     fn rebuild_plus(body: &[u8], tag: u16, value: &[u8]) -> Vec<u8> {
         let mut w = TlvWriter::new();
         for (t, v) in fields_of(body) {
@@ -1109,7 +1109,7 @@ mod tests {
         w.finish().to_vec()
     }
 
-    /// Документ из готового тела, подписанный названным ключом.
+    /// Document from a ready-made body, signed with the named key.
     fn signed(body: &[u8], signer: &Ed25519Signer) -> Vec<u8> {
         let sig = signer.sign(&grant_transcript(body)).unwrap();
         let mut out = sig.to_vec();
@@ -1124,11 +1124,11 @@ mod tests {
         assert_eq!(decode_grant(&bytes, &author().public_key()).unwrap(), g);
     }
 
-    /// Ужесточение ходит ТЕМ ЖЕ кодеком, что политика сервера в лизе.
+    /// Restrictions use THE SAME codec as the server policy in a lease.
     ///
-    /// Проба заведена вместе с решением держать в структуре `Policy`, а не
-    /// непрозрачные байты: байты не проверяются ничем, и грант с мусором в этом
-    /// поле дожил бы до сервера, где ужесточение уже поздно отвергать.
+    /// This test accompanied the decision to store `Policy` in the structure rather than
+    /// opaque bytes: unchecked bytes would let a grant with garbage in this
+    /// field reach the server, where rejecting the restriction is already too late.
     #[test]
     fn a_tightening_policy_round_trips_through_the_same_codec() {
         let mut g = grant();
@@ -1143,12 +1143,12 @@ mod tests {
         assert_eq!(back, g);
     }
 
-    /// ПОДПИСЬ ПРОВЕРЯЕТСЯ ДО РАЗБОРА ТЕЛА.
+    /// THE SIGNATURE IS VERIFIED BEFORE BODY PARSING.
     ///
-    /// Тело здесь заведомо НЕРАЗБИРАЕМО, и проба различает порядок двумя
-    /// прогонами: с ЧУЖОЙ подписью ответ обязан быть подписным, со СВОЕЙ —
-    /// разборным. Один прогон этого не показал бы: `is_err()` истинно у обоих
-    /// порядков.
+    /// The body is deliberately UNPARSEABLE; two runs distinguish
+    /// ordering: a WRONG signature must yield a signature error, a CORRECT one
+    /// a parsing error. One run would not show this: `is_err()` is true for both
+    /// orders.
     #[test]
     fn a_flipped_body_byte_fails_the_signature_before_parsing() {
         let good = grant_body(&grant()).unwrap();
@@ -1192,12 +1192,12 @@ mod tests {
         ));
     }
 
-    /// КЛЮЧ ВНУТРИ ОБЯЗАН СОВПАСТЬ С ПЕРЕДАННЫМ.
+    /// THE EMBEDDED KEY MUST MATCH THE SUPPLIED KEY.
     ///
-    /// Подпись здесь СХОДИТСЯ: документ подписан настоящим автором, но называет
-    /// автором другого. Без сверки грант, выпущенный для одного дерева, был бы
-    /// принят как выпущенный для другого — и поймать это `is_err()` на чужой
-    /// подписи нельзя, потому что подпись не чужая.
+    /// The signature here VERIFIES: the real author signed the document, but it names
+    /// another author. Without the comparison, a grant issued for one tree could be
+    /// accepted for another; `is_err()` with a wrong signature cannot catch this,
+    /// because the signature is not wrong.
     #[test]
     fn the_author_key_inside_must_match_the_one_supplied() {
         let mut g = grant();
@@ -1295,10 +1295,10 @@ mod tests {
         );
     }
 
-    /// ОТПЕЧАТОК ОБЯЗАН НАЗЫВАТЬ ПРЕДЪЯВЛЕННЫЙ КЛЮЧ (K27).
+    /// THE FINGERPRINT MUST IDENTIFY THE PRESENTED KEY (K27).
     ///
-    /// Иначе посредник присылает чужой отпечаток со своим ключом и получает доли
-    /// на свой ключ под чужим именем — находка Н-1/Н-4 криптообзора.
+    /// Otherwise an intermediary supplies someone else's fingerprint with its own key and receives shares
+    /// sealed to its key under another name: cryptographic review finding N-1/N-4.
     #[test]
     fn a_door_fingerprint_that_is_not_the_name_of_its_key_is_refused() {
         let ordered = grant();
@@ -1314,11 +1314,11 @@ mod tests {
         );
     }
 
-    /// МЕХАНИЗМ, КОТОРОГО ЭТАП 1 НЕ ИСПОЛНЯЕТ, ОТВЕРГАЕТСЯ НА РАЗБОРЕ.
+    /// A MECHANISM NOT EXECUTED BY STAGE 1 IS REJECTED DURING PARSING.
     ///
-    /// Первый случай тем и ценен, что отпечаток в нём ЧЕСТНЫЙ: ключ P-256 назван
-    /// своим именем по K27, и отказ приходит не от сверки имени, а от того, что
-    /// дверь такого механизма не умеет (правило 4 «Как менять формат»).
+    /// The first case matters because its fingerprint is HONEST: the P-256 key is named
+    /// correctly under K27, so rejection comes not from the name comparison but from
+    /// the door's inability to execute that mechanism ("How to change the format", rule 4).
     #[test]
     fn an_unexecuted_kem_is_refused_on_parse() {
         let ordered = grant();
@@ -1393,12 +1393,12 @@ mod tests {
     // Делегирование и цепочка.
     // ------------------------------------------------------------------
 
-    /// Ключ ПОДПИСИ первого потомка.
+    /// First descendant's SIGNING key.
     fn child_a() -> Ed25519Signer {
         Ed25519Signer::from_seed(&[0xc0; 32])
     }
 
-    /// Согласовательный ключ первого потомка; он же его отпечаток (K27, X25519).
+    /// First descendant's key-agreement public key, also its fingerprint (K27, X25519).
     const CHILD_A_PUBLIC: [u8; 32] = [0xc1; 32];
 
     fn child_b() -> Ed25519Signer {
@@ -1413,8 +1413,8 @@ mod tests {
 
     const CHILD_C_PUBLIC: [u8; 32] = [0xe1; 32];
 
-    /// Момент, в который цепочка проверяется. Данными, а не системными часами:
-    /// иначе проба на истечение проверяла бы часы машины, а не правило.
+    /// Time at which the chain is checked. Data, not the system clock:
+    /// otherwise expiration tests would test the machine clock rather than the rule.
     const NOW: i64 = 1_700_010_000;
 
     fn sign_link(d: &mut Delegation, signer: &Ed25519Signer) {
@@ -1422,7 +1422,7 @@ mod tests {
         d.signature = signer.sign(&delegation_transcript(&body)).unwrap();
     }
 
-    /// Первое звено: дверь → потомок A, один файл из двух, срок короче гранта.
+    /// First link: door → descendant A, one of two files, shorter lifetime than the grant.
     fn link_one() -> Delegation {
         let mut d = Delegation {
             grant_id: [0x67; 16],
@@ -1442,7 +1442,7 @@ mod tests {
         d
     }
 
-    /// Второе звено: потомок A → потомок B.
+    /// Second link: descendant A → descendant B.
     fn link_two() -> Delegation {
         let mut d = Delegation {
             grant_id: [0x67; 16],
@@ -1476,7 +1476,7 @@ mod tests {
         assert_eq!(decode_delegation(&bytes, &door().public_key()).unwrap(), d);
     }
 
-    /// ПОДПИСЬ ЗВЕНА ПРОВЕРЯЕТСЯ ДО РАЗБОРА ТЕЛА — тот же порядок, что у гранта.
+    /// THE LINK SIGNATURE IS VERIFIED BEFORE BODY PARSING, just as for the grant.
     #[test]
     fn the_delegation_signature_is_checked_before_the_body_is_parsed() {
         let good = delegation_body(&link_one()).unwrap();
@@ -1516,7 +1516,7 @@ mod tests {
         );
     }
 
-    /// Имя потомка обязано называть его ключ — то же правило K27, что у двери.
+    /// The descendant name must identify its key, the same K27 rule as for the door.
     #[test]
     fn a_child_fingerprint_that_is_not_the_name_of_its_key_is_refused() {
         let mut d = link_one();
@@ -1558,7 +1558,7 @@ mod tests {
         assert_eq!(chain(&g, &[d], NOW), Err(ChainRefusal::OutlivesParent { index: 0 }));
     }
 
-    /// Третье звено при глубине 2 лишнее: у второго не осталось ни одного.
+    /// A third link at depth 2 is excessive: the second has no remaining depth.
     #[test]
     fn a_link_below_zero_depth_is_refused() {
         let mut third = Delegation {
@@ -1600,11 +1600,11 @@ mod tests {
         assert_eq!(chain(&grant(), &[d], NOW), Err(ChainRefusal::BadLink { index: 0 }));
     }
 
-    /// ЗВЕНО, НАЗЫВАЮЩЕЕ ЧУЖОГО РОДИТЕЛЯ, ОТВЕРГАЕТСЯ, ХОТЯ ПОДПИСЬ СХОДИТСЯ.
+    /// A LINK NAMING A DIFFERENT PARENT IS REJECTED EVEN WHEN ITS SIGNATURE VERIFIES.
     ///
-    /// Подпись здесь настоящая — звено подписано дверью. Сверять отпечаток всё
-    /// равно обязательно: ключ подписи и согласовательный ключ у двери разные, и
-    /// без сверки доли перепечатывались бы на ключ, которого в цепочке нет.
+    /// The signature is genuine: the door signed the link. Fingerprint comparison remains
+    /// mandatory because the door's signing and key-agreement keys differ;
+    /// without it, shares would be resealed to a key absent from the chain.
     #[test]
     fn a_link_naming_the_wrong_parent_is_refused() {
         let mut d = link_one();
@@ -1621,7 +1621,7 @@ mod tests {
         assert_eq!(chain(&grant(), &[d], NOW), Err(ChainRefusal::WrongParent { index: 0 }));
     }
 
-    /// ВРЕМЯ — ДАННЫМИ, и оба края проверяются отдельно.
+    /// TIME AS DATA; both boundaries are tested separately.
     #[test]
     fn an_expired_grant_is_refused_by_the_clock_given() {
         let g = grant();
@@ -1633,7 +1633,7 @@ mod tests {
         assert!(chain(&g, &[], g.expires_at).is_ok());
     }
 
-    /// Истёкшее ЗВЕНО гасит цепочку, даже когда грант ещё жив.
+    /// An expired LINK disables the chain even while the grant remains valid.
     #[test]
     fn an_expired_link_is_refused_though_the_grant_lives() {
         let g = grant();
@@ -1642,10 +1642,10 @@ mod tests {
         assert_eq!(chain(&g, std::slice::from_ref(&d), d.expires_at.saturating_add(1)), Err(ChainRefusal::Expired));
     }
 
-    /// У КАЖДОГО ОТКАЗА ЕСТЬ ПРИЧИНА СЛОВАМИ.
+    /// EVERY REJECTION HAS A REASON IN WORDS.
     ///
-    /// Проба против мутации «причина → пустая строка»: отказ без объяснения
-    /// проходит любую проверку вида «отказ случился», и ловится он только так.
+    /// A test against "reason → empty string": an unexplained rejection
+    /// passes every "rejected" check and is caught only this way.
     #[test]
     fn every_refusal_names_a_reason() {
         for refusal in [
@@ -1663,13 +1663,13 @@ mod tests {
         }
     }
 
-    /// ВЗГЛЯД БЕЗ ПРОВЕРКИ ПОДПИСИ ОТДАЁТ ТО ЖЕ ТЕЛО — И НЕ ЗАМЕНЯЕТ ПРОВЕРКИ.
+    /// PEEKING WITHOUT SIGNATURE VERIFICATION RETURNS THE SAME BODY, AND DOES NOT REPLACE VERIFICATION.
     ///
-    /// Две половины: на честном документе `peek` и `decode` дают одно и то же
-    /// (иначе сервер искал бы ключ по одним полям, а верил другим), а на
-    /// документе с ЧУЖОЙ подписью `peek` проходит, `decode` — нет. Вторая
-    /// половина и есть то, ради чего проба написана: `peek`, случайно ставший
-    /// проверяющим, зеленил бы любую пробу вида «сервер принял грант».
+    /// Two halves: for a legitimate document, `peek` and `decode` return the same data
+    /// (otherwise the server would look up a key by some fields and trust others);
+    /// for a document with a WRONG signature, `peek` succeeds while `decode` fails. The second
+    /// half is the reason for this test: `peek` accidentally becoming
+    /// a verifier would pass any "server accepted the grant" test.
     #[test]
     fn peeking_reads_the_same_body_but_never_stands_in_for_the_signature() {
         let g = grant();
@@ -1756,7 +1756,7 @@ mod tests {
         }
     }
 
-    /// Грант действий на тот же корень, подписанный тем же автором.
+    /// An action grant for the same root, signed by the same author.
     fn action_grant(rules: Vec<ActionRule>) -> Vec<u8> {
         let mut g = ActionGrant {
             grant_id: [0x67; 16],
@@ -1771,7 +1771,7 @@ mod tests {
         crate::action::encode_grant(&g).unwrap()
     }
 
-    /// Звено первого уровня с названными действиями.
+    /// A first-level link with the specified actions.
     fn link_with(actions: Vec<ActionRule>) -> Delegation {
         let mut d = link_one();
         d.actions = actions;
@@ -1803,11 +1803,11 @@ mod tests {
         assert_eq!(decode_delegation(&bytes, &door().public_key()).unwrap(), d);
     }
 
-    /// БЕЗ ТЕГА И С ПУСТЫМ СПИСКОМ — ОДНИ И ТЕ ЖЕ БАЙТЫ.
+    /// NO TAG AND AN EMPTY LIST PRODUCE IDENTICAL BYTES.
     ///
-    /// Два представления одного смысла дали бы два звена на одно утверждение, а
-    /// подпись считается по СЫРЫМ байтам: «то же звено» перестало бы быть одной
-    /// последовательностью.
+    /// Two representations of one meaning would create two links for one assertion, while
+    /// the signature covers RAW bytes: "the same link" would cease to be one
+    /// sequence.
     #[test]
     fn an_empty_action_list_writes_no_tag_at_all() {
         let plain = delegation_body(&link_one()).unwrap();
@@ -1820,12 +1820,12 @@ mod tests {
         );
     }
 
-    /// ЧИТАТЕЛЬ ПЕРВОГО ЭТАПА ВИДИТ ПРЕЖНЮЮ ЦЕПОЧКУ.
+    /// A STAGE 1 READER SEES THE OLD CHAIN.
     ///
-    /// Условие задачи и обещание И-7 разом: тег действий необязателен, старый
-    /// вызов [`verify_grant_chain`] обязан пройти по цепочке С ТЕГОМ и отдать
-    /// те же факты о файлах, что и по цепочке без него. Список действий при
-    /// этом ПУСТ — непроверенное правило не действует (И-10).
+    /// Both a requirement and the I-7 promise: the action tag is optional; the old
+    /// [`verify_grant_chain`] call must traverse a chain WITH THE TAG and return
+    /// the same file facts as a chain without it. The action list meanwhile
+    /// is EMPTY: an unverified rule has no effect (I-10).
     #[test]
     fn the_stage_one_reader_sees_the_same_chain_through_the_action_tag() {
         let with_tag = link_with(vec![push_rule("agent/work", 5, false)]);
@@ -1841,7 +1841,7 @@ mod tests {
         assert!(a.actions.is_empty(), "старый вызов отдал действия, которых не проверял");
     }
 
-    /// Сужение проходит, и факты называют правила ПОСЛЕДНЕГО держателя.
+    /// Narrowing passes, and the facts name the LAST holder's rules.
     #[test]
     fn a_narrowing_child_gets_the_actions_it_asked_for() {
         let raw = action_grant(vec![push_rule("agent/work", 10, true), http_rule()]);
@@ -1853,7 +1853,7 @@ mod tests {
         assert_eq!(facts.actions, vec![child], "факты назвали не правила потомка");
     }
 
-    /// Без гранта действий факты пусты — даже когда звено просит.
+    /// Without an action grant, facts are empty even when a link requests actions.
     #[test]
     fn actions_unknown_to_the_verifier_never_take_effect() {
         let link = link_with(vec![push_rule("agent/work", 4, false)]);
@@ -1861,7 +1861,7 @@ mod tests {
         assert!(facts.actions.is_empty());
     }
 
-    /// Корень цепочки получает правила гранта действий целиком.
+    /// The chain root receives all action grant rules.
     #[test]
     fn with_no_links_the_door_itself_holds_the_granted_actions() {
         let rules = vec![push_rule("agent/work", 10, true), http_rule()];
@@ -1870,16 +1870,16 @@ mod tests {
         assert_eq!(facts.actions, rules);
     }
 
-    /// ДВЕРЬ «ТОЛЬКО ДЕЙСТВИЯ»: ФАЙЛОВЫЙ ГРАНТ С ПУСТЫМ СПИСКОМ ФАЙЛОВ ЖИВ.
+    /// "ACTIONS ONLY" DOOR: A FILE GRANT WITH AN EMPTY FILE LIST IS VALID.
     ///
-    /// Спека этапа 2 (§4.1) на это рассчитывает и просит подтвердить пробой:
-    /// двери, которой нужны только действия, файлы не нужны вовсе, а якорем
-    /// остаётся всё равно файловый грант — у действия нет контейнера, из
-    /// заголовка которого берётся ключ автора.
+    /// Stage 2 specification (§4.1) relies on this and requests test confirmation:
+    /// a door needing only actions needs no files, yet its anchor
+    /// is still the file grant because an action has no container header
+    /// from which to obtain the author key.
     ///
-    /// Проверялось это до сих пор ТОЛЬКО чтением кода (`check_entries` смотрит
-    /// верхний предел и молчит о нижнем), а «сегодня принимает» и «обещано
-    /// принимать» — разные утверждения: первое чинится случайной правкой.
+    /// Until now, this was verified ONLY by code inspection (`check_entries` checks
+    /// the upper limit and says nothing about a lower one). "Accepted today" and "promised
+    /// to be accepted" differ: an accidental edit can change the former.
     #[test]
     fn a_file_grant_with_no_files_still_anchors_its_actions() {
         let mut g = grant();
@@ -1905,7 +1905,7 @@ mod tests {
         assert_eq!(facts.actions, rules, "действия не достались двери без файлов");
     }
 
-    /// РАСШИРЕНИЕ ПО КАЖДОМУ ПОЛЮ — СВОЙ ОТКАЗ.
+    /// BROADENING EACH FIELD HAS ITS OWN REJECTION.
     #[test]
     fn every_way_of_widening_an_action_has_its_own_refusal() {
         let raw = action_grant(vec![push_rule("agent/work", 10, true), remove_rule("src")]);
@@ -1945,8 +1945,8 @@ mod tests {
         );
     }
 
-    /// `confirm`-правило не делегируется никогда: живое «да» владельца выписано
-    /// на конкретную дверь.
+    /// A `confirm` rule is never delegated: the owner's live "yes" is issued
+    /// for a specific door.
     #[test]
     fn a_confirm_rule_does_not_travel_down_the_chain() {
         let mut parent = push_rule("agent/work", 10, true);
@@ -1962,7 +1962,7 @@ mod tests {
         );
     }
 
-    /// `delegable` ТОЛЬКО СНИМАЕТСЯ: у родителя снят — потомку не достаётся.
+    /// `delegable` CAN ONLY BE REMOVED: if absent in the parent, the child cannot receive it.
     #[test]
     fn a_rule_not_marked_delegable_stops_at_its_holder() {
         let raw = action_grant(vec![push_rule("agent/work", 10, false)]);
@@ -1973,11 +1973,11 @@ mod tests {
         );
     }
 
-    /// Сужение считается ПО ЦЕПОЧКЕ, а не против корня.
+    /// Narrowing is checked ALONG THE CHAIN, not against the root.
     ///
-    /// Второе звено сверяется с правилами ПЕРВОГО, а не гранта: иначе внук
-    /// восстанавливал бы то, что сын отдал уже; проверка против корня зеленела
-    /// бы на цепочке «10 → 4 → 8».
+    /// The second link is compared with the FIRST link's rules, not the grant:
+    /// otherwise a grandchild could restore rights its parent surrendered; checking against the root
+    /// would pass the chain "10 → 4 → 8".
     #[test]
     fn the_second_link_narrows_the_first_and_not_the_root() {
         let raw = action_grant(vec![push_rule("agent/work", 10, true)]);
@@ -2005,7 +2005,7 @@ mod tests {
         assert_eq!(facts.actions, vec![push_rule("agent/work", 2, false)]);
     }
 
-    /// Звено, не назвавшее действий, ГАСИТ их для всех, кто ниже.
+    /// A link naming no actions DISABLES them for every descendant.
     #[test]
     fn a_link_that_names_no_actions_passes_none_down() {
         let raw = action_grant(vec![push_rule("agent/work", 10, true)]);
@@ -2013,7 +2013,7 @@ mod tests {
         assert!(facts.actions.is_empty(), "действия просочились через звено, их не назвавшее");
     }
 
-    /// ГРАНТ ДЕЙСТВИЙ ОТ ЧУЖОГО КОРНЯ, ОТ ЧУЖОГО АВТОРА И ПЕРЕЖИВШИЙ ФАЙЛОВЫЙ.
+    /// ACTION GRANT FROM ANOTHER ROOT OR AUTHOR, OR OUTLIVING THE FILE GRANT.
     #[test]
     fn the_action_grant_is_anchored_to_this_file_grant_and_this_author() {
         // Чужой корень: подпись сходится, привязка нет.
@@ -2059,7 +2059,7 @@ mod tests {
         assert_eq!(chain_acting(&[], Some(&raw), NOW), Err(ChainRefusal::ActionsOutliveGrant));
     }
 
-    /// Истёкший грант действий гасит действия, даже когда файловый жив.
+    /// An expired action grant disables actions even while the file grant remains valid.
     #[test]
     fn an_expired_action_grant_is_refused_by_the_clock_given() {
         let mut g = ActionGrant {
@@ -2080,7 +2080,7 @@ mod tests {
         assert!(chain_acting(&[], Some(&raw), 1_700_004_999).is_ok());
     }
 
-    /// Мусор в необязательном теге отвергается НА РАЗБОРЕ, а не у сервера.
+    /// Garbage in the optional tag is rejected DURING PARSING, not on the server.
     #[test]
     fn junk_in_the_action_tag_is_refused_when_the_link_is_parsed() {
         let good = delegation_body(&link_one()).unwrap();
@@ -2094,7 +2094,7 @@ mod tests {
         );
     }
 
-    /// И у НОВЫХ отказов есть причина словами.
+    /// NEW rejections also have reasons in words.
     #[test]
     fn every_action_refusal_of_the_chain_names_a_reason() {
         for refusal in [
@@ -2109,7 +2109,7 @@ mod tests {
         }
     }
 
-    /// Разбор произвольных байтов не паникует: грант приходит с провода.
+    /// Parsing arbitrary bytes does not panic: the grant arrives from the wire.
     #[test]
     fn decoding_arbitrary_bytes_never_panics() {
         let key = author().public_key();

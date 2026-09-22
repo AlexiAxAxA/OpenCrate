@@ -1,18 +1,18 @@
-//! Правка: сертификат ключа правки, подпись редактора, голова сеанса и
-//! проверка редакции (`docs/format.md`, «ПРАВКА ИСПОЛНИМА», решение 2026-09-17).
+//! Editing: edit key certificate, editor signature, session head, and
+//! revision verification (`docs/format.md`, "EDITING IS EXECUTABLE", decision 2026-09-17).
 //!
-//! # Что здесь, а что нет
+//! # What is here and what is not
 //!
-//! Здесь — байты и решение «эта редакция подписана тем, кому автор это
-//! разрешил». Эталон счётчика (журнал принятого, реестр сервера) живёт выше:
-//! он требует состояния, а крейт его не держит. Часы тоже приходят параметром.
+//! This module contains bytes and the decision "this revision is signed by someone
+//! the author authorized". The counter reference (accepted-revision journal, server registry) lives above:
+//! it needs state, which this crate does not hold. Time is also supplied as a parameter.
 //!
-//! # Порядок
+//! # Ordering
 //!
-//! Вызывается ПОСЛЕ проверки MAC изменяемой области и разбора её тела
-//! (`ContentDesc::decode_verified_with_body`): подпись редактора проверяется
-//! над заверенными байтами, а не над тем, что подал противник (п. 4 решения
-//! версии 3).
+//! Called AFTER verifying the mutable region MAC and parsing its body
+//! (`ContentDesc::decode_verified_with_body`): the editor signature is verified
+//! over authenticated bytes rather than attacker-supplied input (item 4 of the
+//! version 3 decision).
 
 use crate::content::{ContentDesc, EditorSignature, FIRST_EDITING_VERSION, editor_tag, tag};
 use crate::header::Header;
@@ -23,7 +23,7 @@ use oc_crypto::sign::{PUBLIC_KEY_LEN, SIGNATURE_LEN, Signer};
 use oc_crypto::transcript::Transcript;
 use oc_crypto::{label, sha256};
 
-/// Теги сертификата ключа правки (`certified_by`), все критичны.
+/// Edit key certificate tags (`certified_by`), all critical.
 pub mod cert_tag {
     pub const VERSION: u16 = 1;
     pub const FILE_ID: u16 = 2;
@@ -34,11 +34,11 @@ pub mod cert_tag {
     pub const SIGNATURE: u16 = 7;
 }
 
-/// Версия раскладки сертификата.
+/// Certificate layout version.
 pub const CERT_VERSION: u8 = 1;
 
-/// Сертификат ключа правки: «у устройства `device` на файл `file_id` ключ
-/// правки `editor_key` до `not_after`», за подписью `issuer`.
+/// Edit key certificate: "device `device` has edit key `editor_key` for file
+/// `file_id` until `not_after`", signed by `issuer`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditorCert {
     pub file_id: [u8; 16],
@@ -49,30 +49,30 @@ pub struct EditorCert {
     pub signature: [u8; SIGNATURE_LEN],
 }
 
-/// Отказ правки — каждая причина своя, потому что человеку отвечают по-разному.
+/// Edit rejection: distinct reasons because each requires a different explanation to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditError {
-    /// Байты области или сертификата не разбираются.
+    /// Region or certificate bytes cannot be parsed.
     Format(FormatError),
-    /// Подпись редактора у неправленого файла.
+    /// Editor signature on an unedited file.
     EditorOnUnedited,
-    /// Ненулевой счётчик без подписи редактора.
+    /// Nonzero counter without an editor signature.
     UnsignedEdit { version: u64 },
-    /// Версия файла подписи редактора не знает.
+    /// The file version does not support editor signatures.
     VersionTooOld { container_version: u16, version: u64 },
-    /// Автор правку не разрешал.
+    /// The author did not allow editing.
     EditNotAllowed,
-    /// Сертификат выдан не автором и не соавтором.
+    /// The certificate was issued by neither the author nor a coauthor.
     ForeignIssuer,
-    /// Подпись сертификата не сходится.
+    /// Certificate signature mismatch.
     BadCertificate,
-    /// Сертификат выдан на другой файл.
+    /// Certificate issued for another file.
     CertificateForOtherFile,
-    /// Сертификат истёк.
+    /// Certificate expired.
     CertificateExpired { not_after: i64 },
-    /// Подпись редактора не сходится.
+    /// Editor signature mismatch.
     BadEditorSignature,
-    /// Счётчик у предела: следующей правки нет.
+    /// Counter exhausted: no further edit is possible.
     CounterExhausted,
 }
 
@@ -115,7 +115,7 @@ impl core::fmt::Display for EditError {
 }
 
 impl EditorCert {
-    /// Тело без подписи: теги 1–6.
+    /// Unsigned body: tags 1–6.
     fn signed_body(&self) -> Result<Vec<u8>, FormatError> {
         let mut w = TlvWriter::new();
         w.put(cert_tag::VERSION, &[CERT_VERSION])?;
@@ -133,10 +133,10 @@ impl EditorCert {
         t
     }
 
-    /// Выдать сертификат: подписать и закодировать.
+    /// Issue a certificate: sign and encode.
     ///
     /// # Errors
-    /// [`FormatError`] — кодирование или подпись не удались.
+    /// [`FormatError`] if encoding or signing fails.
     pub fn issue(
         signer: &dyn Signer,
         file_id: [u8; 16],
@@ -158,10 +158,10 @@ impl EditorCert {
         cert.encode()
     }
 
-    /// Байты сертификата.
+    /// Certificate bytes.
     ///
     /// # Errors
-    /// [`FormatError`] — кодирование не удалось.
+    /// [`FormatError`] if encoding fails.
     pub fn encode(&self) -> Result<Vec<u8>, FormatError> {
         let mut body = self.signed_body()?;
         let mut w = TlvWriter::new();
@@ -170,10 +170,10 @@ impl EditorCert {
         Ok(body)
     }
 
-    /// Разобрать сертификат и вернуть его вместе с подписанными байтами.
+    /// Parse the certificate and return it with the signed bytes.
     ///
     /// # Errors
-    /// [`FormatError`] — любой разлад раскладки.
+    /// [`FormatError`] on any layout inconsistency.
     pub fn decode(bytes: &[u8]) -> Result<(Self, Vec<u8>), FormatError> {
         let mut reader = TlvReader::new(bytes);
         let mut version = None;
@@ -220,15 +220,15 @@ impl EditorCert {
         Ok((cert, signed))
     }
 
-    /// Проверить сертификат для этого заголовка; срок — в момент `now`, если он
-    /// назван.
+    /// Verify the certificate for this header; check expiry at `now` if
+    /// supplied.
     ///
-    /// Срок сверяет не каждый: читатель судит его по журналу принятого (уже
-    /// принятая редакция открывается и после истечения), и тогда `now` здесь
-    /// `None`, а решение принимает слой с состоянием.
+    /// Not every caller checks expiry: a reader judges it using the accepted-revision journal
+    /// (an already accepted revision opens even after expiry); then `now` here
+    /// is `None`, and the stateful layer makes the decision.
     ///
     /// # Errors
-    /// [`EditError`] — чужой выдавший, неверная подпись, другой файл, истёк.
+    /// [`EditError`] for an unauthorized issuer, invalid signature, different file, or expiry.
     pub fn verify_for(bytes: &[u8], header: &Header, now: Option<i64>) -> Result<Self, EditError> {
         let (cert, signed) = Self::decode(bytes)?;
         // Выдавший — сначала: подпись, проверенная ключом из самого сертификата,
@@ -250,10 +250,10 @@ impl EditorCert {
     }
 }
 
-/// Байты тела изменяемой области без подполя `signature` записи 6.
+/// Mutable region body bytes without the `signature` subfield of record 6.
 ///
 /// # Errors
-/// [`FormatError`] — записи 6 или её подписи нет, либо тело не разбирается.
+/// [`FormatError`] if record 6 or its signature is absent, or the body cannot be parsed.
 pub fn body_without_signature(body: &[u8]) -> Result<Vec<u8>, FormatError> {
     let mut reader = TlvReader::new(body);
     while let Some(field) = reader.next_field()? {
@@ -281,10 +281,10 @@ pub fn body_without_signature(body: &[u8]) -> Result<Vec<u8>, FormatError> {
     Err(FormatError::MissingField { tag: tag::EDITOR })
 }
 
-/// Транскрипт подписи редактора (п. C).
+/// Editor signature transcript (item C).
 ///
 /// # Errors
-/// [`FormatError`] — см. [`body_without_signature`].
+/// [`FormatError`]: see [`body_without_signature`].
 pub fn editor_transcript(core_hash: &[u8; 32], body: &[u8]) -> Result<Transcript, FormatError> {
     let cut = body_without_signature(body)?;
     let mut t = Transcript::new(label::EDITOR_SIG);
@@ -293,13 +293,13 @@ pub fn editor_transcript(core_hash: &[u8; 32], body: &[u8]) -> Result<Transcript
     Ok(t)
 }
 
-/// Сумма редакции: SHA-256 транскрипта подписи редактора (п. A).
+/// Revision digest: SHA-256 of the editor signature transcript (item A).
 #[must_use]
 pub fn edition_digest(transcript: &Transcript) -> [u8; 32] {
     sha256(transcript.as_bytes())
 }
 
-/// Начало цепочки сеанса: основа правки (п. D).
+/// Start of the session chain: the edit base (item D).
 #[must_use]
 pub fn session_start(file_id: &[u8; 16], base_counter: u64, base_root: &[u8; 32]) -> [u8; 32] {
     let mut t = Transcript::new(label::EDIT_SESSION);
@@ -309,7 +309,7 @@ pub fn session_start(file_id: &[u8; 16], base_counter: u64, base_root: &[u8; 32]
     sha256(t.as_bytes())
 }
 
-/// Шаг цепочки сеанса: `i`-е сохранение.
+/// Session chain step: the `i`th save.
 #[must_use]
 pub fn session_step(prev: &[u8; 32], save: u64, root: &[u8; 32], total_len: u64) -> [u8; 32] {
     let mut t = Transcript::new(label::EDIT_SESSION);
@@ -320,7 +320,7 @@ pub fn session_step(prev: &[u8; 32], save: u64, root: &[u8; 32], total_len: u64)
     sha256(t.as_bytes())
 }
 
-/// Проверенная редакция.
+/// Verified revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedEdition {
     pub counter: u64,
@@ -329,17 +329,17 @@ pub struct VerifiedEdition {
     pub session_head: [u8; 32],
 }
 
-/// Проверить редакцию (п. F, шаг 13 а–е).
+/// Verify the revision (item F, step 13 a–f).
 ///
-/// `Ok(None)` — файл не правлен: вызывающий сверяет `tree_root` с
-/// `original_root`, как и раньше. `Ok(Some(..))` — правка подписана тем, кому
-/// автор это разрешил, и `tree_root` заверен редактором.
+/// `Ok(None)` means the file is unedited: the caller compares `tree_root` with
+/// `original_root` as before. `Ok(Some(..))` means the edit is signed by someone
+/// authorized by the author, and `tree_root` is authenticated by the editor.
 ///
-/// `now = None` — срок сертификата не сверяется здесь: его судит слой с
-/// журналом принятого (п. B).
+/// `now = None` means certificate expiry is not checked here: the layer holding
+/// the accepted-revision journal judges it (item B).
 ///
 /// # Errors
-/// [`EditError`] — по причине.
+/// [`EditError`] according to the cause.
 pub fn verify_edition(
     header: &Header,
     core_hash: &[u8; 32],
@@ -385,10 +385,10 @@ pub fn verify_edition(
     }))
 }
 
-/// Черновик подписи редактора: всё, кроме самой подписи.
+/// Draft editor signature: everything except the signature itself.
 ///
-/// Подпись кладётся нулями — транскрипт её не содержит (п. C), поэтому
-/// байты под подписью от её значения не зависят.
+/// The signature is filled with zeros: the transcript omits it (item C), so
+/// the signed bytes do not depend on its value.
 #[must_use]
 pub fn unsigned_editor(
     session_head: [u8; 32],
@@ -404,15 +404,15 @@ pub fn unsigned_editor(
     }
 }
 
-/// Следующий счётчик после основы.
+/// The counter following the base.
 ///
 /// # Errors
-/// [`EditError::CounterExhausted`] — у предела правки нет.
+/// [`EditError::CounterExhausted`] if the limit prevents further edits.
 pub fn next_counter(base: u64) -> Result<u64, EditError> {
     base.checked_add(1).ok_or(EditError::CounterExhausted)
 }
 
-/// Теги заявки о редакции (`docs/protocol.md` §9.12), все критичны.
+/// Revision submission tags (`docs/protocol.md` §9.12), all critical.
 pub mod claim_tag {
     pub const FILE_ID: u16 = 1;
     pub const COUNTER: u16 = 2;
@@ -424,21 +424,21 @@ pub mod claim_tag {
     pub const SIGNATURE: u16 = 8;
 }
 
-/// Заявка о редакции серверу: «на основе `base_digest` появилась редакция
-/// `counter` с суммой `digest`», за подписью ключа правки из сертификата.
+/// Revision submission to the server: "base `base_digest` produced revision
+/// `counter` with digest `digest`", signed with the certificate's edit key.
 ///
-/// Доказательства владения ключом устройства не требует: полномочие даёт
-/// сертификат автора, а подпись ключа правки — владение им.
+/// No proof of possession of the device key is required: the author's certificate
+/// grants authority, while the edit key signature proves possession of that key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditionClaimDoc {
     pub file_id: [u8; 16],
     pub counter: u64,
-    /// Сумма основы; нули у неправленого файла.
+    /// Base digest; zeros for an unedited file.
     pub base_digest: [u8; 32],
     pub digest: [u8; 32],
     pub session_head: [u8; 32],
     pub certified_by: Vec<u8>,
-    /// Момент подписи — для свежести, как у распоряжений.
+    /// Signing time, for freshness as with orders.
     pub at: i64,
 }
 
@@ -455,20 +455,20 @@ impl EditionClaimDoc {
         Ok(w.finish().to_vec())
     }
 
-    /// Транскрипт на подпись ключом правки.
+    /// Transcript to sign with the edit key.
     ///
     /// # Errors
-    /// [`FormatError`] — кодирование не удалось.
+    /// [`FormatError`] if encoding fails.
     pub fn transcript(&self) -> Result<Transcript, FormatError> {
         let mut t = Transcript::new(label::EDITION_CLAIM);
         t.field(&self.body()?);
         Ok(t)
     }
 
-    /// Байты заявки с подписью.
+    /// Submission bytes including the signature.
     ///
     /// # Errors
-    /// [`FormatError`] — кодирование не удалось.
+    /// [`FormatError`] if encoding fails.
     pub fn encode(&self, signature: &[u8; MODULUS_LEN]) -> Result<Vec<u8>, FormatError> {
         let mut out = self.body()?;
         let mut w = TlvWriter::new();
@@ -477,11 +477,11 @@ impl EditionClaimDoc {
         Ok(out)
     }
 
-    /// Разобрать и ПРОВЕРИТЬ заявку: сертификат (выдавший — `author` или один
-    /// из `coauthors`), срок сертификата на `now`, подпись ключом правки.
+    /// Parse and VERIFY the submission: certificate (issued by `author` or one
+    /// of `coauthors`), certificate expiry at `now`, and edit key signature.
     ///
     /// # Errors
-    /// [`EditError`] — по причине.
+    /// [`EditError`] according to the cause.
     pub fn verify(
         bytes: &[u8],
         author: &[u8; PUBLIC_KEY_LEN],

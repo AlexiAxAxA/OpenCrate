@@ -1,64 +1,64 @@
-//! ЭТАЛОН РАСКЛАДКИ СЛОТОВ АППАРАТНОГО ГИБРИДА (`kem_id = 5`) — НА УРОВНЕ ДВИЖКА.
+//! HARDWARE-HYBRID SLOT-LAYOUT GOLDEN ARTIFACT (`kem_id = 5`), AT ENGINE LEVEL.
 //!
-//! # Почему здесь, а не рядом с контейнерными эталонами
+//! # Why here rather than beside container golden artifacts
 //!
-//! Версия 5 формата нарезана ради ОДНОГО механизма — MLKEM768-P256, — и его
-//! раскладка в файле не была закреплена ничем. Контейнерного эталона через
-//! `cc-cli` не бывает в принципе, и причина записана у пробы
+//! Format version 5 was cut for ONE mechanism, MLKEM768-P256,
+//! but nothing froze its on-disk layout. A container golden artifact through
+//! `cc-cli` is fundamentally impossible, for the reason recorded in
 //! `a_hardware_hybrid_golden_is_not_producible_by_this_writer`
-//! (`crates/cc-cli/tests/golden.rs`): слот АВТОРА при пятом механизме обязан
-//! быть тем же механизмом, а открытую точку P-256 автора писатель берёт только
-//! из TPM. У каждого TPM свой ключ, и «побайтово тот же контейнер на другой
-//! машине» перестаёт существовать как понятие.
+//! (`crates/cc-cli/tests/golden.rs`): with mechanism five, the AUTHOR slot must
+//! use the same mechanism, while the writer obtains the author's public P-256 point
+//! only from the TPM. Every TPM has its own key, making "a byte-identical container on
+//! another machine" cease to be meaningful.
 //!
-//! Движок этого ограничения не имеет и иметь не должен: он чист и принимает
-//! открытые ключи ПАРАМЕТРОМ (`PublicKeys::device_hardware_hybrid`), поэтому ему
-//! всё равно, откуда пришла точка — из TPM или из фиксированного скаляра. Ровно
-//! это и делает эталон возможным здесь и невозможным этажом выше.
+//! The engine neither has nor should have this limitation: it is pure and accepts
+//! public keys as PARAMETERS (`PublicKeys::device_hardware_hybrid`), so it
+//! does not care whether a point came from a TPM or a fixed scalar. This
+//! makes a golden artifact possible here and impossible one layer above.
 //!
-//! # Что заморожено
+//! # What is frozen
 //!
-//! Байты `Assembled::header` — заголовок целиком, готовый к записи, со слотами
-//! сервера, получателя и автора. Это и есть то, ради чего проба заведена: обе
-//! гибридные записи (1153 байта `enc`, 1249 байт `key_fpr`, nonce, шифротекст,
-//! обязательство), их ПОРЯДОК и место среди прочих полей заголовка.
+//! `Assembled::header` bytes: the entire ready-to-write header, with server,
+//! recipient, and author slots. This is the probe's purpose: both
+//! hybrid records (1153-byte `enc`, 1249-byte `key_fpr`, nonce, ciphertext,
+//! commitment), their ORDER and position among other header fields.
 //!
-//! # Что НЕ заморожено, и это честно сказать вслух
+//! # What is NOT frozen, stated explicitly
 //!
-//! **Подписи автора здесь нет.** В движке её нет намеренно (И-6): она ставится
-//! ключом автора, покрывает заголовок целиком и приписывается вызывающим
-//! (`cc-cli/src/container.rs`, `write_all(output, &signature)` сразу за
-//! заголовком). Поэтому замороженные байты НЕ являются контейнером и не
-//! проходят `verify::verify_and_parse` — разбирает их `Header::decode`, то есть
-//! тот же разборщик `oc-format`, но без рубежа подписи. Эталон замораживает
-//! раскладку, а не подписанность.
+//! **No author signature here.** The engine deliberately has none (I-6): the author
+//! key signs the entire header and the caller appends the signature
+//! (`cc-cli/src/container.rs`, `write_all(output, &signature)` immediately after
+//! the header). These frozen bytes therefore are NOT a container and do not
+//! pass `verify::verify_and_parse`: `Header::decode` parses them, the same
+//! `oc-format` parser without the signature boundary. The artifact freezes
+//! layout, not signature presence.
 //!
-//! **`Assembled::content_desc` не включён.** Он тоже байтовый и тоже
-//! детерминированный, но к слотам отношения не имеет вовсе: он выводится из
-//! `CEK` и `SealedInfo` и при любом виде получателя на том же семени генератора
-//! получается один и тот же. Заморозив его здесь, мы получили бы артефакт,
-//! который не отличает пятый механизм ни от какого другого, — то есть обещал бы
-//! покрытие шире фактического.
+//! **`Assembled::content_desc` is excluded.** Also bytes and also
+//! deterministic, but unrelated to slots: derived from
+//! `CEK` and `SealedInfo`, it is identical for any recipient kind with the same RNG
+//! seed. Freezing it here would create an artifact
+//! that cannot distinguish mechanism five from any other, promising
+//! broader coverage than it provides.
 //!
-//! **`Plan::payload_key` не включён.** Он детерминирован, но это КЛЮЧ; секреты в
-//! репозиторий не кладутся ни под каким видом.
+//! **`Plan::payload_key` is excluded.** Deterministic, but a KEY; secrets never
+//! enter the repository in any form.
 //!
-//! # Открывается, а не только сверяется
+//! # Opening as well as comparing
 //!
-//! Эталон, который никто не может открыть, замораживает мусор — и замораживает
-//! навсегда. Поэтому рядом со сверкой байтов стоит
-//! [`both_hardware_hybrid_slots_open_for_their_owners`]: оба слота открываются
-//! программными половинами тем же кодом, каким их откроет устройство, и путь
-//! доведён до открытого текста приватных метаданных.
+//! An artifact nobody can open freezes garbage, permanently.
+//! Byte comparison therefore sits beside
+//! [`both_hardware_hybrid_slots_open_for_their_owners`]: both slots open
+//! using software halves through the same code a device will use, with the path
+//! continued through to private-metadata plaintext.
 //!
-//! # Когда будет резаться версия 6
+//! # When version 6 is cut
 //!
-//! У контейнерных эталонов есть свидетель `tests/golden/v5/`, снятый ДО
-//! переключения писателя. У этого артефакта свидетеля НЕТ: он заведён под
-//! текущего писателя и в день нарезки шестой версии потребует того же решения,
-//! что и соседи. Здесь это записано, а не сделано: заводить каталог свидетеля,
-//! в который сегодня нечего положить, кроме копии соседнего файла, значит
-//! заводить копию без читателя.
+//! Container artifacts have a witness at `tests/golden/v5/`, captured BEFORE
+//! switching the writer. This artifact has NO witness: created for the
+//! current writer, it will require the same decision as its neighbors when version six
+//! is cut. This is recorded here, not performed: creating a witness directory
+//! with nothing to hold today except a copy of an adjacent file would create
+//! a copy with no reader.
 
 // Литы отключены только здесь и только те, без которых тест нечитаем:
 // `unwrap`/`expect`/`panic` — потому что провал пробы и есть паника, а
@@ -95,15 +95,15 @@ use oc_format::header::{Header, KeySlot, KnownSlot, SlotKind, Strength};
 use oc_format::tlv::TlvReader;
 use oc_policy::{Action, Policy};
 
-/// Детерминированный генератор. Не криптостойкий и не претендует: его работа —
-/// давать одну и ту же последовательность на любой машине.
+/// Deterministic RNG. Not cryptographically strong and makes no such claim: its job is
+/// to emit the same sequence on every machine.
 ///
-/// Устроен дословно как у контейнерных эталонов (`cc-cli/tests/golden.rs`), и
-/// это не копипаста по недосмотру: два эталона обязаны расходовать генератор
-/// ОДИНАКОВО, иначе расхождение байтов между ними ничего не будет значить.
-/// Хеш берётся через `oc-crypto`, а не напрямую из blake3: своего blake3 у
-/// движка в зависимостях нет, и заводить его ради тестового генератора значило
-/// бы расширять граф ради пробы.
+/// Identical to the container-artifact RNG (`cc-cli/tests/golden.rs`),
+/// not accidental copy-paste: two artifacts must consume randomness
+/// IDENTICALLY, or differences between their bytes would mean nothing.
+/// Hashing uses `oc-crypto` rather than blake3 directly: the engine has no direct
+/// blake3 dependency, and adding one for a test RNG would expand
+/// the graph for a probe.
 struct SeedRng([u8; 32]);
 
 impl SeedRng {
@@ -143,36 +143,36 @@ impl rand_core::TryRng for SeedRng {
 
 impl rand_core::TryCryptoRng for SeedRng {}
 
-/// Семя ПОЛУЧАТЕЛЯ. То же значение, что у пробы-отказа в `cc-cli`: пара там и
-/// здесь одна и та же, и это связывает два утверждения об одном механизме.
+/// RECIPIENT seed. Same value as the rejection probe in `cc-cli`: the pair is
+/// identical there and here, linking two claims about one mechanism.
 const RECIPIENT_SEED: [u8; 32] = [0x08; 32];
 
-/// Семя АППАРАТНОЙ половины автора.
+/// Seed of the author's HARDWARE half.
 ///
-/// В поставке этих байт не существует: классическая половина автора живёт в TPM
-/// и наружу не выходит, а `keypair_from_seed` заведён «только для векторов и
-/// программного пути» — так сказано в его собственной докстроке. Движку это
-/// безразлично по построению: он видит 1249 открытых байт и не спрашивает, кто
-/// держит вторую половину. Ровно поэтому эталон здесь возможен, и ровно поэтому
-/// он НЕ доказывает работу с настоящим TPM — про живой TPM говорит прогон
-/// 2026-09-15, записанный в `CLAUDE.md`.
+/// These bytes do not exist in production: the author's classical half lives inside a TPM
+/// without leaving; `keypair_from_seed` exists "only for vectors and
+/// the software path", as its own documentation states. The engine is
+/// indifferent by construction: it sees 1249 public bytes and does not ask who
+/// holds the other half. This is why the artifact is possible here, and why
+/// it does NOT prove real-TPM operation; that is addressed by the
+/// 2026-09-15 run recorded in `CLAUDE.md`.
 const AUTHOR_HYBRID_SEED: [u8; 32] = [0x09; 32];
 
-/// Семя ключа запечатывания сервера. Известно пробе целиком, и это осознанно:
-/// эталон собран стендом, а стенд играет обе роли — иначе доля A недостижима и
-/// открыть эталон нечем.
+/// Server sealing-key seed. Fully known to the probe, deliberately:
+/// the testbed built this artifact and plays both roles, or share A would be inaccessible
+/// and nothing could open it.
 const SERVER_SEED: [u8; 32] = [0x03; 32];
 
-/// Семя генератора. То же число, что у контейнерных эталонов.
+/// RNG seed. Same number as the container artifacts.
 const RNG_SEED: u8 = 42;
 
-/// Что устройство «намерило», прогнав поток.
+/// What the device "measured" while processing the stream.
 ///
-/// Величины взяты руками, а не из настоящего прогона, и это не упрощение:
-/// движок потока НЕ ВИДИТ — он принимает итог параметром, — поэтому настоящий
-/// прогон дал бы ровно те же три числа, только дороже. Содержательны они лишь
-/// тем, что попадают в заголовок и в приватные метаданные, и оба эти места
-/// эталон и сверяет.
+/// Values chosen manually rather than from an actual run, not a simplification:
+/// the engine DOES NOT SEE the stream, accepting its result as a parameter; an actual
+/// run would give the same three numbers at greater cost. They matter only
+/// because they enter the header and private metadata, both locations
+/// checked by the artifact.
 fn sealed_info() -> SealedInfo {
     SealedInfo { total_len: 13_000, chunk_count: 4, tree_root: [0x3b; 32] }
 }
@@ -199,8 +199,8 @@ fn request(public_key: Box<[u8; mlkem_p256::PUBLIC_KEY_LEN]>) -> PackRequest<'st
     }
 }
 
-/// Собрать заголовок движком. Никакого ввода-вывода, никаких часов, генератор
-/// сидированный — всё, что нужно для побайтовой воспроизводимости.
+/// Assemble a header with the engine. No I/O, no clocks, a seeded
+/// RNG: everything needed for byte-for-byte reproducibility.
 fn build_header() -> Vec<u8> {
     let recipient = recipient_pair();
     let author = author_pair();
@@ -251,11 +251,11 @@ fn blob_of(slot: &KnownSlot) -> SealedBlob {
     SealedBlob { enc: slot.enc.clone(), nonce: slot.nonce, ct: slot.ct.clone() }
 }
 
-/// ЗАГОЛОВОК С ДВУМЯ СЛОТАМИ `kem_id = 5` ПОБАЙТНО СОВПАДАЕТ С ЗАМОРОЖЕННЫМ.
+/// A HEADER WITH TWO `kem_id = 5` SLOTS MATCHES THE FROZEN BYTES EXACTLY.
 ///
-/// Сверяется свежесобранный заголовок с файлом, а не сам с собой: это же и есть
-/// проверка детерминизма между ПРОЦЕССАМИ, которую внутри одного прогона
-/// подделать нечем.
+/// Compares a freshly assembled header with a file, not with itself: this is
+/// determinism across PROCESSES, which cannot be faked inside
+/// one run.
 #[test]
 fn the_hardware_hybrid_header_is_byte_identical_to_the_frozen_golden() {
     let produced = build_header();
@@ -296,23 +296,23 @@ fn the_hardware_hybrid_header_is_byte_identical_to_the_frozen_golden() {
     }
 }
 
-/// ОБА ГИБРИДНЫХ СЛОТА ЭТАЛОНА ОТКРЫВАЮТСЯ СВОИМИ ПОЛОВИНАМИ.
+/// BOTH GOLDEN HYBRID SLOTS OPEN WITH THEIR OWNERS' HALVES.
 ///
-/// Положительный контроль, без которого сверка байтов слепа: она доказывает
-/// постоянство байтов и молчит об их пригодности. Здесь проверяется обратное —
-/// что замороженное годно, и годно по ОБОИМ путям, авторскому и получательскому.
+/// A positive control without which byte comparison is blind: it proves
+/// byte stability while saying nothing about usability. This checks the converse:
+/// the frozen artifact is usable by BOTH paths, author and recipient.
 ///
-/// Путь получателя тот же, которым пойдёт устройство: `open_mlkem_p256` обеими
-/// половинами, доля A из слота сервера, `derive_kek`, `unwrap_cek` — и в нём же
-/// проверяется обязательство слота (И-4: `unwrap_cek` сверяет его константным
-/// временем ДО открытия AEAD). Путь автора отличается тем, что его слот несёт
-/// ОБЕ доли разом, и сервер ему не нужен.
+/// The recipient path is exactly the device path: `open_mlkem_p256` using both
+/// halves, share A from the server slot, `derive_kek`, `unwrap_cek`, also checking
+/// the slot commitment (I-4: `unwrap_cek` compares it in constant
+/// time BEFORE opening AEAD). The author path differs because its slot carries
+/// BOTH shares together and needs no server.
 ///
-/// Доведено до ОТКРЫТОГО ТЕКСТА приватных метаданных, а не до `CEK`: остановка
-/// на ключе доказала бы, что сошлись доли, и промолчала бы о том, сходится ли с
-/// ними то, что этим ключом зашифровано. Содержимого файла здесь нет — движок
-/// потока не видит, — поэтому дальше приватных метаданных путь не идёт, и это
-/// сказано прямо, а не скрыто за словом «полностью».
+/// Continues through private-metadata PLAINTEXT rather than stopping at `CEK`:
+/// stopping at the key would prove shares agree, but not that the data encrypted
+/// with that key agrees. No file contents here, since the engine does not see
+/// the stream, so the path ends at private metadata; this limit is stated
+/// explicitly rather than hidden behind "fully".
 #[test]
 fn both_hardware_hybrid_slots_open_for_their_owners() {
     let bytes = std::fs::read(golden_path()).expect("эталон движка обязан лежать в репозитории");
@@ -465,14 +465,14 @@ fn both_hardware_hybrid_slots_open_for_their_owners() {
     assert_eq!(size, Some(sealed_info().total_len), "размер в метаданных не тот");
 }
 
-/// Дописать эталон движка ОДИН раз. Существующий файл не перезаписывается.
+/// Add the engine golden artifact ONCE. Never overwrite an existing file.
 ///
-/// Тем же приёмом, что `write_the_hybrid_golden_once` в `cc-cli`, и по той же
-/// причине: перевыпуск и ДОБАВЛЕНИЕ — разные действия, И-14 запрещает первое и
-/// разрешает второе. Инструмент, умеющий только дописать, не может сделать
-/// запрещённого даже по ошибке. Одного `#[ignore]` для этого мало: он не
-/// защищает от `cargo test --workspace -- --ignored`, поэтому рядом стоит
-/// переменная окружения, а поверх неё — отказ писать в существующий файл.
+/// Same technique as `write_the_hybrid_golden_once` in `cc-cli`, for the same
+/// reason: reissuance and ADDITION are different actions; I-14 forbids the former and
+/// permits the latter. An append-only tool cannot perform the
+/// forbidden action even by mistake. `#[ignore]` alone is insufficient: it does not
+/// protect against `cargo test --workspace -- --ignored`, so an environment
+/// variable is required too, followed by refusal to write an existing file.
 #[test]
 #[ignore = "инструмент добавления нового эталона, а не проверка"]
 fn write_the_hardware_hybrid_engine_golden_once() {

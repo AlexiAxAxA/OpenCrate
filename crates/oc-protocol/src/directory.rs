@@ -1,21 +1,21 @@
-//! Каталог ключей организации: запись, её лист и доказательство
+//! Organization key directory: a record, its leaf and proof
 //! (`docs/protocol.md` §9.14, D4).
 //!
-//! # Что запись утверждает
+//! # What a record asserts
 //!
-//! «Сервер организации `tenant` называет ключ `public` (механизм `kem`,
-//! отпечаток K27 `fpr`) ключом участника `name`, версия `version`,
-//! происхождение — `origin`». Это утверждение СЕРВЕРА, и само по себе оно не
-//! доказывает, что за ключом стоит этот человек: имя — слова оператора, а не
-//! криптография. Журнал каталога делает другое — не даёт серверу показать
-//! разным людям разные записи незаметно: лист — хеш самой записи, голова
-//! подписана сервером и свидетелем (`crate::witness`, вид `Directory`).
+//! "The server for organization `tenant` identifies key `public` (mechanism `kem`,
+//! K27 fingerprint `fpr`) as the key of member `name`, version `version`,
+//! origin `origin`." This is a SERVER assertion; by itself, it does not
+//! prove that this person controls the key: the name is the operator's claim, not
+//! cryptography. The directory journal serves a different purpose: it prevents the server from silently
+//! showing different records to different people. The leaf is the record's hash; the head
+//! is signed by the server and witness (`crate::witness`, kind `Directory`).
 //!
-//! # Чего здесь нет
+//! # What is absent here
 //!
-//! Доказательства ОТСУТСТВИЯ: «записи для этого имени нет» сервер утверждает
-//! словом. Полноту проверяет монитор, читающий журнал целиком
-//! (`DirectoryRecords`) и сверяющий корень с засвидетельствованной головой.
+//! Proof of ABSENCE: "there is no record for this name" is only the server's
+//! claim. Completeness is checked by a monitor that reads the entire journal
+//! (`DirectoryRecords`) and compares its root with the cosigned head.
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
@@ -24,20 +24,20 @@ use oc_crypto::merkle::{Leaf, MerkleTree};
 use oc_crypto::transcript::Transcript;
 use oc_crypto::{KemAlg, label, sha256};
 
-/// Длина имени организации, байт.
+/// Organization name length, bytes.
 pub const MAX_TENANT: usize = 64;
-/// Длина имени участника, знаков.
+/// Member name length, characters.
 pub const MAX_NAME_CHARS: usize = 128;
-/// Длина происхождения записи, знаков.
+/// Record origin length, characters.
 pub const MAX_ORIGIN_CHARS: usize = 512;
-/// Длина записи, байт: самый длинный ключ (MLKEM768-P256) с запасом.
+/// Record length, bytes: the longest key (MLKEM768-P256), with headroom.
 pub const MAX_RECORD_LEN: usize = 8 * 1024;
-/// Записей в одной странице монитора.
+/// Records per monitor page.
 pub const MAX_PAGE: u32 = 256;
-/// Предел пути доказательства включения: дерево до 2^32 листьев — не длиннее 32.
+/// Inclusion proof path limit: a tree of up to 2^32 leaves needs at most 32.
 pub const MAX_INCLUSION_PATH: usize = 64;
 
-/// Теги записи. Все критичны и все обязательны, по возрастанию (И-7).
+/// Record tags. All critical and required, in ascending order (I-7).
 pub mod tag {
     pub const TENANT: u16 = 1;
     pub const NAME: u16 = 2;
@@ -50,25 +50,25 @@ pub mod tag {
     pub const AT: u16 = 9;
 }
 
-/// Действует ли ключ записи.
+/// Whether the record's key is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum KeyState {
-    /// Ключ действует.
+    /// The key is active.
     Active = 0,
-    /// Ключ снят: запись о снятии — тоже версия, а не удаление, иначе снятие
-    /// нельзя было бы доказать.
+    /// The key is retired: retirement is also a version, not deletion; otherwise retirement
+    /// could not be proven.
     Withdrawn = 1,
 }
 
-/// Запись каталога.
+/// Directory record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     pub tenant: String,
     pub name: String,
     pub kem: KemAlg,
     pub public: Vec<u8>,
-    /// K27 от `(kem, public)` — сверяется при разборе, а не принимается.
+    /// K27 of `(kem, public)`: checked when parsing, not taken on trust.
     pub fpr: [u8; 32],
     pub version: u64,
     pub state: KeyState,
@@ -80,9 +80,9 @@ fn bad(tag: u16, len: usize) -> FormatError {
     FormatError::BadFieldLength { tag, len }
 }
 
-/// Имя организации: `[a-z0-9._-]`, 1..=64 байт. Узкий алфавит — потому что
-/// имя сравнивается побайтно, и двух написаний одной организации быть не
-/// должно.
+/// Organization name: `[a-z0-9._-]`, 1..=64 bytes. The narrow alphabet is required because
+/// names are compared bytewise, and one organization must not have
+/// two spellings.
 fn check_tenant(tenant: &str) -> Result<(), FormatError> {
     let ok = !tenant.is_empty()
         && tenant.len() <= MAX_TENANT
@@ -90,7 +90,7 @@ fn check_tenant(tenant: &str) -> Result<(), FormatError> {
     if ok { Ok(()) } else { Err(bad(tag::TENANT, tenant.len())) }
 }
 
-/// Текст для человека: непустой, в пределе, без знаков, опасных на экране.
+/// Human-readable text: nonempty, within the limit, without characters unsafe to display.
 fn check_text(text: &str, max_chars: usize, tag: u16) -> Result<(), FormatError> {
     if text.trim().is_empty() || text.chars().count() > max_chars {
         return Err(bad(tag, text.len()));
@@ -102,10 +102,10 @@ fn check_text(text: &str, max_chars: usize, tag: u16) -> Result<(), FormatError>
 }
 
 impl Record {
-    /// Собрать запись; отпечаток считается здесь.
+    /// Build a record; the fingerprint is computed here.
     ///
     /// # Errors
-    /// [`FormatError`] — имя, текст, механизм или длина ключа негодны.
+    /// [`FormatError`]: invalid name, text, mechanism or key length.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tenant: &str,
@@ -147,10 +147,10 @@ impl Record {
         Ok(())
     }
 
-    /// Байты записи.
+    /// Record bytes.
     ///
     /// # Errors
-    /// [`FormatError`] — запись негодна или длиннее предела.
+    /// [`FormatError`]: an invalid or oversized record.
     pub fn encode(&self) -> Result<Vec<u8>, FormatError> {
         self.check()?;
         let mut w = TlvWriter::new();
@@ -170,11 +170,11 @@ impl Record {
         Ok(bytes)
     }
 
-    /// Разобрать запись — строго: все девять полей, по порядку, точной длины;
-    /// отпечаток пересчитывается и сверяется.
+    /// Parse a record strictly: all nine fields, in order, with exact lengths;
+    /// the fingerprint is recomputed and checked.
     ///
     /// # Errors
-    /// [`FormatError`] — любое отклонение.
+    /// [`FormatError`]: any deviation.
     pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
         if bytes.len() > MAX_RECORD_LEN {
             return Err(bad(0, bytes.len()));
@@ -259,7 +259,7 @@ impl Record {
         Ok(record)
     }
 
-    /// Лист журнала каталога от байтов записи.
+    /// Directory journal leaf computed from record bytes.
     #[must_use]
     pub fn leaf(bytes: &[u8]) -> Leaf {
         let mut t = Transcript::new(label::DIRECTORY_ENTRY);
@@ -268,11 +268,11 @@ impl Record {
     }
 }
 
-/// Запрос записи: `u8 длина ‖ организация ‖ u16le длина ‖ имя ‖ u64le size`.
-/// `size = 0` — в текущей голове.
+/// Record request: `u8 length ‖ organization ‖ u16le length ‖ name ‖ u64le size`.
+/// `size = 0` means the current head.
 ///
 /// # Errors
-/// [`FormatError`] — имя организации или участника негодно.
+/// [`FormatError`]: invalid organization or member name.
 pub fn encode_lookup_request(tenant: &str, name: &str, size: u64) -> Result<Vec<u8>, FormatError> {
     check_tenant(tenant)?;
     check_text(name, MAX_NAME_CHARS, tag::NAME)?;
@@ -287,10 +287,10 @@ pub fn encode_lookup_request(tenant: &str, name: &str, size: u64) -> Result<Vec<
     Ok(out)
 }
 
-/// Разобрать запрос записи. Строго.
+/// Parse a record request strictly.
 ///
 /// # Errors
-/// [`FormatError`] — раскладка или имена негодны.
+/// [`FormatError`]: invalid layout or names.
 pub fn decode_lookup_request(bytes: &[u8]) -> Result<(String, String, u64), FormatError> {
     let whole = bad(0, bytes.len());
     let (tenant_len, rest) = bytes.split_first().ok_or(whole)?;
@@ -306,10 +306,10 @@ pub fn decode_lookup_request(bytes: &[u8]) -> Result<(String, String, u64), Form
     Ok((tenant, name, u64::from_le_bytes(size)))
 }
 
-/// Ответ на запрос записи: запись, её место и доказательство включения в
-/// голову, подписанную сервером.
+/// Record lookup response: the record, its position and proof of inclusion in
+/// the server-signed head.
 ///
-/// Раскладка: `голова(104) ‖ u64le index ‖ u32le длина ‖ запись ‖ путь(32·N)`.
+/// Layout: `head(104) ‖ u64le index ‖ u32le length ‖ record ‖ path(32·N)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lookup {
     pub head: SignedHead,
@@ -318,16 +318,16 @@ pub struct Lookup {
     pub path: Vec<[u8; 32]>,
 }
 
-/// Почему ответ каталога не принят.
+/// Why a directory response was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LookupError {
-    /// Голова не подписана этим сервером как голова каталога.
+    /// The head is not signed by this server as a directory head.
     ServerSignature,
-    /// Запись не разбирается.
+    /// The record cannot be parsed.
     Malformed,
-    /// Запись о другой организации или другом участнике.
+    /// The record concerns another organization or member.
     OtherEntry,
-    /// Доказательство не сходится с головой.
+    /// The proof does not match the head.
     NotIncluded,
 }
 
@@ -343,10 +343,10 @@ impl std::fmt::Display for LookupError {
 }
 
 impl Lookup {
-    /// Байты ответа.
+    /// Response bytes.
     ///
     /// # Errors
-    /// [`FormatError`] — запись длиннее предела или путь длиннее предела.
+    /// [`FormatError`]: oversized record or proof path.
     pub fn encode(&self) -> Result<Vec<u8>, FormatError> {
         if self.record.len() > MAX_RECORD_LEN || self.path.len() > MAX_INCLUSION_PATH {
             return Err(bad(0, self.record.len()));
@@ -363,11 +363,11 @@ impl Lookup {
         Ok(out)
     }
 
-    /// Разобрать ответ. Строго; содержание записи здесь не проверяется — это
-    /// делает [`Self::verify`].
+    /// Parse a response strictly; record contents are not checked here:
+    /// that is done by [`Self::verify`].
     ///
     /// # Errors
-    /// [`FormatError`] — раскладка не сходится.
+    /// [`FormatError`]: inconsistent layout.
     pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
         let whole = bad(0, bytes.len());
         let (head, rest) = bytes.split_at_checked(SIGNED_HEAD_LEN).ok_or(whole)?;
@@ -394,20 +394,20 @@ impl Lookup {
         })
     }
 
-    /// Проверить ответ на вопрос «(организация, участник)»: подпись головы,
-    /// включение записи в голову, запись о том, о ком спрашивали.
+    /// Verify an answer to "(organization, member)": the head signature,
+    /// the record's inclusion under that head, and that the record concerns the requested member.
     ///
-    /// # Порядок здесь несущий
+    /// # Order is essential here
     ///
-    /// Подпись головы — первой, включение записи — второй, разбор записи —
-    /// только третьим. Байты записи заверены не подписью головы напрямую, а
-    /// доказательством включения, и лист считается по СЫРЫМ байтам
-    /// ([`Record::leaf`]) — разбирать их ради проверки не нужно. Разбери мы их
-    /// раньше — [`LookupError::Malformed`] отвечал бы о записи, которой в
-    /// журнале нет вовсе (тот же довод И-5, что у подписанных документов).
+    /// Head signature first, record inclusion second, record parsing
+    /// only third. Record bytes are authenticated not directly by the head signature but by
+    /// the inclusion proof, and the leaf is computed from RAW bytes
+    /// ([`Record::leaf`]); no parsing is needed to check it. Parsing them
+    /// earlier would let [`LookupError::Malformed`] report on a record not present
+    /// in the journal at all (the same I-5 rationale as for signed documents).
     ///
     /// # Errors
-    /// [`LookupError`] — что не сошлось.
+    /// [`LookupError`]: which check failed.
     pub fn verify(&self, server_key: &[u8; 32], tenant: &str, name: &str) -> Result<Record, LookupError> {
         if !self.head.signed_by(Log::Directory, server_key) {
             return Err(LookupError::ServerSignature);
@@ -426,10 +426,10 @@ impl Lookup {
     }
 }
 
-/// Страница записей для монитора: подряд `u32le длина ‖ запись`.
+/// A page of records for the monitor: consecutive `u32le length ‖ record`.
 ///
 /// # Errors
-/// [`FormatError`] — запись длиннее предела или записей больше страницы.
+/// [`FormatError`]: an oversized record or more records than fit a page.
 pub fn encode_page(records: &[Vec<u8>]) -> Result<Vec<u8>, FormatError> {
     if records.len() > usize::try_from(MAX_PAGE).unwrap_or(usize::MAX) {
         return Err(bad(0, records.len()));
@@ -446,10 +446,10 @@ pub fn encode_page(records: &[Vec<u8>]) -> Result<Vec<u8>, FormatError> {
     Ok(out)
 }
 
-/// Разобрать страницу. Каждая запись обязана разбираться.
+/// Parse a page. Every record must parse.
 ///
 /// # Errors
-/// [`FormatError`] — раскладка или запись негодны.
+/// [`FormatError`]: invalid layout or record.
 pub fn decode_page(bytes: &[u8]) -> Result<Vec<Vec<u8>>, FormatError> {
     let mut out = Vec::new();
     let mut rest = bytes;

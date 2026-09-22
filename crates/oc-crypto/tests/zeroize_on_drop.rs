@@ -1,15 +1,15 @@
-//! Секреты чужих крейтов затираются при уничтожении — а не только наши.
+//! Secrets from dependency crates wipe on destruction too, not just ours.
 //!
-//! `seal::open` делает КОПИЮ долговременного секрета устройства в
-//! `x25519_dalek::StaticSecret` ради `diffie_hellman`, и результат согласования
-//! живёт в `SharedSecret`. Обе живут на стеке, и затирающий аллокатор их не
-//! касается: затирает только сам тип при `Drop`. У `x25519-dalek` это фича
-//! `zeroize`, и с `default-features = false` она снимается вместе с остальными —
-//! ровно так и было (ревью 2026-09-06): `Drop` был пуст, копия секрета
-//! устройства оставалась в кадре стека как есть.
+//! `seal::open` COPIES the long-term device secret into
+//! `x25519_dalek::StaticSecret` for `diffie_hellman`, and the agreement result
+//! lives in `SharedSecret`. Both are stack-resident, untouched by a wiping
+//! allocator: only the type's own `Drop` wipes them. For `x25519-dalek`, the
+//! `zeroize` feature controls this; `default-features = false` removes it with the others,
+//! which is exactly what happened (review 2026-09-06): `Drop` was empty, leaving the device
+//! secret copy unchanged in the stack frame.
 //!
-//! Проверка — на уровне типов: без фичи `ZeroizeOnDrop` у `StaticSecret` нет, и
-//! этот файл не собирается. Собрался — значит, фича стоит.
+//! The check is at type level: without the feature, `StaticSecret` lacks `ZeroizeOnDrop`,
+//! and this file fails to compile. Compilation proves the feature is enabled.
 
 fn zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
 

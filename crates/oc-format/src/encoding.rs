@@ -1,48 +1,48 @@
-//! Однобайтовые кириллические кодировки.
+//! Single-byte Cyrillic encodings.
 //!
-//! # Зачем это здесь, в чистом крейте
+//! # Why this belongs in a pure crate
 //!
-//! Затем, что кодировка нужна ОБЕИМ половинам продукта, и держать её в одной
-//! значило бы завести вторую копию в другой. Просмотрщик показывает текстовые
-//! файлы сам; отрисовщик раскодирует заголовки писем. Таблица, размноженная по
-//! двум крейтам, расходится при первой же правке — а расхождение здесь означает
-//! не отказ, а РАЗНЫЕ БУКВЫ в двух местах одного продукта.
+//! Because BOTH halves of the product need encoding support; keeping it in one
+//! would require a second copy in the other. The viewer displays text
+//! files itself; the renderer decodes email headers. A table duplicated across
+//! two crates diverges with the first edit, and divergence here means
+//! DIFFERENT LETTERS in two places in one product, rather than a rejection.
 //!
-//! Ввода-вывода, часов и генератора тут нет: таблица есть таблица.
+//! There is no I/O, clock, or generator here: a table is a table.
 //!
-//! # Почему таблицы построены машинно
+//! # Why the tables are generated
 //!
-//! Потому что таблица из ста двадцати восьми значений, набранная руками,
-//! содержит опечатку почти наверняка — и опечатка эта показывает не мусор, а
-//! ДРУГУЮ БУКВУ. Такое не видно при чтении кода и не ловится глазами в выводе:
-//! текст остаётся связным.
+//! Because a table of one hundred and twenty-eight values entered by hand
+//! almost certainly contains a typo, and that typo displays not garbage but
+//! A DIFFERENT LETTER. Neither code review nor looking at the output catches it:
+//! the text remains coherent.
 //!
-//! # Почему угадывание здесь допустимо, а в письме — нет
+//! # Why guessing is acceptable here but not in email
 //!
-//! Потому что это РАЗНЫЕ положения. В письме кодировка объявлена самим письмом:
-//! угадывать там значит спорить с документом, и правдоподобно неверные буквы
-//! появляются на пустом месте. У текстового файла не объявлено ничего, и выбор
-//! стоит между «показать по предположению» и «показать точками».
+//! Because these are DIFFERENT situations. An email declares its own encoding:
+//! guessing there contradicts the document and introduces plausible but wrong
+//! letters for no reason. A text file declares nothing, so the choice
+//! is between "display using a guess" and "display dots".
 //!
-//! Точки — это отказ показать документ, который прекрасно читается. Поэтому
-//! предположение делается, но **называется вслух**: вызывающий получает имя
-//! кодировки и обязан показать его человеку. Человек, увидевший осмысленный
-//! текст, ничего не теряет; человек, увидевший бессмыслицу, знает, где искать
-//! причину.
+//! Dots mean refusing to display a perfectly readable document. Therefore
+//! a guess is made but **explicitly identified**: the caller receives the
+//! encoding name and must show it to the user. A user seeing meaningful
+//! text loses nothing; a user seeing nonsense knows where to look
+//! for the cause.
 
-/// Кодировка, в которой удалось прочесть байты.
+/// The encoding in which the bytes could be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoding {
-    /// Windows-1251 — самая частая для русского текста на Windows.
+    /// Windows-1251: the most common encoding for Russian text on Windows.
     Cp1251,
-    /// KOI8-R — старая почта и Unix.
+    /// KOI8-R: legacy email and Unix.
     Koi8R,
-    /// CP866 — вывод программ MS-DOS, до сих пор встречается в журналах.
+    /// CP866: MS-DOS program output, still found in logs.
     Cp866,
 }
 
 impl Encoding {
-    /// Имя для показа человеку.
+    /// A name to display to the user.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -60,7 +60,7 @@ impl Encoding {
         }
     }
 
-    /// Перевести один байт.
+    /// Decode one byte.
     #[must_use]
     pub fn char_of(self, byte: u8) -> char {
         if byte < 0x80 {
@@ -71,37 +71,37 @@ impl Encoding {
         char::from_u32(u32::from(code)).unwrap_or(char::REPLACEMENT_CHARACTER)
     }
 
-    /// Перевести все байты.
+    /// Decode all bytes.
     #[must_use]
     pub fn decode(self, bytes: &[u8]) -> String {
         bytes.iter().map(|byte| self.char_of(*byte)).collect()
     }
 }
 
-/// Все кодировки, между которыми выбирают.
+/// All candidate encodings.
 pub const ALL: [Encoding; 3] = [Encoding::Cp1251, Encoding::Koi8R, Encoding::Cp866];
 
-/// Насколько уверенно должен победить кандидат, чтобы его приняли.
+/// How confidently a candidate must win to be accepted.
 ///
-/// Три четверти старших байт должны стать кириллическими буквами. Порог ниже
-/// пропускал бы двоичный файл: у случайных байт кириллицей окажется примерно
-/// половина при любой из трёх таблиц, и «победитель» нашёлся бы всегда.
+/// Three quarters of high bytes must become Cyrillic letters. A lower threshold
+/// would accept binary files: roughly half of random bytes become Cyrillic
+/// under any of the three tables, so there would always be a "winner".
 const CONFIDENT: u32 = 3;
 
-/// Угадать кодировку по байтам.
+/// Guess the encoding from the bytes.
 ///
-/// `None` означает «уверенного кандидата нет»: двоичный файл, текст на языке без
-/// кириллицы или слишком короткий кусок. Вызывающий тогда обязан НЕ показывать
-/// текст как текст — иначе он покажет правдоподобную бессмыслицу.
+/// `None` means "no confident candidate": a binary file, text in a language without
+/// Cyrillic, or a fragment that is too short. The caller must then NOT display
+/// the text as text, or it will show plausible nonsense.
 ///
-/// # Как различаются CP1251 и KOI8-R
+/// # Distinguishing CP1251 from KOI8-R
 ///
-/// Обе кладут кириллицу в `0xC0..=0xFF`, поэтому «стало ли буквами» их не
-/// разделяет. Разделяет РЕГИСТР: в KOI8-R строчные лежат в `0xC0..=0xDF`, а в
-/// CP1251 — в `0xE0..=0xFF`. Русский текст в основном строчный, поэтому верная
-/// таблица даёт много строчных букв, а неверная — много заглавных.
+/// Both place Cyrillic in `0xC0..=0xFF`, so "did these become letters" cannot
+/// distinguish them. CASE does: KOI8-R puts lowercase letters in `0xC0..=0xDF`,
+/// while CP1251 uses `0xE0..=0xFF`. Russian text is mostly lowercase, so the correct
+/// table yields many lowercase letters and the wrong one many uppercase letters.
 ///
-/// Отсюда и мера: считаются СТРОЧНЫЕ кириллические буквы, а не любые.
+/// Hence the metric: count LOWERCASE Cyrillic letters rather than all letters.
 #[must_use]
 pub fn guess(bytes: &[u8]) -> Option<Encoding> {
     let high = bytes.iter().filter(|byte| **byte >= 0x80).count();
@@ -132,10 +132,10 @@ pub fn guess(bytes: &[u8]) -> Option<Encoding> {
     }
 }
 
-/// Строчная ли это кириллическая буква.
+/// Whether this is a lowercase Cyrillic letter.
 ///
-/// Диапазон `а`–`я` плюс `ё`. Заглавные намеренно НЕ считаются: именно их
-/// перевес выдаёт перепутанную таблицу.
+/// The range `а`–`я` plus `ё`. Uppercase letters are deliberately NOT counted:
+/// their predominance is precisely what reveals the wrong table.
 fn is_cyrillic_lowercase(c: char) -> bool {
     matches!(c, '\u{0430}'..='\u{044F}' | '\u{0451}')
 }
@@ -203,11 +203,11 @@ const CP866: [u16; 128] = [
 mod tests {
     use super::*;
 
-    /// Русский текст опознаётся в каждой из трёх кодировок.
+    /// Russian text is recognized in each of the three encodings.
     ///
-    /// Строится он здесь же обратным ходом: берём известный текст, кодируем
-    /// таблицей, и требуем, чтобы угадывание вернуло именно её. Так проверяется
-    /// то, что нужно, — различение, а не просто «получились буквы».
+    /// Constructed here by reversing the process: take known text, encode it
+    /// with a table, and require the guess to return that exact table. This tests
+    /// what matters: discrimination, rather than merely "letters came out".
     #[test]
     fn each_encoding_is_recognised_from_its_own_bytes() {
         let text = "мы храним документы в защищённом виде и показываем их людям";
@@ -230,10 +230,10 @@ mod tests {
         }
     }
 
-    /// CP1251 и KOI8-R РАЗЛИЧАЮТСЯ, хотя обе кладут кириллицу в один диапазон.
+    /// CP1251 and KOI8-R ARE DISTINGUISHED despite placing Cyrillic in the same range.
     ///
-    /// Отдельной пробой, потому что это единственная пара, которую легко
-    /// перепутать: различает их регистр, а не диапазон.
+    /// A separate probe because this is the only easily confused pair:
+    /// case distinguishes them, rather than the range.
     #[test]
     fn the_two_lookalikes_are_told_apart() {
         let text = "документ открыт и показан";
@@ -250,11 +250,11 @@ mod tests {
         assert_eq!(guess(&koi), Some(Encoding::Koi8R));
     }
 
-    /// ДВОИЧНЫЙ ФАЙЛ КОДИРОВКОЙ НЕ ОБЪЯВЛЯЕТСЯ.
+    /// A BINARY FILE IS NOT CLASSIFIED AS AN ENCODING.
     ///
-    /// Без порога уверенности победитель находился бы всегда: у случайных байт
-    /// кириллицей окажется примерно половина при любой таблице. Тогда всякий
-    /// исполняемый файл показывался бы связной на вид бессмыслицей.
+    /// Without a confidence threshold there would always be a winner: roughly half
+    /// of random bytes become Cyrillic under any table. Every executable
+    /// would then be displayed as seemingly coherent nonsense.
     #[test]
     fn binary_bytes_are_not_declared_to_be_text() {
         // Отрезок, где старшие байты равномерны, — то, чем и является машинный код.
@@ -269,7 +269,7 @@ mod tests {
         );
     }
 
-    /// Короткий кусок не даёт судить, и это признаётся честно.
+    /// A short fragment cannot support a judgment, and this is acknowledged honestly.
     #[test]
     fn a_short_run_is_refused_rather_than_guessed() {
         assert_eq!(guess(b"\xE4\xE0"), None, "по двум байтам вынесен вердикт");

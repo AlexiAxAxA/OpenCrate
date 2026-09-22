@@ -1,37 +1,37 @@
-//! Правило диапазона тегов у ДОКУМЕНТОВ ПРОТОКОЛА (И-7, решение 2026-09-21).
+//! Tag-range rule for PROTOCOL DOCUMENTS (I-7, decision of 2026-09-21).
 //!
-//! # Что здесь проверяется
+//! # What is tested here
 //!
-//! Одно правило на все четырнадцать разборщиков: незнакомый тег > `0x7FFF`
-//! пропускается, незнакомый тег ≤ `0x7FFF` отвергается тем же вариантом ошибки,
-//! каким крейт отвечал на любой незнакомый тег до решения, а строгий рост тегов
-//! (И-7) держится и на пропускаемом.
+//! One rule across all fourteen parsers: an unknown tag > `0x7FFF`
+//! is skipped; an unknown tag ≤ `0x7FFF` is rejected with the same error variant
+//! used for every unknown tag before the decision; strict tag ordering
+//! (I-7) also applies to skipped tags.
 //!
-//! # Почему таблицей, а не двенадцатью файлами
+//! # Why a table rather than twelve files
 //!
-//! Потому что правило ОДНО. Скопируй его проверку по файлу на документ — и
-//! появится двенадцать мест, где её можно поправить по отдельности; ровно так в
-//! этом репозитории заводится болезнь «один путь чинят, соседний забывают».
-//! Здесь новый документ добавляется одной строкой таблицы, и все четыре случая
-//! он получает сразу.
+//! Because there is ONE rule. Copying its test into one file per document would
+//! create twelve independently editable places, exactly how this repository develops
+//! the "one path fixed, its neighbor forgotten" problem.
+//! Here a new document adds one table row and immediately receives all four
+//! cases.
 //!
-//! # Почему незнакомый тег стоит ТОЛЬКО В КОНЦЕ
+//! # Why the unknown tag appears ONLY AT THE END
 //!
-//! Не из лени: иначе нельзя. Теги идут строго по возрастанию (И-7), а все
-//! ЗНАКОМЫЕ теги документов протокола лежат в критичном диапазоне (1..=20 у
-//! самого богатого). Значит тег из необязательного диапазона по построению
-//! старше любого знакомого и может стоять только после них. Середины, в которую
-//! его можно было бы вставить, у этих документов не существует — в отличие от
-//! заголовка контейнера, где необязательный тег `0x8001` уже занят.
+//! Not laziness: no other position is possible. Tags strictly increase (I-7), and all
+//! KNOWN protocol document tags lie in the critical range (1..=20 for the
+//! richest document). An optional-range tag is therefore larger by construction
+//! than every known tag and can only follow them. These documents have no middle
+//! position where it could be inserted, unlike the
+//! container header, where optional tag `0x8001` is already occupied.
 //!
-//! # Почему подпись ставится ПОСЛЕ добавления тега
+//! # Why signing happens AFTER the tag is added
 //!
-//! Случай (i) обязан проверять РАЗБОР. Подпиши мы тело без тега и подай тело с
-//! тегом — отказ случился бы на подписи, и проба зеленела бы, ничего не сказав о
-//! разборе. Поэтому у подписанных документов тело сначала дополняется, потом
-//! подписывается. Обратный порядок — отдельный случай (iv), и он утверждает
-//! ровно то, чем крейт оправдывает необязательный диапазон: посторонний дописать
-//! тег не может, подпись покрывает сырые байты тела.
+//! Case (i) must test PARSING. Signing a body without the tag and supplying one with
+//! the tag would fail signature verification, letting the test pass without saying anything about
+//! parsing. Thus signed documents have their body extended first, then
+//! signed. The reverse order is separate case (iv), asserting
+//! exactly what justifies the optional range: an outsider cannot append
+//! a tag because the signature covers the raw body bytes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
@@ -41,12 +41,12 @@ use oc_format::FormatError;
 use oc_format::tlv::CRIT_TAG_MAX;
 use oc_protocol::{access, activation, attestation, attribute_rule, control, directory, lease, order, replica, revocation, standing};
 
-/// Незнакомый тег из НЕОБЯЗАТЕЛЬНОГО диапазона.
+/// Unknown tag in the OPTIONAL range.
 const OPTIONAL: u16 = 0x8ABC;
-/// Незнакомый тег из КРИТИЧНОГО диапазона.
+/// Unknown tag in the CRITICAL range.
 const CRITICAL: u16 = 0x7ABC;
 
-/// Дописать к телу запись с этим тегом.
+/// Append an entry with this tag to the body.
 fn with_tag(body: &[u8], tag: u16, value: &[u8]) -> Vec<u8> {
     let mut out = body.to_vec();
     out.extend_from_slice(&tag.to_le_bytes());
@@ -55,22 +55,22 @@ fn with_tag(body: &[u8], tag: u16, value: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Дверь документа: принимает ТЕЛО, оборачивает его так, как оборачивает
-/// продукт (подписывает, если документ подписан), и зовёт публичный разбор.
+/// Document entry point: accepts a BODY, wraps it as the product does
+/// (signing it for signed documents), then calls the public parser.
 type Door = Box<dyn Fn(&[u8]) -> Result<String, FormatError>>;
 
-/// Та же дверь, но подпись ставится под ПЕРВЫМ телом, а разбирается ВТОРОЕ.
+/// The same entry point, but signs the FIRST body and parses the SECOND.
 type Forge = Box<dyn Fn(&[u8], &[u8]) -> Result<String, FormatError>>;
 
 struct Doc {
     name: &'static str,
-    /// Каноническое тело, как его пишет кодировщик крейта.
+    /// Canonical body as written by the crate's encoder.
     body: Vec<u8>,
     open: Door,
-    /// `None` у документов, которые никто не подписывает.
+    /// `None` for unsigned documents.
     forge: Option<Forge>,
-    /// Разбор оставлен СТРОГИМ: необязательного диапазона у документа нет.
-    /// Такой ровно один — решение автора, довод в `access.rs`.
+    /// Parsing remains STRICT: the document has no optional range.
+    /// Exactly one such document exists: the author's decision; rationale in `access.rs`.
     strict: bool,
 }
 
@@ -84,14 +84,14 @@ fn transcript(l: oc_crypto::Label, body: &[u8]) -> Transcript {
     t
 }
 
-/// Документ раскладки `подпись(64) ‖ тело`.
+/// Document with layout `signature(64) ‖ body`.
 fn sig_first(body: &[u8], tr: fn(&[u8]) -> Transcript, s: &Ed25519Signer) -> Vec<u8> {
     let mut out = s.sign(&tr(body)).unwrap().to_vec();
     out.extend_from_slice(body);
     out
 }
 
-/// Документ раскладки `число(1) ‖ (ключ ‖ подпись)* ‖ тело` (`control`).
+/// Document with layout `count(1) ‖ (key ‖ signature)* ‖ body` (`control`).
 fn signers_first(body: &[u8], tr: fn(&[u8]) -> Transcript, s: &Ed25519Signer) -> Vec<u8> {
     let mut out = vec![1u8];
     out.extend_from_slice(&s.public_key());
@@ -364,10 +364,10 @@ fn ack_body(s: &Ed25519Signer) -> Vec<u8> {
     ack.sign(s).unwrap()[64..].to_vec()
 }
 
-/// Документ раскладки `подпись(64) ‖ тело`, подписанный одним ключом.
+/// Document with layout `signature(64) ‖ body`, signed by one key.
 ///
-/// Составитель один на семь документов: раскладка у них общая, и семь копий
-/// этой сборки разошлись бы на первой же правке — молча.
+/// One builder for seven documents: they share the layout, and seven copies of
+/// this construction would diverge on the very first edit, silently.
 fn sig_doc(
     name: &'static str,
     body: Vec<u8>,
@@ -392,8 +392,8 @@ fn sig_doc(
     }
 }
 
-/// Документ раскладки `число(1) ‖ (ключ ‖ подпись)* ‖ тело` — оба документа
-/// `control`, у которых подписантов бывает несколько.
+/// Document with layout `count(1) ‖ (key ‖ signature)* ‖ body`: both
+/// `control` documents, which may have multiple signers.
 fn multisig_doc(
     name: &'static str,
     body: Vec<u8>,
@@ -436,15 +436,15 @@ fn transfer_transcript(b: &[u8]) -> Transcript {
     transcript(label::AUTHORITY_TRANSFER, b)
 }
 
-/// Семена подписывающих. Числа произвольны, но обязаны быть РАЗНЫМИ: документ,
-/// открытый чужим ключом, прошёл бы пробу по не той причине.
+/// Signer seeds. Arbitrary numbers, but they must DIFFER: a document
+/// opened with a foreign key would pass for the wrong reason.
 const SERVER: u8 = 0x5a;
 const AUTHOR: u8 = 0x41;
 const ANCHOR: u8 = 0x71;
 const CONTROLLER: u8 = 0x51;
 const REPLICA: u8 = 0x31;
 
-/// Таблица документов.
+/// Document table.
 fn table() -> Vec<Doc> {
     let anchor = signer(ANCHOR);
     let controller = signer(CONTROLLER);
@@ -543,11 +543,11 @@ fn table() -> Vec<Doc> {
     docs
 }
 
-/// Здоровье таблицы: каждый образец обязан разбираться КАК ЕСТЬ.
+/// Table health: every sample must parse AS IS.
 ///
-/// Без этого положительного контроля вся проба слепа: документ, который не
-/// разбирается вовсе, отказал бы во всех случаях и выглядел бы зелёным в трёх
-/// из четырёх.
+/// Without this positive control, the entire test is blind: a document that cannot
+/// parse at all would reject every case and appear green in three
+/// of four.
 #[test]
 fn every_sample_in_the_table_parses_as_it_is() {
     for doc in table() {
@@ -555,10 +555,10 @@ fn every_sample_in_the_table_parses_as_it_is() {
     }
 }
 
-/// (i) НЕЗНАКОМЫЙ НЕОБЯЗАТЕЛЬНЫЙ ТЕГ ПРОПУСКАЕТСЯ, ЗНАКОМЫЕ ПОЛЯ ТЕ ЖЕ.
+/// (i) AN UNKNOWN OPTIONAL TAG IS SKIPPED; KNOWN FIELDS STAY UNCHANGED.
 ///
-/// У подписанных документов тело подписывается ПОСЛЕ добавления тега — иначе
-/// отказала бы подпись, и проба зеленела бы не по той причине.
+/// Signed documents are signed AFTER adding the tag; otherwise
+/// signature verification would fail and the test would pass for the wrong reason.
 #[test]
 fn an_unknown_optional_tag_is_skipped_and_the_known_fields_are_untouched() {
     for doc in table() {
@@ -585,10 +585,10 @@ fn an_unknown_optional_tag_is_skipped_and_the_known_fields_are_untouched() {
     }
 }
 
-/// (ii) НЕЗНАКОМЫЙ КРИТИЧНЫЙ ТЕГ — ОТКАЗ, И ТЕМ ЖЕ ВАРИАНТОМ, ЧТО ДО РЕШЕНИЯ.
+/// (ii) AN UNKNOWN CRITICAL TAG IS REJECTED WITH THE SAME VARIANT AS BEFORE THE DECISION.
 ///
-/// Вариант ошибки — часть проверяемого: сменись он на `BadFieldLength`, и
-/// вызывающий, разбирающий причину отказа, стал бы врать человеку.
+/// The error variant is part of the check: changing it to `BadFieldLength` would make
+/// a caller interpreting the rejection reason mislead the user.
 #[test]
 fn an_unknown_critical_tag_is_refused_by_the_very_same_error() {
     for doc in table() {
@@ -604,11 +604,11 @@ fn an_unknown_critical_tag_is_refused_by_the_very_same_error() {
     }
 }
 
-/// (iii) РОСТ ТЕГОВ ДЕРЖИТСЯ И НА ПРОПУСКАЕМОМ.
+/// (iii) TAG ORDERING ALSO APPLIES TO SKIPPED TAGS.
 ///
-/// Дубликат и убывание — отказ `FieldsOutOfOrder`, а не молчаливый пропуск:
-/// иначе необязательный диапазон стал бы дырой в каноничности, через которую
-/// одно и то же тело записывается двумя способами.
+/// Duplicates and decreasing tags yield `FieldsOutOfOrder`, not a silent skip:
+/// otherwise the optional range would leave a canonicality hole allowing
+/// the same body to be encoded in two ways.
 #[test]
 fn optional_tags_must_ascend_and_must_not_repeat() {
     for doc in table() {
@@ -637,11 +637,11 @@ fn optional_tags_must_ascend_and_must_not_repeat() {
     }
 }
 
-/// (iv) ПОСТОРОННИЙ ДОПИСАТЬ ТЕГ НЕ МОЖЕТ — ПОДПИСЬ ПОКРЫВАЕТ СЫРЫЕ БАЙТЫ.
+/// (iv) AN OUTSIDER CANNOT APPEND A TAG: THE SIGNATURE COVERS RAW BYTES.
 ///
-/// Это и есть довод, которым крейт оправдывает необязательный диапазон, —
-/// проверенный фактом, а не записанный в докстроке. Тег дописывается ПОСЛЕ
-/// подписи, то есть ровно так, как это сделал бы посредник.
+/// This is the justification for the crate's optional range,
+/// tested as fact rather than stated in a doc comment. The tag is appended AFTER
+/// signing, exactly as an intermediary would do.
 #[test]
 fn a_tag_appended_after_the_signature_breaks_the_signature() {
     let mut checked = 0usize;
@@ -659,29 +659,29 @@ fn a_tag_appended_after_the_signature_breaks_the_signature() {
     assert!(checked >= 9, "подписанных документов в таблице стало меньше: {checked}");
 }
 
-/// ОСОБЫЙ СЛУЧАЙ (а): НЕЗАВЕРЕННОЕ ПРИВЕТСТВИЕ И ТРАНСКРИПТ РАЗГОВОРА (K31).
+/// SPECIAL CASE (a): UNAUTHENTICATED GREETING AND CONVERSATION TRANSCRIPT (K31).
 ///
-/// # Вопрос, на который отвечает проба
+/// # The question this test answers
 ///
-/// Приветствие и вызов едут по проводу ДО всякой аутентификации: подписи под
-/// ними нет, MAC сессии ещё не выведен. Значит посредник вправе дописать в
-/// приветствие необязательный тег, и правило диапазона впервые сделало такое
-/// приветствие РАЗБИРАЕМЫМ — раньше сервер отверг бы его. Спрашивается:
-/// безвредно ли это, раз поле игнорируется?
+/// The greeting and challenge travel over the wire BEFORE any authentication: neither
+/// is signed, and the session MAC is not derived yet. An intermediary can therefore append
+/// an optional tag to the greeting, and the range rule made such a
+/// greeting PARSEABLE for the first time; formerly the server would reject it. The question:
+/// is this harmless because the field is ignored?
 ///
-/// # Ответ: безвредно, и держится он НЕ на игнорировании
+/// # Answer: harmless, but NOT because it is ignored
 ///
-/// Держится он на транскрипте рукопожатия (K31,
-/// `oc_crypto::kdf::handshake_transcript`, `docs/format.md`, «ЭХО ПРИВЯЗАНО К
-/// РАЗГОВОРУ 2026-09-21»). Считается он по СЫРЫМ БАЙТАМ КАДРОВ: устройство
-/// берёт байты, которые ОТПРАВИЛО (`cc_cli::activate::greet`), сервер — байты,
-/// которые ПОЛУЧИЛ (`cc_authority::serve::step`, ветка `Request::Hello`).
-/// Правка кадра по дороге разводит эти две величины, и эхо доказательства
-/// владения, посчитанное устройством, у сервера не сходится.
+/// It relies on the handshake transcript (K31,
+/// `oc_crypto::kdf::handshake_transcript`, `docs/format.md`, "ECHO BOUND TO THE
+/// CONVERSATION 2026-09-21"). It is computed over RAW FRAME BYTES: the device
+/// uses bytes it SENT (`cc_cli::activate::greet`), the server bytes
+/// it RECEIVED (`cc_authority::serve::step`, `Request::Hello` branch).
+/// Editing a frame in transit makes these quantities differ, so the device's computed
+/// proof-of-possession echo fails at the server.
 ///
-/// То есть стороны хешируют РАЗНЫЕ байты ровно тогда, когда посредник вмешался,
-/// и одинаковые — когда не вмешался. Именно это здесь и проверяется, а не
-/// пересказывается.
+/// Thus the parties hash DIFFERENT bytes precisely when an intermediary intervened,
+/// and identical bytes when none did. That is what this test verifies rather than
+/// merely retelling it.
 #[test]
 fn a_tag_smuggled_into_the_unauthenticated_hello_parts_the_handshake_transcript() {
     let hello = activation::Request::Hello(activation::Hello {

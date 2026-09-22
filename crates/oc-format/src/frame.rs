@@ -1,33 +1,33 @@
-//! Кадрирование сообщений: четыре байта длины, младшим байтом вперёд.
+//! Message framing: four length bytes, least significant byte first.
 //!
-//! # Почему это лежит здесь, а не у первого потребителя
+//! # Why this lives here rather than with the first consumer
 //!
-//! Потому что потребителей уже три: движок за трубой, его клиент и сервер за
-//! сокетом. Правило у всех одно — **потолок проверяется ДО выделения**, — и
-//! копий этого правила успело побывать две, обе словами.
+//! Because there are already three consumers: the engine behind a pipe, its client,
+//! and the server behind a socket. All share one rule: **check the limit BEFORE
+//! allocating**; two copies of that rule already existed, both only in prose.
 //!
-//! Расхождение копий здесь означает не стилистику, а разночтение длины между
-//! процессами: одна сторона считает сообщение допустимым, другая обрывает
-//! разговор. Поэтому реализация одна, и лежит она в крейте, который видят все.
+//! Divergent copies here mean different interpretations of length between
+//! processes, not a stylistic difference: one side accepts a message, while
+//! the other ends the conversation. Hence one implementation, in a crate all can see.
 //!
-//! Сюда же переехало то, что вчера появилось в `oc-engine`: с третьим
-//! потребителем прежнее место перестало быть общим.
+//! This also receives what appeared in `oc-engine` yesterday: once there was a third
+//! consumer, the former location was no longer shared.
 //!
-//! # Чего здесь НЕТ
+//! # What is NOT here
 //!
-//! Ввода-вывода. У движка это труба, у клиента дочерний процесс, у сервера
-//! сокет; сводить три разных ввода-вывода в один тип значило бы прятать
-//! различия, которые надо видеть — у каждого свои ошибки и свой конец разговора.
+//! I/O. The engine uses a pipe, the client a child process, the server
+//! a socket; combining three different forms of I/O into one type would hide
+//! differences that must remain visible: each has its own errors and end of conversation.
 
 use crate::FormatError;
 
-/// Длина заголовка кадра.
+/// Frame header length.
 pub const HEADER_LEN: usize = 4;
 
-/// Заголовок кадра для тела длиной `len`.
+/// Frame header for a body of length `len`.
 ///
 /// # Errors
-/// Отдаёт [`FormatError::OffsetOverflow`], если тело длиннее `max`.
+/// Returns [`FormatError::OffsetOverflow`] if the body exceeds `max`.
 pub fn header(len: usize, max: usize) -> Result<[u8; HEADER_LEN], FormatError> {
     if len > max {
         return Err(FormatError::OffsetOverflow);
@@ -36,14 +36,14 @@ pub fn header(len: usize, max: usize) -> Result<[u8; HEADER_LEN], FormatError> {
     Ok(value.to_le_bytes())
 }
 
-/// Длина тела из заголовка кадра, с потолком.
+/// Body length from a frame header, with a limit.
 ///
-/// Потолок здесь не украшение: четыре байта, пришедшие от чужой стороны, — это
-/// указание, сколько памяти выделить. Без проверки они означают «выдели четыре
-/// гигабайта», и отказ в обслуживании стоит противнику одного пакета.
+/// The limit is essential: four bytes from the other side are an instruction
+/// for how much memory to allocate. Unchecked, they mean "allocate four
+/// gigabytes", making denial of service cost the attacker a single packet.
 ///
 /// # Errors
-/// Отдаёт [`FormatError::OffsetOverflow`], если объявленная длина больше `max`.
+/// Returns [`FormatError::OffsetOverflow`] if the declared length exceeds `max`.
 pub fn body_len(head: [u8; HEADER_LEN], max: usize) -> Result<usize, FormatError> {
     let len = u32::from_le_bytes(head) as usize;
     if len > max {
@@ -57,7 +57,7 @@ pub fn body_len(head: [u8; HEADER_LEN], max: usize) -> Result<usize, FormatError
 mod tests {
     use super::*;
 
-    /// ПОТОЛОК ДЕРЖИТСЯ В ОБЕ СТОРОНЫ И РОВНО НА ГРАНИЦЕ.
+    /// THE LIMIT HOLDS IN BOTH DIRECTIONS AND EXACTLY AT THE BOUNDARY.
     #[test]
     fn the_ceiling_holds_in_both_directions() {
         assert_eq!(header(3, 10).unwrap(), 3u32.to_le_bytes());

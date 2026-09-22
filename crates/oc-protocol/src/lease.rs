@@ -1,32 +1,32 @@
-//! Лизинг: подписанное сервером разрешение открыть один файл на одном устройстве.
+//! Lease: server-signed permission to open one file on one device.
 //!
-//! # Почему это отдельный документ, а не поле контейнера
+//! # Why a separate document rather than a container field
 //!
-//! Контейнер подписан автором и после выпуска не меняется. Лизинг живёт своей
-//! жизнью: выдаётся, истекает, обновляется, отзывается — по многу раз на один и
-//! тот же файл. Положи мы его внутрь, каждое обновление означало бы переписывание
-//! контейнера, то есть новую подпись автора на файл, которого автор не трогал.
+//! The container is signed by the author and does not change after release. A lease has its own
+//! lifecycle: issuance, expiration, renewal, revocation, many times for the
+//! same file. Placing it inside would require rewriting the container
+//! on every renewal, meaning a new author signature for a file the author had not touched.
 //!
-//! Практическое следствие приятное: **версия формата контейнера не меняется**.
-//! Места под сервер в заголовке уже размечены и подписаны (`authority.urls`,
-//! `authority.sealing_kid`, `authority.lease_verify_key`), а лизинг имеет
-//! собственную версию и собственный жизненный цикл.
+//! A useful practical consequence: **the container format version does not change**.
+//! Server fields in the header are already allocated and signed (`authority.urls`,
+//! `authority.sealing_kid`, `authority.lease_verify_key`), while the lease has
+//! its own version and lifecycle.
 //!
-//! # Что делает лизинг доверенным
+//! # What makes a lease trustworthy
 //!
-//! Подпись ключом `authority.lease_verify_key` — тем самым, который **автор
-//! закрепил в заголовке под своей подписью**. Поддельный сервер не подставит свой:
-//! подменить ключ проверки значит подменить заголовок, а он подписан автором.
+//! A signature under `authority.lease_verify_key`, the very key that **the author
+//! pinned in the header under their own signature**. A fake server cannot substitute its key:
+//! replacing the verification key means replacing the author-signed header.
 //!
-//! Это единственное место, где клиент верит внешней стороне, и цепочка доверия
-//! здесь короткая ровно потому, что автор поставил её сам.
+//! This is the only point where the client trusts an external party; the trust chain
+//! is short precisely because the author established it personally.
 //!
-//! # Что подписывается
+//! # What is signed
 //!
-//! **Сырые байты тела, а не пересобранная структура.** То же правило, что у
-//! заголовка (§5) и изменяемой области (И-5), и по той же причине: пересборка
-//! перед проверкой воспроизводит всё семейство ошибок канонизации, известное по
-//! JWS и XML-DSig. Разобрали — проверяем то, что лежало на проводе.
+//! **Raw body bytes, not a reconstructed structure.** The same rule as for the
+//! header (§5) and mutable area (I-5), for the same reason: reconstruction
+//! before verification reproduces the entire family of canonicalization errors known from
+//! JWS and XML-DSig. When parsed, verify what was on the wire.
 
 use oc_crypto::CryptoError;
 use oc_policy::{Attestation, LeaseFacts, Timestamp, TpmClock};
@@ -34,107 +34,107 @@ use oc_policy::{Attestation, LeaseFacts, Timestamp, TpmClock};
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
 
-/// Длина подписи в начале документа лизинга.
+/// Signature length at the start of the lease document.
 ///
-/// Подпись впереди тела намеренно: её длина фиксирована, и читатель добирается
-/// до неё, не разобрав ни байта тела. Та же раскладка и то же имя, что у
-/// отзывной ([`crate::revocation::SIGNATURE_LEN`]) и распоряжения
-/// ([`crate::order::SIGNATURE_LEN`]): три документа одной стороны обязаны
-/// читаться одинаково.
+/// The signature deliberately precedes the body: its length is fixed, so the reader reaches
+/// it without parsing a single body byte. The same layout and name as for
+/// revocation ([`crate::revocation::SIGNATURE_LEN`]) and orders
+/// ([`crate::order::SIGNATURE_LEN`]): three documents from one party must
+/// be read consistently.
 pub const SIGNATURE_LEN: usize = 64;
 
-/// Версия документа лизинга.
+/// Lease document version.
 ///
-/// Своя, не контейнерная: документы независимы и меняются в разном темпе.
-/// Смешать их значило бы поднимать версию контейнера ради поля лизинга.
+/// Independent of the container: the documents change at different rates.
+/// Mixing them would require bumping the container version for a lease field.
 pub const LEASE_VERSION: u16 = 1;
 
-/// Версия документа с политикой сервера (тег 12).
+/// Document version with a server policy (tag 12).
 ///
-/// Пишется ТОЛЬКО когда сервер действительно ужесточает: без ужесточения байты
-/// лизинга те же, что были, и замороженный вектор `tests/kat/lease.kat` остаётся
-/// верен. Старый клиент такой документ ОТВЕРГАЕТ — по версии, до всякого
-/// разбора полей: ограничение, которого он не понимает, не должно молча
-/// пропасть (И-10, `docs/protocol.md` §2).
+/// Written ONLY when the server actually tightens restrictions: otherwise the lease
+/// bytes stay unchanged, and the frozen vector `tests/kat/lease.kat` remains
+/// valid. An old client REJECTS this document by version before any field
+/// parsing: a restriction it does not understand must not silently
+/// disappear (I-10, `docs/protocol.md` §2).
 pub const LEASE_VERSION_WITH_SERVER_POLICY: u16 = 2;
 
-/// Версия документа с признаком аттестации (тег 13, B6b).
+/// Document version with the attestation flag (tag 13, B6b).
 ///
-/// Пишется ТОЛЬКО когда сервер признал аттестацию ключа устройства в этом
-/// разговоре; политика сервера при этом может быть, а может не быть. Старый
-/// клиент такой лизинг отвергает по версии — но и не получает его: признак
-/// выдаётся лишь тому, кто аттестацию проходил, то есть клиенту, который о
-/// ней знает.
+/// Written ONLY when the server accepted device key attestation in this
+/// conversation; a server policy may or may not accompany it. An old
+/// client rejects such a lease by version, but never receives one: the flag
+/// is issued only to a client that underwent attestation, hence one that
+/// understands it.
 pub const LEASE_VERSION_WITH_ATTESTATION: u16 = 3;
 
-/// Реестр тегов лизинга. Возрастание строгое, критичность по диапазону — как в §2.
+/// Lease tag registry. Strictly ascending, criticality by range, as in §2.
 ///
-/// Номера нормативны: тело подписывается сырыми байтами, поэтому реализация,
-/// пронумеровавшая поля иначе, соберёт другую подпись и молча разойдётся.
+/// Numbers are normative: raw body bytes are signed, so an implementation
+/// numbering fields differently would generate a different signature and silently diverge.
 pub mod tag {
-    /// Версия документа. `u16le`.
+    /// Document version. `u16le`.
     pub const VERSION: u16 = 1;
-    /// Файл, к которому относится разрешение. `bytes[16]`.
+    /// File to which the permission applies. `bytes[16]`.
     ///
-    /// Без него лизинг на один файл работал бы для любого другого — самая дешёвая
-    /// из возможных ошибок и самая дорогая по последствиям.
+    /// Without this field, a lease for one file would work for any other: the cheapest
+    /// possible mistake with the most expensive consequences.
     pub const FILE_ID: u16 = 2;
-    /// Устройство, которому выдано. `bytes[32]`.
+    /// Device receiving the lease. `bytes[32]`.
     pub const DEVICE_FPR: u16 = 3;
-    /// Хеш политики, под которую выдано. `bytes[32]`.
+    /// Hash of the policy under which it was issued. `bytes[32]`.
     ///
-    /// Клиент сверяет его с хешем политики из СВОЕГО контейнера: сервер не должен
-    /// иметь возможности выдать разрешение под правила, которых автор не писал.
+    /// The client compares this with the policy hash in ITS OWN container: the server must not
+    /// be able to grant permission under rules the author never wrote.
     pub const POLICY_HASH: u16 = 4;
-    /// Строго возрастает на пару (файл, устройство). `u64le`.
+    /// Strictly increasing per (file, device) pair. `u64le`.
     pub const SEQ: u16 = 5;
-    /// Растёт при отзыве. `u64le`.
+    /// Increases on revocation. `u64le`.
     pub const EPOCH: u16 = 6;
-    /// Момент выдачи. `i64le`, секунды.
+    /// Issuance time. `i64le`, seconds.
     pub const ISSUED_AT: u16 = 7;
-    /// Момент истечения. `i64le`, секунды.
+    /// Expiration time. `i64le`, seconds.
     pub const EXPIRES_AT: u16 = 8;
-    /// Состояние: `u8`, 1 — действует, 2 — отозвано. Пишется ВСЕГДА.
+    /// State: `u8`, 1 active, 2 revoked. ALWAYS written.
     pub const STATUS: u16 = 9;
-    /// Остаток открытий. `u32le`, либо **пустое значение** — «сервер лимита не
-    /// ставил». Пишется ВСЕГДА.
+    /// Remaining opens. `u32le`, or an **empty value** meaning "the server set no
+    /// limit". ALWAYS written.
     ///
-    /// Различие «поля нет» и «поле есть и пусто» здесь нормативно — по образцу
-    /// `max_opens` в §4, и по той же причине: пустое значение означает написанное
-    /// сервером «лимита я не ставил», а отсутствие поля означает, что о его воле
-    /// не известно ничего.
+    /// The distinction between "field absent" and "field present but empty" is normative,
+    /// following `max_opens` in §4, for the same reason: an empty value is the server's explicit
+    /// statement "I set no limit", while a missing field means its intent
+    /// is entirely unknown.
     pub const OPENS_REMAINING: u16 = 10;
-    /// Показания аппаратных часов при выдаче: `u32le` reset_count ‖ `u64le` clock_ms.
+    /// Hardware clock readings at issuance: `u32le` reset_count ‖ `u64le` clock_ms.
     ///
-    /// Необязательное: устройство без аппаратных часов получает лизинг без него.
+    /// Optional: devices without a hardware clock receive a lease without it.
     pub const TPM_CLOCK: u16 = 11;
-    /// Политика сервера, кодек `policy_codec`. Только в версии 2 и обязателен в ней.
+    /// Server policy, `policy_codec` encoding. Only in version 2 and required there.
     pub const SERVER_POLICY: u16 = 12;
-    /// Аттестация ключа устройства, признанная сервером: `u8`, основание из
-    /// реестра `crate::attestation::basis`. Только в лизинге версии 3.
+    /// Server-accepted device key attestation: `u8`, a basis from the
+    /// `crate::attestation::basis` registry. Only in lease version 3.
     pub const ATTESTED: u16 = 13;
 }
 
-/// Состояние лизинга на проводе.
+/// Lease state on the wire.
 const STATUS_ACTIVE: u8 = 1;
 const STATUS_REVOKED: u8 = 2;
 
-/// Разобранный лизинг: факты для решателя плюс то, что решателю не нужно.
+/// Parsed lease: facts for the evaluator plus data the evaluator does not need.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lease {
-    /// К какому файлу относится. Сверяет вызывающий — здесь его просто нет с чем.
+    /// Which file it applies to. Checked by the caller: there is nothing to compare it with here.
     pub file_id: [u8; 16],
     pub facts: LeaseFacts,
 }
 
-/// Транскрипт подписи лизинга.
+/// Lease signature transcript.
 ///
-/// Метка и разделитель `0x00` — по общему правилу §3.6. Метка `"CC/v1/lease"`
-/// беспрефиксна относительно всех прочих: соседний кеш назван `"CC/v1/cached-lease"`
-/// именно затем, чтобы `"CC/v1/lease-cache"` не оказался её расширением.
-/// Через [`oc_crypto::Transcript`], а не ручной сборкой: его конструктор ТРЕБУЕТ
-/// метку и сам ставит разделитель. Собери мы байты руками — метку можно было бы
-/// забыть, и подпись лизинга столкнулась бы с подписью заголовка в одном домене.
+/// Label and separator `0x00` follow the shared rule in §3.6. Label `"CC/v1/lease"`
+/// is prefix-free relative to all others: the adjacent cache uses `"CC/v1/cached-lease"`
+/// specifically to avoid extending it with `"CC/v1/lease-cache"`.
+/// Uses [`oc_crypto::Transcript`] rather than manual construction: its constructor REQUIRES
+/// a label and inserts the separator itself. With hand-built bytes, the label could be
+/// forgotten, placing lease and header signatures in the same domain.
 #[must_use]
 pub fn signing_transcript(body: &[u8]) -> oc_crypto::Transcript {
     let mut t = oc_crypto::Transcript::new(oc_crypto::label::LEASE);
@@ -142,10 +142,10 @@ pub fn signing_transcript(body: &[u8]) -> oc_crypto::Transcript {
     t
 }
 
-/// Собрать тело лизинга.
+/// Build a lease body.
 ///
-/// Возвращает только тело: подпись накладывает тот, у кого есть ключ, а этот
-/// крейт ключей не держит и держать не может.
+/// Returns only the body: whoever holds the key applies the signature;
+/// this crate holds no keys and cannot hold them.
 pub fn encode(lease: &Lease) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
     let version = if lease.facts.attested.is_some() {
@@ -202,21 +202,21 @@ pub fn encode(lease: &Lease) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать тело лизинга. **Результат НЕ ПРОВЕРЕН.**
+/// Parse a lease body. **The result is NOT VERIFIED.**
 ///
-/// Подпись здесь не проверяется вовсе, поэтому возвращённый [`Lease`] не
-/// является свидетельством ничего: он ровно настолько правдив, насколько
-/// правдивы байты, которые в него подали. Решать доступ по такому значению
-/// нельзя.
+/// No signature is checked here, so the returned [`Lease`] is not
+/// evidence of anything: it is exactly as truthful as
+/// the bytes supplied to it. Access decisions must not be based
+/// on such a value.
 ///
-/// # Что звать вместо неё
+/// # What to call instead
 ///
-/// Для ЧУЖИХ байт — [`verify_signed`]: там подпись проверяется по сырому телу
-/// ДО разбора, то есть в порядке, который здесь обязан соблюсти вызывающий и о
-/// котором он может забыть. Функция осталась публичной не ради выбора «как
-/// удобнее», а ради одного законного случая: разбора СОБСТВЕННОЙ выдачи, когда
-/// подписывал её тот же, кто теперь читает, и проверять ему нечего
-/// (`cc-authority`, повтор сохранённого ответа).
+/// For EXTERNAL bytes, use [`verify_signed`]: it verifies the signature over the raw body
+/// BEFORE parsing, enforcing the order that callers otherwise must remember
+/// and might forget. This function remains public not to provide a choice of
+/// convenience, but for one legitimate case: parsing one's OWN issuance,
+/// where the reader is the same party that signed it and has nothing to verify
+/// (`cc-authority`, replay of a stored response).
 pub fn decode(body: &[u8]) -> Result<Lease, FormatError> {
     let mut reader = TlvReader::new(body);
 
@@ -348,10 +348,10 @@ pub fn decode(body: &[u8]) -> Result<Lease, FormatError> {
     })
 }
 
-/// Проверить подпись сервера над телом лизинга.
+/// Verify the server signature over a lease body.
 ///
-/// `verify_strict`, а не `verify`, — как и у заголовка (И-6): иначе наследуется
-/// malleability подписи и теряется «одна подпись — один документ».
+/// `verify_strict`, not `verify`, as with the header (I-6): otherwise signature
+/// malleability is inherited and "one signature, one document" is lost.
 pub fn verify(
     body: &[u8],
     signature: &[u8; SIGNATURE_LEN],
@@ -360,29 +360,29 @@ pub fn verify(
     oc_crypto::sign::verify(lease_verify_key, &signing_transcript(body), signature)
 }
 
-/// Проверить подпись, потом разобрать — в этом порядке, и только в этом.
+/// Verify the signature, then parse: in this order only.
 ///
-/// `bytes` — документ целиком: `подпись(64) ‖ тело`.
+/// `bytes` is the complete document: `signature(64) ‖ body`.
 ///
-/// # Почему комбинатор, а рядом остались обе половины
+/// # Why a combinator while both halves remain available
 ///
-/// Потому что порядок «подпись → разбор» держался ВЫЗЫВАЮЩИМ, и обёртку вокруг
-/// этих двух вызовов пришлось строить продукту (`cc_cli::lease`), хотя у
-/// соседних документов — [`crate::revocation::verify_signed`] и
-/// [`crate::order::verify_signed`] — она была с самого начала. Разбор
-/// незаверенных байтов сам по себе оракул: различимые коды ошибок сообщаются о
-/// том, чего никто не подписывал (И-5 для документов). Один вызов ошибиться
-/// порядком не даёт.
+/// Because the CALLER was responsible for "signature → parsing", and the product
+/// had to wrap these two calls itself (`cc_cli::lease`), although
+/// neighboring documents, [`crate::revocation::verify_signed`] and
+/// [`crate::order::verify_signed`], had that wrapper from the start. Parsing
+/// unauthenticated bytes is itself an oracle: distinguishable error codes report on
+/// something nobody signed (I-5 for documents). A single call prevents mistakes
+/// in the ordering.
 ///
-/// Подпись проверяется по СЫРЫМ байтам тела, а не по пересобранной структуре, —
-/// правило модуля, снимающее класс ошибок канонизации.
+/// The signature is checked over the RAW body bytes, not a reconstructed structure:
+/// the module rule that eliminates a class of canonicalization errors.
 ///
-/// Совпадение `file_id` и хеша политики с контейнером сверяет вызывающий: здесь
-/// контейнера нет.
+/// The caller checks that `file_id` and the policy hash match the container: there is
+/// no container here.
 ///
 /// # Errors
-/// [`FormatError::BadHeaderSignature`] при коротком документе и при
-/// несошедшейся подписи; иначе — ошибки разбора, как у [`decode`].
+/// [`FormatError::BadHeaderSignature`] for a short document or a
+/// failed signature; otherwise parsing errors, as in [`decode`].
 pub fn verify_signed(bytes: &[u8], lease_verify_key: &[u8; 32]) -> Result<Lease, FormatError> {
     let (signature, body) =
         bytes.split_at_checked(SIGNATURE_LEN).ok_or(FormatError::BadHeaderSignature)?;
@@ -460,11 +460,11 @@ mod tests {
         assert_eq!(decode(&body).unwrap(), sample());
     }
 
-    /// Пустой остаток открытий отличим от отсутствующего.
+    /// An empty remaining-opens value is distinguishable from a missing field.
     ///
-    /// Различие нормативно и повторяет решение §4 про `max_opens`: пустое
-    /// значение — написанное сервером «лимита не ставил», отсутствие поля — что о
-    /// его воле не известно ничего, и это отказ.
+    /// The distinction is normative and repeats §4's decision for `max_opens`: an empty
+    /// value is the server's written "no limit set"; absence means nothing is known about
+    /// its intent, and is rejected.
     #[test]
     fn an_empty_open_limit_differs_from_a_missing_one() {
         let mut l = sample();
@@ -488,14 +488,14 @@ mod tests {
         );
     }
 
-    /// Незнакомое состояние отвергается на разборе, а не трактуется.
+    /// An unknown state is rejected during parsing rather than interpreted.
     #[test]
     fn an_unknown_status_is_refused_rather_than_guessed() {
         let body = rebuild_with(&encode(&sample()).unwrap(), tag::STATUS, &[9]);
         assert!(decode(&body).is_err(), "состояние из будущей версии принято");
     }
 
-    /// Отозванный лизинг разбирается и несёт признак отзыва.
+    /// A revoked lease parses and carries the revocation flag.
     #[test]
     fn a_revoked_lease_decodes_as_revoked() {
         let mut l = sample();
@@ -504,7 +504,7 @@ mod tests {
         assert!(decode(&body).unwrap().facts.revoked);
     }
 
-    /// Незнакомый КРИТИЧНЫЙ тег — отказ; необязательный — пропуск.
+    /// An unknown CRITICAL tag is rejected; an optional tag is skipped.
     #[test]
     fn an_unknown_critical_tag_is_refused_and_an_optional_one_is_skipped() {
         let base = encode(&sample()).unwrap();
@@ -527,11 +527,11 @@ mod tests {
         assert_eq!(decode(&w.finish()).unwrap(), sample(), "необязательный тег не пропущен");
     }
 
-    /// Транскрипты разных тел различаются, а метка отделяет домен.
+    /// Transcripts for different bodies differ, and the label separates the domain.
     ///
-    /// Проверяется через подпись, а не разглядыванием байтов: `Transcript` не
-    /// отдаёт содержимое наружу, и это правильно — он существует ровно затем,
-    /// чтобы под подпись нельзя было подсунуть байты в обход метки.
+    /// Verified through signatures rather than inspecting bytes: `Transcript` does not
+    /// expose its contents, correctly so: its purpose is precisely to prevent
+    /// bytes being submitted for signing without the label.
     #[test]
     fn different_bodies_give_different_transcripts() {
         let a = signing_transcript(b"body");
@@ -545,7 +545,7 @@ mod tests {
         assert!(oc_crypto::sign::verify(&key, &b, &sig).is_err());
     }
 
-    /// Версия документа проверяется, а не подразумевается.
+    /// The document version is checked, not assumed.
     #[test]
     fn a_lease_of_another_version_is_refused() {
         let body = rebuild_with(&encode(&sample()).unwrap(), tag::VERSION, &2u16.to_le_bytes());

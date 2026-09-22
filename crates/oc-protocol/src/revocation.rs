@@ -1,50 +1,50 @@
-//! Отзывная: подписанный сервером документ «файл отозван».
+//! Revocation: a server-signed "file revoked" document.
 //!
-//! # Зачем документ, если отзыв и так действует
+//! # Why a document when revocation already works
 //!
-//! Отзыв действует тем, что сервер перестаёт выдавать лизинги, — и потому
-//! доходит только до того, кто к серверу ходит. Отзывная делает отзыв ДАННЫМИ:
-//! подписанный ключом подписи лизингов документ, который читатель принимает
-//! откуда угодно — по подписке, по запросу, файлом рядом с контейнером, от
-//! соседа. Канал перестаёт быть единственной дорогой (Ф-18, ярус 3).
+//! Revocation works by the server ceasing to issue leases, so it reaches
+//! only those who contact the server. A revocation document makes revocation DATA:
+//! a document signed with the lease-signing key that a reader accepts
+//! from anywhere: a subscription, a query, a file beside the container, or a
+//! peer. The channel is no longer the only route (F-18, tier 3).
 //!
-//! Подделать её нельзя без ключа сервера; распространить настоящую — значит
-//! распространить правду. Проверяется тем же ключом, что и лизинг: автор
-//! закрепил его в заголовке контейнера под своей подписью, и второго доверия
-//! отзывная не заводит.
+//! It cannot be forged without the server key; spreading a genuine document means
+//! spreading the truth. It is verified with the same key as a lease: the author
+//! pinned it in the container header under their signature, so revocation introduces
+//! no second trust root.
 //!
-//! # Раскладка
+//! # Layout
 //!
-//! Как у лизинга: `подпись(64) ‖ тело`, тело — TLV по правилам И-7 и И-8,
-//! транскрипт подписи — метка `"CC/v1/revocation"` из общего реестра §3.6
-//! (метка была заведена заранее и до этого дня ни для чего не применялась).
-//! Отзыв окончателен: эпоха в документе — для журнала и отчётов, а не для
-//! сравнения «какой отзыв новее».
+//! Like a lease: `signature(64) ‖ body`, the body is TLV under I-7 and I-8;
+//! the signature transcript uses label `"CC/v1/revocation"` from the shared registry in §3.6
+//! (the label was reserved earlier and had not been used before this date).
+//! Revocation is final: the epoch in the document serves journals and reports, not
+//! comparisons of "which revocation is newer".
 
 use oc_crypto::CryptoError;
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
 
-/// Версия документа. Своя, не контейнера.
+/// Document version. Independent of the container version.
 pub const REVOCATION_VERSION: u16 = 1;
 
-/// Длина подписи впереди тела.
+/// Signature length before the body.
 pub const SIGNATURE_LEN: usize = 64;
 
-/// Теги тела. Критичные все: незнакомый — отказ.
+/// Body tags. All critical: unknown means rejection.
 pub mod tag {
     /// `u16le`.
     pub const VERSION: u16 = 1;
     /// `bytes[16]`.
     pub const FILE_ID: u16 = 2;
-    /// Эпоха файла после отзыва. `u64le`.
+    /// File epoch after revocation. `u64le`.
     pub const EPOCH: u16 = 3;
-    /// Момент отзыва по часам сервера. `i64le`, секунды.
+    /// Revocation time according to the server clock. `i64le`, seconds.
     pub const AT: u16 = 4;
 }
 
-/// Разобранная отзывная.
+/// Parsed revocation document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Revocation {
     pub file_id: [u8; 16],
@@ -52,7 +52,7 @@ pub struct Revocation {
     pub at: i64,
 }
 
-/// Транскрипт подписи — через [`oc_crypto::Transcript`], который требует метку.
+/// Signature transcript through [`oc_crypto::Transcript`], which requires a label.
 #[must_use]
 pub fn signing_transcript(body: &[u8]) -> oc_crypto::Transcript {
     let mut t = oc_crypto::Transcript::new(oc_crypto::label::REVOCATION);
@@ -60,10 +60,10 @@ pub fn signing_transcript(body: &[u8]) -> oc_crypto::Transcript {
     t
 }
 
-/// Собрать тело. Подпись накладывает тот, у кого ключ.
+/// Build the body. The key holder applies the signature.
 ///
 /// # Errors
-/// [`FormatError`], если тело не кодируется.
+/// [`FormatError`] if the body cannot be encoded.
 pub fn encode(revocation: &Revocation) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
     w.put(tag::VERSION, &REVOCATION_VERSION.to_le_bytes())?;
@@ -73,10 +73,10 @@ pub fn encode(revocation: &Revocation) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать тело. Подпись здесь НЕ проверяется — см. [`verify_signed`].
+/// Parse the body. The signature is NOT checked here; see [`verify_signed`].
 ///
 /// # Errors
-/// [`FormatError`] при незнакомом теге, неточной длине или пропуске поля.
+/// [`FormatError`] for an unknown tag, inexact length or missing field.
 pub fn decode(body: &[u8]) -> Result<Revocation, FormatError> {
     let mut reader = TlvReader::new(body);
     let mut version = None;
@@ -102,10 +102,10 @@ pub fn decode(body: &[u8]) -> Result<Revocation, FormatError> {
     })
 }
 
-/// Проверить подпись тела ключом подписи лизингов из заголовка контейнера.
+/// Verify the body signature with the lease-signing key from the container header.
 ///
 /// # Errors
-/// [`CryptoError`], если подпись не сходится.
+/// [`CryptoError`] if the signature does not verify.
 pub fn verify(
     body: &[u8],
     signature: &[u8; SIGNATURE_LEN],
@@ -114,15 +114,15 @@ pub fn verify(
     oc_crypto::sign::verify(lease_verify_key, &signing_transcript(body), signature)
 }
 
-/// Проверить подпись, потом разобрать — в этом порядке, и только в этом.
+/// Verify the signature, then parse: in this order only.
 ///
-/// Разбор незаверенных байтов давал бы различимые отказы на том, что никто не
-/// подписывал (И-5 для документов). Совпадение `file_id` с контейнером сверяет
-/// вызывающий: здесь контейнера нет.
+/// Parsing unauthenticated bytes would yield distinguishable rejections for data that nobody
+/// signed (I-5 for documents). The caller checks that `file_id` matches the container:
+/// there is no container here.
 ///
 /// # Errors
-/// [`FormatError::BadHeaderSignature`] при короткой или несошедшейся подписи,
-/// иначе — ошибки разбора.
+/// [`FormatError::BadHeaderSignature`] for a short or invalid signature;
+/// otherwise, parsing errors.
 pub fn verify_signed(bytes: &[u8], lease_verify_key: &[u8; 32]) -> Result<Revocation, FormatError> {
     let (signature, body) =
         bytes.split_at_checked(SIGNATURE_LEN).ok_or(FormatError::BadHeaderSignature)?;
@@ -162,8 +162,8 @@ mod tests {
         out
     }
 
-    /// Подписанная отзывная проходит своим ключом и отвергается чужим, битой
-    /// подписью, битым телом и коротким документом.
+    /// A signed revocation passes with its own key and is rejected with a foreign key, corrupt
+    /// signature, corrupt body or short document.
     #[test]
     fn a_signed_revocation_verifies_with_the_lease_key_and_nothing_else_passes() {
         let server = Ed25519Signer::from_seed(&[0x41; 32]);
@@ -186,14 +186,14 @@ mod tests {
         assert!(verify_signed(&bytes[..40], &server.public_key()).is_err(), "обрубок принят");
     }
 
-    /// ПОДПИСЬ ПРОВЕРЯЕТСЯ ДО РАЗБОРА ТЕЛА — сторож на порядок двух строк.
+    /// THE SIGNATURE IS VERIFIED BEFORE BODY PARSING: a guard on the order of two lines.
     ///
-    /// Соседняя проба подаёт разбираемое тело, а пробы на разбор зовут [`decode`]
-    /// напрямую, поэтому перестановка `decode` перед `verify` внутри
-    /// [`verify_signed`] не роняла ни одной из них. Случай, где встречаются оба
-    /// условия — тело неразбираемое И подпись чужая, — не проверял никто, а он
-    /// и есть тот, ради которого комбинатор написан: различимые коды разбора,
-    /// выданные для незаверенных байтов, — оракул разбора (И-5 для документов).
+    /// The adjacent test supplies a parseable body, and parsing tests call [`decode`]
+    /// directly, so moving `decode` before `verify` inside
+    /// [`verify_signed`] broke none of them. Nobody tested the case combining both
+    /// conditions, an unparseable body AND a wrong signature; yet that is precisely
+    /// the case this combinator exists for: distinct parsing error codes
+    /// returned for unauthenticated bytes form a parsing oracle (I-5 for documents).
     #[test]
     fn the_signature_is_checked_before_the_body_is_parsed() {
         let server = Ed25519Signer::from_seed(&[0x41; 32]);
@@ -219,7 +219,7 @@ mod tests {
         }
     }
 
-    /// Тело: незнакомый тег — отказ; неточная длина — отказ; чужая версия — отказ.
+    /// Body: unknown tag rejected; inexact length rejected; wrong version rejected.
     #[test]
     fn the_body_is_parsed_strictly() {
         let doc = Revocation { file_id: [1; 16], epoch: 0, at: 0 };

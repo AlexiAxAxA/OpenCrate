@@ -1,40 +1,40 @@
-//! Футер: самозаверяющееся содержимое за кадрами (`docs/format.md`, «ФУТЕР И
-//! МЕТКА ВРЕМЕНИ», решение 2026-09-17, D3).
+//! Footer: self-authenticating content after the frames (`docs/format.md`, "FOOTER AND
+//! TIMESTAMP", decision 2026-09-17, D3).
 //!
-//! Здесь — байты футера и отпечаток, под который служба времени ставит метку.
-//! Разбор самой метки (CMS, X.509) живёт в `cc_cli::notary`: чистому крейту
-//! сертификаты не нужны, а отпечаток — нужен каждому читателю.
+//! This module contains the footer bytes and the imprint timestamped by the time service.
+//! Parsing the timestamp itself (CMS, X.509) lives in `cc_cli::notary`: a pure crate
+//! does not need certificates, but every reader needs the imprint.
 
 use crate::FormatError;
 use crate::tlv::{TlvReader, TlvWriter, UnknownTag, unknown_tag_action};
 use oc_crypto::transcript::Transcript;
 use oc_crypto::{label, sha256};
 
-/// Теги футера.
+/// Footer tags.
 pub mod tag {
-    /// Метка времени RFC 3161 (`TimeStampToken`, DER).
+    /// RFC 3161 timestamp (`TimeStampToken`, DER).
     pub const TIMESTAMP: u16 = 1;
 }
 
-/// Верхняя граница футера.
+/// Upper bound on the footer.
 pub const MAX_FOOTER_LEN: usize = 32 * 1024;
 
-/// Верхняя граница метки времени.
+/// Upper bound on the timestamp.
 pub const MAX_TOKEN_LEN: usize = 16 * 1024;
 
-/// Разобранный футер.
+/// Parsed footer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Footer {
-    /// Метка времени — единственное, что футер сегодня несёт, и обязательное:
-    /// пустой футер ничего не заверяет и означал бы лишь сдвинутую границу.
+    /// The timestamp is currently the footer's sole content and is required:
+    /// an empty footer attests nothing and would merely shift the boundary.
     pub timestamp: Vec<u8>,
 }
 
 impl Footer {
-    /// Байты футера.
+    /// Footer bytes.
     ///
     /// # Errors
-    /// [`FormatError`] — метка длиннее предела или кодирование не удалось.
+    /// [`FormatError`] if the timestamp exceeds the limit or encoding fails.
     pub fn encode(&self) -> Result<Vec<u8>, FormatError> {
         if self.timestamp.is_empty() || self.timestamp.len() > MAX_TOKEN_LEN {
             return Err(FormatError::BadFieldLength { tag: tag::TIMESTAMP, len: self.timestamp.len() });
@@ -44,10 +44,10 @@ impl Footer {
         Ok(w.finish().to_vec())
     }
 
-    /// Разобрать футер — байты от смещения до конца файла, целиком.
+    /// Parse the entire footer: the bytes from its offset to the end of the file.
     ///
     /// # Errors
-    /// [`FormatError`] — предел, обрыв, незнакомый критичный тег, нет метки.
+    /// [`FormatError`] on a limit violation, truncation, unknown critical tag, or missing timestamp.
     pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
         if bytes.len() > MAX_FOOTER_LEN {
             return Err(FormatError::BadFieldLength { tag: 0, len: bytes.len() });
@@ -72,7 +72,7 @@ impl Footer {
     }
 }
 
-/// Отпечаток файла под метку времени (п. B).
+/// File imprint for the timestamp (item B).
 #[must_use]
 pub fn imprint(core_hash: &[u8; 32], tree_root: &[u8; 32], total_len: u64, version_counter: u64) -> [u8; 32] {
     let mut t = Transcript::new(label::FOOTER_IMPRINT);

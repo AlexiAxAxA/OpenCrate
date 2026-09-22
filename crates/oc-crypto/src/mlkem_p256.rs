@@ -1,37 +1,37 @@
-//! MLKEM768-P256: гибрид ML-KEM-768 и ECDH P-256 — механизм слота `kem_id = 5`.
+//! MLKEM768-P256: ML-KEM-768 and ECDH P-256 hybrid, slot mechanism `kem_id = 5`.
 //!
-//! Нормативный источник — `draft-irtf-cfrg-concrete-hybrid-kems-03`, §4.1 и A.1.
-//! Это ЧЕРНОВИК CFRG, а не завершённый RFC, и так он и назван в решении
-//! (`docs/format.md`, версия 4, пункт 1). Доказательство реализуемости и живая
-//! проба с настоящим TPM — `spikes/p256-mlkem-tpm/`.
+//! Normative source: `draft-irtf-cfrg-concrete-hybrid-kems-03`, §4.1 and A.1.
+//! This is a CFRG DRAFT, not a completed RFC, explicitly described that way in the decision
+//! (`docs/format.md`, version 4, item 1). Feasibility evidence and a live
+//! probe with a real TPM: `spikes/p256-mlkem-tpm/`.
 //!
-//! # Зачем он рядом с X-Wing, а не вместо
+//! # Why alongside X-Wing rather than replacing it
 //!
-//! X-Wing определён на X25519, а Platform Crypto Provider даёт только ECDH
-//! P-256. Пока гибрид был один, приходилось выбирать: либо постквантовая
-//! защита, либо ключ, не покидающий TPM. Здесь выбирать не надо — классическая
-//! половина ложится в TPM, постквантовая живёт рядом, и противнику нужны ОБЕ:
-//! кража диска даёт только вторую, квантовая машина только первую.
+//! X-Wing is defined over X25519, while Platform Crypto Provider offers only ECDH
+//! P-256. With just one hybrid, one had to choose between post-quantum
+//! protection and a key never leaving the TPM. Here no choice is necessary: the classical
+//! half resides in the TPM, the post-quantum half beside it, and an adversary needs BOTH:
+//! disk theft yields only the latter, a quantum computer only the former.
 //!
-//! # Почему не TLS-группа `SecP256r1MLKEM768` (RFC 10024)
+//! # Why not the TLS group `SecP256r1MLKEM768` (RFC 10024)
 //!
-//! Потому что её обоснование опирается на транскрипт TLS (§6 того же RFC), и
-//! перенести его на самостоятельный KEM внутри файла нельзя. Номер IANA 4587 —
-//! это идентификатор группы TLS, а не нашего механизма. Ошибка была записана в
-//! спеку и исправлена там же.
+//! Because its rationale relies on the TLS transcript (§6 of that RFC),
+//! which cannot be transferred to a standalone KEM inside a file. IANA number 4587
+//! identifies a TLS group, not our mechanism. That mistake was written into
+//! the specification and corrected there.
 //!
-//! # Что здесь важно знать читателю кода
+//! # What readers of this code should know
 //!
-//! **Комбинатор свой, и внешний K10 его не подменяет.** Общий секрет считается
-//! одним вызовом SHA3-256 над пятью величинами, последняя из которых — метка.
-//! Порядок несущий: перестановка даёт другой секрет, ничего не ломая на своей
-//! стороне.
+//! **It has its own combiner; outer K10 does not replace it.** The shared secret uses
+//! one SHA3-256 call over five values, the last being the label.
+//! Order is essential: reordering produces a different secret while breaking nothing on
+//! one's own side.
 //!
-//! **Скаляр P-256 берётся ОТБРАКОВКОЙ.** У X25519 законен любой набор из
-//! тридцати двух байт, у P-256 — нет: скаляр обязан лежать в порядке группы.
-//! Поэтому и семя ключа, и семя инкапсуляции несут запас байтов, из которого
-//! берётся первый годный кусок. Без запаса конструкция была бы недетерминированной
-//! по числу попыток, а с ним — задана байтами.
+//! **The P-256 scalar uses REJECTION SAMPLING.** Any thirty-two-byte string is
+//! valid for X25519, but not for P-256: the scalar must be within the group order.
+//! Both the key seed and encapsulation seed therefore include spare bytes,
+//! from which the first valid piece is taken. Without the reserve, the number of attempts
+//! would make construction nondeterministic; with it, bytes determine the result.
 
 use crate::CryptoError;
 use crate::agreement::{KeyAgreement, P256Agreement};
@@ -42,46 +42,46 @@ use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::{Digest, Sha3_256, Shake256};
 use zeroize::Zeroizing;
 
-/// Открытая половина на проводе: `pk_M(1184) ‖ pk_P256(65)`.
+/// Wire public half: `pk_M(1184) ‖ pk_P256(65)`.
 pub const PUBLIC_KEY_LEN: usize = 1249;
 
-/// Шифротекст на проводе: `ct_M(1088) ‖ eph_P256(65)`.
+/// Wire ciphertext: `ct_M(1088) ‖ eph_P256(65)`.
 pub const CIPHERTEXT_LEN: usize = 1153;
 
-/// Общий секрет — выход SHA3-256.
+/// Shared secret: SHA3-256 output.
 pub const SHARED_LEN: usize = 32;
 
-/// Семя ML-KEM: `d‖z` в понимании `ML-KEM.KeyGen_internal`.
+/// ML-KEM seed: `d‖z` as used by `ML-KEM.KeyGen_internal`.
 pub const ML_KEM_SEED_LEN: usize = 64;
 
-/// Семя инкапсуляции: 32 байта для ML-KEM и 128 на отбраковку скаляра P-256.
+/// Encapsulation seed: 32 bytes for ML-KEM and 128 for P-256 scalar rejection sampling.
 pub const ENCAPS_SEED_LEN: usize = 160;
 
-/// Семя пары целиком — только для векторов и программного пути.
+/// Whole-pair seed: only for vectors and the software path.
 ///
-/// В поставке пара так НЕ создаётся: половины заводятся врозь, чтобы приватная
-/// часть P-256 могла остаться внутри TPM. Общее семя восстанавливало бы
-/// аппаратный скаляр программно и тем обесценивало бы неизвлекаемость.
+/// Production does NOT create the pair this way: halves are generated separately so
+///  the P-256 private half can remain inside the TPM. A common seed would reconstruct
+/// the hardware scalar in software, negating non-exportability.
 pub const KEYPAIR_SEED_LEN: usize = 32;
 
 const ML_KEM_PUBLIC_LEN: usize = 1184;
 const ML_KEM_CIPHERTEXT_LEN: usize = 1088;
 const P256_POINT_LEN: usize = 65;
 const SCALAR_LEN: usize = 32;
-/// Запас на отбраковку: четыре куска по тридцать два байта.
+/// Rejection-sampling reserve: four thirty-two-byte pieces.
 const SCALAR_TRIES_LEN: usize = 128;
-/// Семя ML-KEM плюс запас на скаляр. Выражено суммой, а не числом: связь
-/// величин здесь и есть смысл раскладки, а `192` её прячет.
+/// ML-KEM seed plus scalar reserve. Expressed as a sum, not a number: the relationship
+/// between these values is the point of the layout, hidden by `192`.
 const EXPANDED_LEN: usize = ML_KEM_SEED_LEN + SCALAR_TRIES_LEN;
 
-/// Метка конструкции, тринадцать байт ASCII.
+/// Construction label, thirteen ASCII bytes.
 const LABEL: &[u8] = b"MLKEM768-P256";
 
-/// Комбинатор (§4.1 черновика).
+/// Combiner (§4.1 of the draft).
 ///
-/// Пять величин подряд, метка последней. Порядок задан источником, а не
-/// удобством: переставь метку вперёд — и получишь другой секрет при тех же
-/// входах, причём молча, как это уже случилось с X-Wing.
+/// Five consecutive values, label last. Order comes from the source, not
+/// convenience: move the label first and identical inputs produce a different
+/// secret silently, as already happened with X-Wing.
 fn combine(
     ss_pq: &[u8],
     ss_t: &[u8],
@@ -97,11 +97,11 @@ fn combine(
     Zeroizing::new(h.finalize().into())
 }
 
-/// Первый годный скаляр P-256 из запаса байтов.
+/// First valid P-256 scalar from the byte reserve.
 ///
-/// Отбраковка, а не приведение по модулю: приведение сместило бы распределение,
-/// и это тот дефект, за который ругают самодельные реализации ECDSA. Запас
-/// конечен, поэтому исчерпание — отказ, а не бесконечный цикл.
+/// Rejection sampling, not modular reduction: reduction would bias the distribution,
+/// the very flaw criticized in homemade ECDSA implementations. The reserve is
+/// finite, so exhaustion fails rather than looping forever.
 fn scalar_from(bytes: &[u8]) -> Result<P256Agreement, CryptoError> {
     for part in bytes.chunks_exact(SCALAR_LEN) {
         let candidate: [u8; SCALAR_LEN] =
@@ -113,25 +113,25 @@ fn scalar_from(bytes: &[u8]) -> Result<P256Agreement, CryptoError> {
     Err(CryptoError::BadKey)
 }
 
-/// Пара, выросшая из одного семени.
+/// A pair grown from a single seed.
 ///
-/// Отдельным типом, а не тройкой: три величины разного смысла в кортеже
-/// вызывающий различает только по порядку, и перепутать семя ML-KEM с открытой
-/// половиной — ошибка, которую компилятор так не поймает.
+/// A separate type, not a triple: in a tuple, callers distinguish three semantically different
+/// values only by order; confusing the ML-KEM seed with the public
+/// half would evade the compiler.
 #[derive(Debug)]
 pub struct Keypair {
-    /// Семя ML-KEM — `d‖z`.
+    /// ML-KEM seed: `d‖z`.
     pub ml_kem_seed: Zeroizing<[u8; ML_KEM_SEED_LEN]>,
-    /// Классическая половина. В поставке её место занимает ключ из TPM.
+    /// Classical half. A TPM key takes its place in production.
     pub classical: P256Agreement,
-    /// Составная открытая половина, 1249 байт.
+    /// Composite public half, 1249 bytes.
     pub public_key: [u8; PUBLIC_KEY_LEN],
 }
 
-/// Пара из одного семени — путь векторов и программной стороны.
+/// Pair from a single seed: vector and software-party path.
 ///
 /// # Errors
-/// Запас байтов не дал годного скаляра либо длины не сошлись.
+/// The byte reserve yields no valid scalar, or lengths do not match.
 pub fn keypair_from_seed(seed: &[u8; KEYPAIR_SEED_LEN]) -> Result<Keypair, CryptoError> {
     let mut xof = Shake256::default();
     Update::update(&mut xof, seed);
@@ -151,21 +151,21 @@ pub fn keypair_from_seed(seed: &[u8; KEYPAIR_SEED_LEN]) -> Result<Keypair, Crypt
     Ok(Keypair { ml_kem_seed: pq_seed, classical, public_key })
 }
 
-/// Семя ML-KEM из тридцати двух хранимых байт.
+/// ML-KEM seed from thirty-two stored bytes.
 ///
-/// ML-KEM требует шестидесяти четырёх (`d‖z`), а ключевые файлы репозитория —
-/// тридцать два: на этой длине держатся замок создания, заворачивание DPAPI и
-/// перезаворачивание `cc keygen --wrap`. Растяжение SHAKE256 примиряет одно с
-/// другим и повторяет приём самого X-Wing (§5.2 его черновика), где `d‖z` тоже
-/// вырастает из тридцати двух байт.
+/// ML-KEM requires sixty-four (`d‖z`), while this repository's key files use
+/// thirty-two: creation locking, DPAPI wrapping, and
+/// `cc keygen --wrap` rewrapping depend on that length. SHAKE256 expansion reconciles
+/// them using the same technique as X-Wing itself (§5.2 of its draft), where `d‖z` also
+/// grows from thirty-two bytes.
 ///
-/// Метки домена здесь НЕТ, и это решение, а не пропуск. Метка разделяет ДВА
-/// употребления одного секрета; здесь употребление одно — файл заведён под
-/// постквантовую половину и больше ни во что не входит. Пустая метка в реестре
-/// §3.6 была бы записью о разделении, которого не существует.
+/// There is NO domain label here, by decision rather than omission. Labels separate TWO
+/// uses of one secret; here there is one use: the file is created for
+/// the post-quantum half and used nowhere else. An empty label in the §3.6
+/// registry would record a separation that does not exist.
 ///
-/// Хранимые байты обязаны быть СВОИМИ: выводить их из классического семени
-/// нельзя — разбор в докстроке `HYBRID_KEY_FILE` крейта `cc-cli`.
+/// Stored bytes must be INDEPENDENT: deriving them from the classical seed
+/// is forbidden; see the `HYBRID_KEY_FILE` documentation in `cc-cli`.
 #[must_use]
 pub fn ml_kem_seed_from_stored(stored: &[u8; 32]) -> Zeroizing<[u8; ML_KEM_SEED_LEN]> {
     let mut xof = Shake256::default();
@@ -175,14 +175,14 @@ pub fn ml_kem_seed_from_stored(stored: &[u8; 32]) -> Zeroizing<[u8; ML_KEM_SEED_
     out
 }
 
-/// Составная открытая половина из ДВУХ независимых половин.
+/// Composite public half from TWO independent halves.
 ///
-/// Это и есть путь поставки: приватная часть P-256 живёт в TPM и наружу не
-/// выходит, поэтому здесь принимается только её ОТКРЫТАЯ точка, а семя ML-KEM —
-/// своё, заведённое отдельно.
+/// This is the production path: the P-256 private half resides in the TPM and never
+/// leaves, so only its PUBLIC point is accepted here, while the ML-KEM seed
+/// is independent and separately generated.
 ///
 /// # Errors
-/// Точка не той длины либо семя не разбирается как ключ ML-KEM.
+/// Point length is wrong or the seed cannot be parsed as an ML-KEM key.
 pub fn public_key_from_parts(
     ml_kem_seed: &[u8; ML_KEM_SEED_LEN],
     p256_public: &[u8],
@@ -201,14 +201,14 @@ pub fn public_key_from_parts(
     Ok(out)
 }
 
-/// Инкапсуляция по названному семени — путь векторов.
+/// Encapsulation with a specified seed: vector path.
 ///
-/// Отдельно от [`encapsulate`] по той же причине, что у соседей: KAT обязан быть
-/// воспроизводим, а генератор в этом крейте запрещён.
+/// Separate from [`encapsulate`] for the same reason as its neighbors: KATs must be
+/// reproducible, and RNGs are forbidden in this crate.
 ///
 /// # Errors
-/// Открытая половина не той длины, ключ ML-KEM не разбирается либо запас байтов
-/// не дал годного эфемерного скаляра.
+/// Incorrect public-half length, unparseable ML-KEM key, or the byte reserve
+/// yields no valid ephemeral scalar.
 pub fn encapsulate_derand(
     public_key: &[u8],
     seed: &[u8; ENCAPS_SEED_LEN],
@@ -243,14 +243,14 @@ pub fn encapsulate_derand(
     Ok((shared, ciphertext))
 }
 
-/// Инкапсуляция на открытую половину получателя.
+/// Encapsulate to the recipient's public half.
 ///
-/// Генератор приходит параметром — правило крейта. Сто шестьдесят байт берутся
-/// ОДНИМ обращением: два подряд сдвинули бы порядок расхода генератора, от
-/// которого зависят эталоны.
+/// The RNG is a parameter, under the crate rule. One hundred sixty bytes are taken in
+/// ONE call: two consecutive calls would shift RNG consumption order,
+/// on which the golden artifacts depend.
 ///
 /// # Errors
-/// Те же, что у [`encapsulate_derand`].
+/// Same as [`encapsulate_derand`].
 pub fn encapsulate<R: rand_core::CryptoRng + ?Sized>(
     public_key: &[u8],
     rng: &mut R,
@@ -260,25 +260,25 @@ pub fn encapsulate<R: rand_core::CryptoRng + ?Sized>(
     encapsulate_derand(public_key, &seed)
 }
 
-/// Декапсуляция ОБЕИМИ половинами, классическая — за трейтом.
+/// Decapsulation with BOTH halves, the classical half behind a trait.
 ///
-/// Трейт здесь и есть весь смысл механизма: приватный ключ P-256 может лежать в
-/// TPM и не покидать его, и подставляется он сюда вместо программного, не меняя
-/// ни байта в выводе секрета.
+/// The trait is the entire point of this mechanism: the P-256 private key may reside in
+/// the TPM without leaving it, replacing the software key here without changing
+/// a single byte of secret derivation.
 ///
-/// Открытая точка берётся У САМОЙ стороны, а не аргументом: она входит в
-/// комбинатор, и принятая снаружи сделала бы общий секрет управляемым извне.
+/// The public point comes FROM THE PARTY ITSELF, not an argument: it enters
+/// the combiner, so accepting it externally would make the shared secret externally controllable.
 ///
-/// Отказа по «неверному шифротексту» здесь нет и быть не может: ML-KEM отвечает
-/// на испорченный шифротекст неявным отказом — выводит секрет из `z` и
-/// возвращает его как ни в чём не бывало. Ложность секрета обнаруживает
-/// вызывающий: обязательством слота (И-4) и тегом AEAD, оба константным
-/// временем. Отвергается только то, что структурно не является входом: чужая
-/// длина и точка вне кривой.
+/// There is and can be no "invalid ciphertext" rejection here: ML-KEM responds
+/// to corrupted ciphertext with implicit rejection, deriving a secret from `z` and
+/// returning it normally. The caller detects the false secret
+/// through the slot commitment (I-4) and AEAD tag, both in constant
+/// time. Only structurally invalid input is rejected: an incorrect
+/// length or an off-curve point.
 ///
 /// # Errors
-/// Шифротекст не той длины, семя ML-KEM не разбирается либо эфемерная точка не
-/// лежит на кривой.
+/// Incorrect ciphertext length, unparseable ML-KEM seed, or an ephemeral point not
+/// on the curve.
 pub fn decapsulate_with(
     ml_kem_seed: &[u8; ML_KEM_SEED_LEN],
     classical: &dyn KeyAgreement,
@@ -308,7 +308,7 @@ pub fn decapsulate_with(
 mod tests {
     use super::*;
 
-    /// КРУГ ЗАМЫКАЕТСЯ ОБЕИМИ ПОЛОВИНАМИ.
+    /// ROUND TRIP CLOSES WITH BOTH HALVES.
     #[test]
     fn what_is_encapsulated_comes_back_out_of_decapsulation() {
         let pair = keypair_from_seed(&[0x31; KEYPAIR_SEED_LEN]).unwrap();
@@ -319,11 +319,11 @@ mod tests {
         assert_eq!(sent.as_slice(), received.as_slice(), "секрет не сошёлся с обеих сторон");
     }
 
-    /// ПОДМЕНА ЛЮБОЙ ИЗ ПОЛОВИН НЕ ДАЁТ ТОТ ЖЕ СЕКРЕТ.
+    /// SUBSTITUTING EITHER HALF DOES NOT YIELD THE SAME SECRET.
     ///
-    /// Проба стережёт главное свойство гибрида: он не сводится ни к одной из
-    /// половин. Испорченная постквантовая даёт другой секрет неявным отказом
-    /// ML-KEM; подменённая классическая — другой ECDH.
+    /// Guards the hybrid's central property: it reduces to neither
+    /// half. A corrupted post-quantum half yields another secret through ML-KEM
+    /// implicit rejection; a substituted classical half yields another ECDH result.
     #[test]
     fn substituting_either_half_yields_a_different_secret() {
         let pair = keypair_from_seed(&[0x31; KEYPAIR_SEED_LEN]).unwrap();
@@ -349,11 +349,11 @@ mod tests {
         assert_ne!(got.as_slice(), sent.as_slice(), "подмена точки не повлияла на секрет");
     }
 
-    /// ТОЧКА ВНЕ КРИВОЙ И ЧУЖАЯ ДЛИНА ОТВЕРГАЮТСЯ, А НЕ МОЛЧА СЧИТАЮТСЯ.
+    /// OFF-CURVE POINTS AND WRONG LENGTHS ARE REJECTED, NOT SILENTLY COMPUTED.
     ///
-    /// Это отличие от X-Wing, и оно существенное: у X25519 законна любая
-    /// строка, у P-256 точка вне кривой открывает атаку invalid-curve, а
-    /// шифротекст приходит из враждебного файла.
+    /// A significant difference from X-Wing: X25519 permits any
+    /// string, whereas P-256 off-curve points enable invalid-curve attacks,
+    /// and ciphertext comes from a hostile file.
     #[test]
     fn an_off_curve_point_and_a_foreign_length_are_refused() {
         let pair = keypair_from_seed(&[0x31; KEYPAIR_SEED_LEN]).unwrap();
@@ -371,7 +371,7 @@ mod tests {
         );
     }
 
-    /// ДЛИНЫ НА ПРОВОДЕ — ТЕ, ЧТО ОБЕЩАНЫ ФОРМАТОМ.
+    /// WIRE LENGTHS MATCH THE FORMAT'S PROMISE.
     #[test]
     fn the_wire_lengths_are_the_ones_the_format_promises() {
         let public = keypair_from_seed(&[0x01; KEYPAIR_SEED_LEN]).unwrap().public_key;
@@ -380,10 +380,10 @@ mod tests {
         assert_eq!(ciphertext.len(), 1153);
     }
 
-    /// МЕТКА ЗАВЕРШАЕТ ВХОД КОМБИНАТОРА, И ЭТО ПРОВЕРЯЕТСЯ.
+    /// THE LABEL ENDS THE COMBINER INPUT, AND THIS IS TESTED.
     ///
-    /// Отдельная проба по той же причине, что у X-Wing: там реализация по памяти
-    /// уже ставила метку в начало, и ошибка была молчаливой.
+    /// A separate probe for the same reason as X-Wing: its implementation from memory
+    /// already put the label first, producing a silent error.
     #[test]
     fn the_label_terminates_the_combiner_input() {
         let mut expected = Sha3_256::new();
@@ -399,10 +399,10 @@ mod tests {
         );
     }
 
-    /// РАЗДЕЛЬНЫЕ ПОЛОВИНЫ ДАЮТ ТУ ЖЕ ОТКРЫТУЮ ЧАСТЬ, ЧТО И ОБЩЕЕ СЕМЯ.
+    /// SEPARATE HALVES YIELD THE SAME PUBLIC PART AS A COMMON SEED.
     ///
-    /// Путь поставки — раздельный: P-256 создаётся в TPM, ML-KEM заводится сам
-    /// по себе. Проба показывает, что это ТОТ ЖЕ механизм, а не похожий.
+    /// The production path is separate: P-256 is created in the TPM, ML-KEM independently.
+    /// The probe shows this is the SAME mechanism, not merely a similar one.
     #[test]
     fn parts_assembled_separately_give_the_same_public_half() {
         let pair = keypair_from_seed(&[0x77; KEYPAIR_SEED_LEN]).unwrap();

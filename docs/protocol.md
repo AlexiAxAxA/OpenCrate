@@ -1,3775 +1,1616 @@
-# Протокол сервера лицензий
+# License server protocol
 
-Нормативный документ. Описывает то, что уходит по сети между клиентом `cc` и
-сервером, и то, что клиент обязан проверить, получив ответ.
+Normative document. Describes what travels over the network between the `cc` client and the server, and what the client must verify upon receiving a response.
 
-Соглашения те же, что в `docs/format.md`: целые little-endian, если не указано
-иначе; `‖` — конкатенация; длины в байтах.
+The conventions are the same as in `docs/format.md`: integers are little-endian unless otherwise specified; `‖` means concatenation; lengths are in bytes.
 
-Проект расширения взаимодействия сервера, создателя и компании —
-[жизненный цикл, защищённый канал, реестр и восстановление](authority-lifecycle-design.md).
-Это **неутверждённый проект**: он не меняет нормативные байты и действующие
-полномочия. Там же собраны обнаруженные расхождения статусов этого документа
-и этап их исправления перед разработкой.
+A separate, unapproved proposal covers possible lifecycle, protected-channel, registry and recovery extensions. It changes neither normative bytes nor current authority and is outside this core specification. Historical implementation-status statements below must be read together with their dated amendments.
 
-## 0. Что здесь заморожено, а что ещё нет
+## 0. What is frozen here, and what is not yet frozen
 
-**Заморожен документ лизинга (§2).** Его байты и транскрипт подписи имеют вектор
-`tests/kat/lease.kat`, и меняются только вместе с новой версией документа.
+**The lease document (§2) is frozen.** Its bytes and signature transcript have a vector in `tests/kat/lease.kat` and change only with a new document version.
 
-**Заморожен, сверх лизинга, КОНВЕРТ запроса — 2026-09-06, учтено здесь
-2026-09-09.** `tests/kat/derivations_wire.kat` держит K23, K24 и K25, а вместе с
-K25 — транскрипт запроса: под MAC идёт `u8(kind) ‖ закодированное тело`, а сам
-`MAC(32)` ложится хвостом за телом. Сверяют это два теста — по спеке
-(`crates/oc-crypto/tests/kat.rs`) и по продуктовому пути клиента
-(`crates/cc-cli/tests/kat_wire.rs`).
+**In addition to the lease, the request ENVELOPE is frozen — 2026-09-06, recorded here on 2026-09-09.** `tests/kat/derivations_wire.kat` holds K23, K24, and K25, and with K25 the request transcript: the MAC covers `u8(kind) ‖ encoded body`, and `MAC(32)` itself follows the body. Two tests check this: against the specification (`crates/oc-crypto/tests/kat.rs`) and through the client's product path (`crates/cc-cli/tests/kat_wire.rs`).
 
-Вектор держит и НОМЕР ВИДА: `activate::seal_request` отказывается заверять тело,
-чей вид не заверяется сессией (`oc_protocol::activation::is_session_sealed`:
-активация 3, продление 22 и шаги аттестации 31–33, §9.11.1), поэтому смена
-номера роняет вектор. Заморожен и журнал (§4) — `tests/kat/journal.kat`, версией своего
-документа.
+The vector also fixes the KIND NUMBER: `activate::seal_request` refuses to authenticate a body whose kind is not authenticated by the session (`oc_protocol::activation::is_session_sealed`: activation 3, renewal 22, and attestation steps 31–33, §9.11.1); changing the number therefore breaks the vector. The journal (§4) is frozen too — `tests/kat/journal.kat`, under its own document version.
 
-**Заморожено вектором 2026-09-15: тождество операции (§9.10).**
-`tests/kat/operation_id.kat` держит K28, раскладку тега 9 в теле запроса
-активации и тегов эха в выдаче (3) и отказе (2). Тело активации в остальном
-по-прежнему не заморожено; эти три номера — да, вместе с формулой тождества.
+**Frozen by a vector on 2026-09-15: operation identity (§9.10).** `tests/kat/operation_id.kat` holds K28, the layout of tag 9 in the activation request body, and the echo tags in a grant (3) and denial (2). The rest of the activation body is still unfrozen; these three numbers are frozen, together with the identity formula.
 
-**Провод принимает гибридные механизмы с 2026-09-09.** Отпечаток задан для всех
-механизмов (K27), а владение гибридным ключом доказывается в рукопожатии:
-`Hello` несёт пару `(kem, public)` в тегах 4 и 5, `Challenge` — третью половину
-вызова в теге 3, запечатанную механизмом этого ключа. Секрет один на все
-половины, эхо считается по склейке, поэтому открыть надо КАЖДУЮ.
+**The wire accepts hybrid mechanisms as of 2026-09-09.** The fingerprint is defined for all mechanisms (K27), and ownership of a hybrid key is proved in the handshake: `Hello` carries the `(kem, public)` pair in tags 4 and 5; `Challenge` carries a third challenge component in tag 3, sealed using that key's mechanism. All components share one secret; the echo is computed over their concatenation, so EVERY component must be opened.
 
-Отказы `device_kem != 1` сняты. Вместо них две обязательные проверки: отпечаток
-обязан быть именем присланного ключа и обязан быть доказанным в этом разговоре.
-У просьбы о доступе доказательства нет намеренно — просить вправе кто угодно, —
-и там остаётся первая проверка; её довольно, потому что подмену имени закрывает
-именно она.
+The `device_kem != 1` rejections have been removed. Two mandatory checks replace them: the fingerprint must name the submitted key and must have been proved in this conversation. An access request deliberately has no proof — anyone may request access — and retains the first check; it suffices because that check specifically prevents name substitution.
 
-**Не заморожены ТЕЛА документов и реестр видов.** Раскладка `ActivateReq`, номера
-её тегов, номера остальных видов сообщений и состав самого реестра вектора не
-имеют; константы версии документа у активации нет вовсе — в отличие от лизинга,
-распоряжения и отзывной, у каждого из которых своя.
+**Document BODIES and the kind registry are not frozen.** The layout of `ActivateReq`, its tag numbers, the numbers of other message kinds, and the registry's membership have no vector; activation has no document version constant at all, unlike the lease, order, and revocation notice, each of which has its own.
 
-**Прежняя оговорка снята, и это стоит назвать.** Здесь стояло «не заморожено
-ничего остального… до выпуска транспорта — намерение, а не обязательство».
-Условие истекло: транспорт выпущен, по проводу ходят активация, регистрация и
-отзыв (§8 того же документа исправлен 2026-09-08). Обязательство уже есть, но
-ровно на конверт: тело править можно, а номер вида и форму конверта — только
-вместе с записанным решением и перевыпуском вектора (И-14).
+**The previous qualification has been removed, and this deserves explicit mention.** This section used to say “nothing else is frozen… until the transport ships, this is an intention, not a commitment.” That condition has expired: the transport has shipped; activation, registration, and revocation travel over the wire (§8 of this document was corrected on 2026-09-08). There is already a commitment, but specifically to the envelope: the body may be edited, while the kind number and envelope shape require a recorded decision and reissued vector (I-14).
 
-### 0.1. Кодирование документов и правило диапазона тегов — решение 2026-09-21
+### 0.1. Document encoding and the tag-range rule — decision of 2026-09-21
 
-Все документы этого крейта, кроме свидетельства головы журнала (§9.13, у него
-раскладка точной длины, а не TLV), кодируются тем же TLV, что заголовок
-контейнера: тег `u16`, длина `u32`, значение; поля идут **строго по возрастанию
-тега** (И-7).
+Every document in this crate, except the journal-head witness (§9.13, which has an exact-length layout rather than TLV), uses the same TLV encoding as the container header: `u16` tag, `u32` length, value; fields appear in **strictly increasing tag order** (I-7).
 
-**Правило диапазона у документов протокола — то же, что у контейнера.** Тег
-≤ `0x7FFF` критичен: незнакомый такой тег — отказ
-(`FormatError::UnknownCriticalField`). Тег > `0x7FFF` необязателен: значение
-пропускается. Решение принимает `oc_format::tlv::unknown_tag_action` — та же
-функция, что у контейнера; своей у протокола нет и заводить её нельзя (две
-границы критичного диапазона разошлись бы молча).
+**Protocol documents use the same tag-range rule as the container.** A tag ≤ `0x7FFF` is critical: an unknown tag in that range is rejected (`FormatError::UnknownCriticalField`). A tag > `0x7FFF` is optional: its value is skipped. `oc_format::tlv::unknown_tag_action` makes this decision — the same function as for the container; the protocol has no separate function and must not acquire one (two critical-range boundaries would silently diverge).
 
-До 2026-09-21 разборщики протокола отвергали ЛЮБОЙ незнакомый тег, в каком бы
-диапазоне он ни стоял. Исключением был один лизинг.
+Until 2026-09-21, protocol parsers rejected EVERY unknown tag, regardless of range. The sole exception was the lease.
 
-**Довод за смену.** Прежний довод звучал «клиент и сервер обновляются вместе», и
-он перестанет быть верным в день выпуска: сервер держит у себя
-оператор-одиночка, получатели сидят на машинах, которыми никто не управляет, и
-стороны обновляются в разное время. При прежнем правиле первое же новое поле
-после выпуска становилось днём отказа для всех выпущенных сторон. До выпуска
-правка бесплатна — внешних клиентов нет, клиент и сервер идут одним пакетом;
-после она потребовала бы версии провода.
+**Reason for the change.** The previous argument was “client and server update together”; it will cease to be true on release day: a solo operator runs the server, recipients use unmanaged machines, and the sides update at different times. Under the previous rule, the first new field after release would make all shipped peers fail. Before release, the change is free — there are no external clients, and client and server ship together; afterwards, it would require a wire version.
 
-**Необязательный диапазон НЕ открывает подделку.** Порядок проверок не менялся:
-подпись и MAC проверяются ДО разбора тела (И-5), и пропуск незнакомого тега
-случается ПОСЛЕ, внутри уже заверенных байтов. Подпись покрывает СЫРЫЕ байты
-тела — лизинг, отзывная, распоряжение автора, все документы управления и обе
-записи реплики подписывают ровно тот кусок, который потом разбирают, — поэтому
-дописать тег по дороге третья сторона не может: подпись перестаёт сходиться.
-Проверено фактом: `crates/oc-protocol/tests/unknown_tags.rs`, проба
-`a_tag_appended_after_the_signature_breaks_the_signature` (девять подписанных
-документов, тег дописывается ПОСЛЕ подписи).
+**The optional range does NOT permit forgery.** Verification order is unchanged: signatures and MACs are checked BEFORE parsing the body (I-5); unknown tags are skipped AFTERWARDS, inside bytes that have already been authenticated. Signatures cover RAW body bytes — leases, revocation notices, author orders, all control documents, and both replica records sign exactly the slice subsequently parsed — so a third party cannot append a tag in transit: the signature no longer matches. Verified by `crates/oc-protocol/tests/unknown_tags.rs`, test `a_tag_appended_after_the_signature_breaks_the_signature` (nine signed documents, a tag appended AFTER signing).
 
-**Что НЕ изменилось.**
+**What has NOT changed.**
 
-* Виды запросов и ответов (`KIND_*`) — не теги. Незнакомый вид по-прежнему
-  отказ.
-* Перечисления ВНУТРИ значений — состояние лизинга, основание аттестации, исход
-  операции, режим наследования, судьба старых лизингов — не теги. Незнакомое
-  значение знакомого поля по-прежнему отказ: разобрать номер и суметь его
-  исполнить — разные вещи.
-* Строгий рост тегов, невозможность дубликатов (И-7) и точные длины ЗНАКОМЫХ
-  полей (И-8). Рост проверяется и на пропускаемом теге: дубликат необязательного
-  и убывание отвергаются `FieldsOutOfOrder`.
-* Версия провода. Писатели документов не тронуты, замороженные векторы
-  (`tests/kat/`) не тронуты: правка — только в разборе.
+* Request and response kinds (`KIND_*`) are not tags. An unknown kind is still rejected.
+* Enumerations INSIDE values — lease status, attestation basis, operation outcome, inheritance mode, treatment of old leases — are not tags. An unknown value in a known field is still rejected: parsing a number and being able to implement its meaning are different things.
+* Strict tag ordering, prohibition of duplicates (I-7), and exact lengths of KNOWN fields (I-8). Ordering is checked even for a skipped tag: duplicate optional tags and descending tags are rejected as `FieldsOutOfOrder`.
+* The wire version. Document writers and frozen vectors (`tests/kat/`) are untouched: only parsing changes.
 
-**Где необязательный тег может стоять.** Только В КОНЦЕ тела. Все знакомые теги
-документов протокола лежат в критичном диапазоне, а теги растут — значит тег из
-необязательного диапазона старше любого знакомого. Середины, в которую его можно
-было бы вставить, у этих документов нет (в отличие от заголовка контейнера, где
-необязательный `0x8001` уже занят).
+**Where an optional tag can occur.** Only AT THE END of the body. Every known protocol-document tag is in the critical range, and tags increase; an optional-range tag therefore exceeds every known tag. These documents have no middle position in which to insert it (unlike the container header, where optional `0x8001` is already assigned).
 
-#### Особые случаи, разобранные при принятии решения
+#### Special cases considered when making the decision
 
-**Документы без подписи и без MAC.** Приветствие, вызов, доказательство владения,
-запрос активации, выдача, отказ, просьба о доступе, запись очереди, положение
-файла, правило по атрибутам, доказательство аттестации. Посредник вправе
-дописать в них необязательный тег, и разбор его теперь пропустит. Безвредно это
-не потому, что поле игнорируется, а потому, что кадры рукопожатия входят в
-**транскрипт разговора** (K31, §9.4): он считается по СЫРЫМ байтам кадров —
-устройство берёт байты, которые отправило, сервер берёт байты, которые получил.
-Правка кадра по дороге разводит эти две величины, и эхо доказательства владения
-не сходится. Проверено фактом:
-`a_tag_smuggled_into_the_unauthenticated_hello_parts_the_handshake_transcript`.
-Остальные незаверенные документы едут под MAC сессии (K25) либо не решают ничего
-сами по себе.
+**Documents without a signature or MAC.** Greeting, challenge, proof of possession, activation request, grant, denial, access request, queue record, file status, attribute rule, attestation proof. An intermediary can append an optional tag to these, and parsing now skips it. This is harmless not because the field is ignored, but because handshake frames form part of the **conversation transcript** (K31, §9.4): it is computed over RAW frame bytes — the device uses the bytes it sent, the server the bytes it received. Editing a frame in transit makes these values diverge, and the proof-of-possession echo fails. Verified by `a_tag_smuggled_into_the_unauthenticated_hello_parts_the_handshake_transcript`. Other unauthenticated documents travel under the session MAC (K25) or make no decisions on their own.
 
-**Решение автора (§10.5) осталось СТРОГИМ, и это единственное исключение.** Его
-подпись проверяется не по сырым байтам, а по телу, СОБРАННОМУ ЗАНОВО из
-разобранной структуры (`access::decision_body`, зовётся в
-`cc_authority::Authority::decide_access` и в `cc_cli::granted::verified_decision`).
-Пропущенный тег из такой сборки выпадает — значит посторонний дописал бы тег к
-уже подписанному решению, и подпись СОШЛАСЬ БЫ: документ, несущий долю B, стал бы
-ковким, а И-6 держит обратное. Расширения необязательный диапазон там не даёт и в
-обмен: поле, которое новая сборка внесёт в `decision_body`, старая всё равно
-отвергнет по подписи. Чинится это только сменой провода — подписью по сырым
-байтам, как у остальных документов, — и потому не чинилось.
+**The author's decision (§10.5) remains STRICT; this is the only exception.** Its signature is verified over a body RECONSTRUCTED from the parsed structure rather than raw bytes (`access::decision_body`, called in `cc_authority::Authority::decide_access` and `cc_cli::granted::verified_decision`). A skipped tag disappears from that reconstruction — an outsider could therefore append a tag to an already signed decision, and the signature WOULD MATCH: the document carrying share B would become malleable, contrary to I-6. The optional range would provide no extensibility in return: a field that a new build includes in `decision_body` would still cause an old build to reject the signature. Fixing this requires a wire change — signing raw bytes, as the other documents do — and was therefore not done.
 
-**Документы, которые сверяются сами с собой.** Привязка сервера, намерение
-управляющих и его вложенная нагрузка, квитанция, сертификат передачи, запись
-каталога — их разбор кодирует разобранное заново и требует ИСХОДНЫХ байтов.
-Сверяется теперь тело БЕЗ пропущенных необязательных записей: каноничность
-ЗНАКОМЫХ полей остаётся под сторожем целиком, а незнакомое необязательное поле
-проезжает мимо неё. Вырезаются записи целиком — тег, длина, значение, — тем же
-приёмом, что у И-3.
+**Documents checked against themselves.** Authority binding, controllers' intent and its nested payload, receipt, transfer certificate, directory record: their parsers re-encode the parsed structure and require the ORIGINAL bytes. The comparison now uses the body WITHOUT skipped optional records: canonicality of KNOWN fields remains fully guarded, while unknown optional fields bypass that check. Entire records — tag, length, value — are removed, using the same technique as I-3.
 
-**Цена, названная вслух.** У документов, чьи БАЙТЫ несут тождество, тождество
-меняется вместе с необязательным полем, и иначе быть не может:
+**The cost, stated explicitly.** For documents whose BYTES carry identity, identity changes with an optional field; it cannot be otherwise:
 
-* `body_hash` намерения управляющих (`control::open_request`) считается по сырым
-  байтам тела. Сервер опознаёт им повтор операции, поэтому то же намерение,
-  посланное заново с новым необязательным полем под тем же `operation_id`,
-  получит `IdConflict`, а не прежнюю квитанцию.
-* Лист журнала каталога (`directory::Record::leaf`) считается по сырым байтам
-  записи. Запись с необязательным полем — другой лист, то есть другая версия
-  каталога.
+* The controllers' intent `body_hash` (`control::open_request`) is computed over raw body bytes. The server uses it to recognize a repeated operation; resending the same intent with a new optional field under the same `operation_id` therefore yields `IdConflict`, not the previous receipt.
+* The directory journal leaf (`directory::Record::leaf`) is computed over raw record bytes. A record with an optional field is a different leaf, hence a different directory version.
 
-**Перекодирование после разбора.** Пропущенный тег теряется при перекодировании,
-и место, где это видно, названо: `crates/cc-cli/src/quorum.rs:126` (`resign`) —
-соавтор разбирает чужой образец предложения и кодирует его СВОИМИ байтами.
-Предложение опознаётся отпечатком намерения (`order::intent_digest`), а тот
-считается по перекодированному телу, поэтому соавтор старой сборки и сервер
-новой посчитают разные отпечатки, и кворум не соберётся. Прежнее правило давало
-там внятный отказ «образец предложения не разбирается»; новое даёт молчаливое
-«подписей всё ещё не хватает». Не чинится здесь: подписанные байты автора
-`resign` не пересылает и пересылать не может — у образца чужой момент выписки и
-чужой ключ подписавшего, — а сохранение сырых байтов означало бы смену формы
-предложения на проводе.
+**Re-encoding after parsing.** A skipped tag is lost upon re-encoding; the visible instance is named: `crates/cc-cli/src/quorum.rs:126` (`resign`) — a co-author parses another party's sample proposal and encodes it with THEIR OWN bytes. The proposal is identified by its intent digest (`order::intent_digest`), which is computed over the re-encoded body; an old-build co-author and new-build server will therefore compute different digests and fail to form a quorum. The previous rule gave a clear “sample proposal cannot be parsed” failure; the new one gives a silent “still not enough signatures.” This is not fixed here: `resign` does not and cannot forward the author's signed bytes — the sample has another issue time and another signer's key — and preserving raw bytes would change the proposal's wire shape.
 
-Разбор наследуемых документов за пределами `oc-protocol` этим решением не
-затронут: состояние сервера (`cc_authority::store`) хранит правило по атрибутам
-своим кодеком того же крейта, и пропущенное там поле теряется так же, как в
-любом другом перекодировании.
+This decision does not affect parsing of inherited documents outside `oc-protocol`: server state (`cc_authority::store`) stores the attribute rule using that crate's own codec, and a field skipped there is lost just as in any other re-encoding.
 
-## 1. Что вообще делает сервер и чего не делает
+## 1. What the server does and does not do
 
-Сервер хранит **вторую долю** схемы 2-из-2 и решает, кому и до каких пор её
-выдавать. Ключ содержимого (CEK) он не видит никогда: `KEK = HKDF(secret_A ‖
-secret_B)`, доля A у сервера, доля B у получателя, и ни одна из них по
-отдельности файла не открывает.
+The server holds the **second share** of a 2-of-2 scheme and decides to whom and until when it is issued. It never sees the content encryption key (CEK): `KEK = HKDF(secret_A ‖
+secret_B)`, share A is with the server, share B with the recipient, and neither opens the file alone.
 
-Отсюда главное свойство хранилища: **контейнеры на сервере не лежат**. Хранятся
-идентификаторы файлов, отпечатки устройств, хеши политик и журналы. Утечка базы
-сервера не даёт ни одного открываемого файла — она даёт список того, кто чем
-владел, и это тоже потеря, но другого порядка.
+This gives the storage its main property: **containers are not stored on the server**. File identifiers, device fingerprints, policy hashes, and journals are stored. A server database leak yields no openable file — it yields a list of who owned what, which is also a loss, but of a different kind.
 
-Чего сервер **не** делает: не хранит содержимое, не получает CEK, не подписывает
-контейнеры (их подписывает автор), не решает за автора.
+What the server does **not** do: store content, receive the CEK, sign containers (the author signs them), or decide for the author.
 
-> **Собственные правила у сервера появились 2026-09-16.** Здесь до этого дня
-> стояла врезка «их нет вовсе»: `intersect` была написана, монотонна и покрыта
-> property-тестом, но вне тестов её никто не звал, и сервер ужесточал ровно одно
-> — длину лизинга.
+> **The server acquired its own rules on 2026-09-16.** Until then, this box said “it has none at all”: `intersect` existed, was monotone, and had a property test, but nobody called it outside tests, and the server tightened exactly one thing — lease duration.
 >
-> Теперь профиль сервера задаётся оператором (`cca policy set`), складывается с
-> политикой автора пересечением при каждой выдаче и **едет получателю в лизинге
-> версии 2** под подписью сервера (§2.3). Расширить права автора он не может: это
-> свойство `intersect`, а не обещание сервера, и правило композиции поле за полем
-> записано в `docs/format.md` §4.3.
+> Now the operator configures the server profile (`cca policy set`); it is intersected with the author's policy on every grant and **travels to the recipient in a version 2 lease**, signed by the server (§2.3). It cannot expand author-granted rights: this is a property of `intersect`, not a server promise, and the field-by-field composition rule is recorded in `docs/format.md` §4.3.
 >
-> Цена названа там же: клиент прежней сборки отвергает лизинг версии 2 целиком, то
-> есть обновление клиента — условие ужесточения.
+> The cost is stated there too: an older client build rejects a version 2 lease entirely, so updating the client is a prerequisite for tightening policy.
 
-## 2. Лизинг
+## 2. Lease
 
-Подписанное сервером разрешение открыть **один файл** на **одном устройстве** до
-названного момента.
+A server-signed permission to open **one file** on **one device** until a specified time.
 
-### 2.1 Почему отдельный документ, а не поле контейнера
+### 2.1 Why a separate document rather than a container field
 
-Контейнер подписан автором и после выпуска не меняется. Лизинг выдаётся,
-истекает, обновляется и отзывается — по многу раз на один и тот же файл. Положи
-его внутрь, каждое обновление означало бы переписывание контейнера, то есть новую
-подпись автора на файл, которого автор не трогал.
+The container is signed by the author and does not change after release. A lease is issued, expires, is renewed, and is revoked — many times for the same file. Putting it inside would make every renewal rewrite the container, requiring a new author signature on a file the author did not touch.
 
-Практическое следствие: **версия формата контейнера ради сервера не меняется.**
-Места под сервер в заголовке размечены и подписаны ещё в версии 1 —
-`authority.urls`, `authority.sealing_kid`, `authority.lease_verify_key`, — а
-лизинг имеет собственную версию и собственный жизненный цикл.
+Practical consequence: **the container format version does not change for the server.** The header's authority fields have been laid out and signed since version 1 — `authority.urls`, `authority.sealing_kid`, `authority.lease_verify_key` — while the lease has its own version and lifecycle.
 
-### 2.2 Чем лизинг доверен
+### 2.2 Why the lease is trusted
 
-Подписью ключом `authority.lease_verify_key` — тем самым, который **автор
-закрепил в заголовке под своей подписью**. Поддельный сервер своего ключа не
-подставит: подменить ключ проверки значит подменить заголовок, а заголовок
-подписан автором и проверяется `verify_strict` (И-6).
+Its signature under `authority.lease_verify_key` — the very key **the author pinned in the header under their signature**. A fake server cannot substitute its own key: replacing the verification key means replacing the header, and the author-signed header is checked by `verify_strict` (I-6).
 
-Это единственное место, где клиент верит внешней стороне, и цепочка доверия здесь
-короткая ровно потому, что её поставил автор, а не сеть.
+This is the only place where the client trusts an outside party; the trust chain is short precisely because the author established it, not the network.
 
-### 2.3 Байты
+### 2.3 Bytes
 
-TLV, теги строго по возрастанию, критичность по диапазону — те же правила, что в
-§2 формата. Номера нормативны: тело подписывается **сырыми байтами**, поэтому
-реализация, пронумеровавшая поля иначе, соберёт другую подпись и молча разойдётся.
+TLV, strictly increasing tags, criticality by range — the same rules as format §2. Numbers are normative: the body is signed as **raw bytes**, so an implementation numbering fields differently would produce a different signature and silently diverge.
 
-| Тег | Поле | Тип |
+| Tag | Field | Type |
 |---|---|---|
-| 1 | `version` | u16le: 1 — без профиля сервера, 2 — с профилем, 3 — с признаком аттестации |
+| 1 | `version` | u16le: 1 — without server profile, 2 — with profile, 3 — with attestation indicator |
 | 2 | `file_id` | bytes[16] |
 | 3 | `device_fpr` | bytes[32] |
 | 4 | `policy_hash` | bytes[32] |
 | 5 | `seq` | u64le |
 | 6 | `epoch` | u64le |
-| 7 | `issued_at` | i64le, секунды |
-| 8 | `expires_at` | i64le, секунды |
-| 9 | `status` | u8: 1 действует, 2 отозвано. Пишется **всегда** |
-| 10 | `opens_remaining` | u32le либо **пустое значение** = «лимита не ставил». Пишется **всегда** |
-| 11 | `tpm_clock` | u32le `reset_count` ‖ u64le `clock_ms`; необязательное |
-| 12 | `server_policy` | кодек политики (§4 формата); **обязателен в версии 2, по выбору в версии 3, запрещён в версии 1** |
-| 13 | `attested` | u8: основание аттестации ключа устройства — 1 сертификат вендора, 2 закреплённый EK; **только в версии 3 и обязателен в ней** (§9.11.1) |
+| 7 | `issued_at` | i64le, seconds |
+| 8 | `expires_at` | i64le, seconds |
+| 9 | `status` | u8: 1 active, 2 revoked. **Always** written |
+| 10 | `opens_remaining` | u32le or **empty value** = “no limit imposed.” **Always** written |
+| 11 | `tpm_clock` | u32le `reset_count` ‖ u64le `clock_ms`; optional |
+| 12 | `server_policy` | policy codec (format §4); **required in version 2, optional in version 3, forbidden in version 1** |
+| 13 | `attested` | u8: basis of device-key attestation — 1 vendor certificate, 2 pinned EK; **version 3 only, and required there** (§9.11.1) |
 
-#### Версия 3: признак аттестации
+#### Version 3: attestation indicator
 
-Пишется, только когда сервер признал аттестацию ключа, на который запечатана
-доля, в разговоре выдачи (§9.11.1). Версия и признак сходятся в обе стороны,
-незнакомое основание — отказ разбора. Клиент прежней сборки версию 3 отвергает,
-но и не получает её: признак выдаётся лишь тому, кто проходил аттестацию.
-Вектор — `tests/kat/lease-v3.kat`.
+Written only when the server accepted attestation of the key on which the share is sealed during the issuance conversation (§9.11.1). The version and indicator must agree in both directions; an unknown basis is a parse rejection. An older client rejects version 3 but does not receive it either: the indicator is issued only to a client that underwent attestation. Vector: `tests/kat/lease-v3.kat`.
 
-#### Версия 2: строгий профиль сервера
+#### Version 2: strict server profile
 
-Сервер вправе **ужесточать** политику автора и не вправе её расширять. Профиль
-задаётся оператором (`cca policy set`), лежит в состоянии сервера и при каждой
-выдаче складывается с политикой файла пересечением `oc_policy::intersect` —
-монотонным только в сторону запрета (И-10).
+The server may **tighten** the author's policy and may not expand it. The operator sets the profile (`cca policy set`); it resides in server state and is intersected with the file policy on every grant using `oc_policy::intersect` — monotone only towards denial (I-10).
 
-**Профиль едет получателю, а не остаётся на сервере**, и это главное в версии 2.
-Ужесточение, применённое только в момент выдачи, снимается выдёргиванием
-сетевого провода: клиент с лизингом на руках продолжал бы исполнять одну лишь
-политику автора. Поэтому профиль лежит в теле лизинга, под подписью сервера, и
-клиент складывает его сам — внутри `oc_policy::evaluate`, а не в вызывающем
-коде. Вызывающих у решателя много (`cc check`, `cc unprotect`, просмотрщик,
-брокер), и ужесточение, применяемое руками, однажды не применил бы один из них.
+**The profile travels to the recipient instead of staying on the server**, which is the essential feature of version 2. A restriction applied only at issuance is removed by unplugging the network: a client holding a lease would continue enforcing only the author's policy. The profile therefore resides in the lease body, under the server's signature, and the client composes it itself — inside `oc_policy::evaluate`, not in calling code. The evaluator has many callers (`cc check`, `cc unprotect`, viewer, broker); if each applied the restriction manually, eventually one would omit it.
 
-**Версия пишется по наличию поля, и сходиться они обязаны в обе стороны.**
-Документ версии 1 с тегом 12 отвергается (`UnknownCriticalField`), версии 2 без
-тега 12 — тоже (`MissingField`). Оба случая ведут к правам, которых никто не
-давал: первый означает, что клиент прежней сборки принял бы документ, не заметив
-ограничения, второй — что ограничение потерялось по дороге.
+**The version is written according to the field's presence, and the two must agree in both directions.** A version 1 document with tag 12 is rejected (`UnknownCriticalField`), as is version 2 without tag 12 (`MissingField`). Both cases create rights nobody granted: the first would let an old client accept a document without noticing the restriction; the second means the restriction was lost in transit.
 
-**Клиент прежней сборки отвергает версию 2 целиком**, и это верное поведение, а
-не досадное: он не знает тега 12 и не должен догадываться, что тот значит. Цена
-названа прямо — обновление клиента становится условием ужесточения; выгода та
-же, что у всей доктрины И-10: непонятое правило закрывает файл, а не открывает.
+**An older client rejects version 2 entirely**; this is correct behavior, not an inconvenience: it does not know tag 12 and must not guess its meaning. The cost is explicit — client updates become a prerequisite for tightening policy; the benefit is the same as throughout I-10: an unrecognized rule closes the file rather than opening it.
 
-**Без профиля байты прежние.** Сервер, которому нечего ужесточать, выпускает
-документ версии 1, байт в байт тот же, что до появления поля; замороженный
-вектор `tests/kat/lease.kat` остаётся верен (И-14).
+**Without a profile, the bytes are unchanged.** A server with nothing to tighten issues a version 1 document, byte-for-byte identical to the document before this field existed; frozen vector `tests/kat/lease.kat` remains valid (I-14).
 
-**`file_id` в лизинге обязателен**, и это не формальность: без него разрешение на
-один файл работало бы для любого другого — самая дешёвая из возможных ошибок и
-самая дорогая по последствиям.
+**`file_id` is required in a lease**, and this is not a formality: without it, permission for one file would work for any other — the cheapest possible mistake and the most expensive in consequences.
 
-**Различие «поля нет» и «поле есть и пусто» нормативно** — для `opens_remaining`,
-по образцу `max_opens` в §4 формата и по той же причине: пустое значение означает
-написанное сервером «лимита я не ставил», отсутствие поля означает, что о его воле
-не известно ничего, и это отказ.
+**The distinction between “field absent” and “field present but empty” is normative** for `opens_remaining`, following `max_opens` in format §4 for the same reason: an empty value is the server's written “I imposed no limit”; an absent field means its intent is unknown, and is a rejection.
 
-**Незнакомое `status` отвергается на разборе**, а не трактуется как отказ.
-Разобрать номер и суметь его исполнить — разные вещи: состояние из будущей версии
-может означать что угодно, и догадываться о нём клиент не вправе.
+**An unknown `status` is rejected during parsing**, not interpreted as a denial. Parsing a number and being able to implement it are different things: a future-version status could mean anything, and the client may not guess.
 
-### 2.4 Подпись
+### 2.4 Signature
 
 ```
 transcript = "CC/v1/lease" ‖ 0x00 ‖ u32le(len(body)) ‖ body
 signature  = Ed25519(lease_verify_key, transcript)
 ```
 
-Метка беспрефиксна относительно всех прочих (И-12): соседний кеш назван
-`"CC/v1/cached-lease"` именно затем, чтобы `"CC/v1/lease-cache"` не оказался
-расширением этой метки.
+The label is prefix-free relative to all others (I-12): the neighboring cache is called `"CC/v1/cached-lease"` specifically to keep `"CC/v1/lease-cache"` from extending this label.
 
-Подписываются **сырые байты тела**, а не пересобранная структура. То же правило,
-что у заголовка (§5 формата) и изменяемой области (И-5), и по той же причине:
-пересборка перед проверкой воспроизводит всё семейство ошибок канонизации,
-известное по JWS и XML-DSig.
+The signature covers **raw body bytes**, not a reconstructed structure. The same rule applies to the header (format §5) and mutable area (I-5), for the same reason: reconstruction before verification reproduces the entire family of canonicalization errors known from JWS and XML-DSig.
 
-Заморожены и тело, и подпись: `tests/kat/lease.kat`. Оставив на свободе
-транскрипт, мы оставили бы на свободе то, **что именно** подписано, а расхождение
-там молчаливо — подпись не сойдётся, и выглядеть будет как «сервер сломался».
+Both body and signature are frozen: `tests/kat/lease.kat`. Leaving the transcript unfrozen would leave **exactly what** is signed unfrozen; divergence there is silent — the signature fails, appearing as “the server is broken.”
 
-### 2.5 Что клиент обязан проверить
+### 2.5 What the client must verify
 
-По порядку, и порядок существен:
+In order, and the order matters:
 
-1. **Подпись** — ключом `authority.lease_verify_key` из СВОЕГО контейнера, а не
-   из ответа сервера. До проверки подписи содержимое лизинга не разбирается ни для
-   каких решений.
-2. **`file_id`** совпадает с `file_id` контейнера.
-3. **`policy_hash`** совпадает с хешем политики контейнера. Сервер не должен иметь
-   возможности выдать разрешение под правила, которых автор не писал.
-4. **`device_fpr`** — наш. Дальше решает `oc_policy::evaluate`, и все остальные
-   проверки (срок, откат, привязка, действие) живут там.
+1. **Signature** — with `authority.lease_verify_key` from ITS OWN container, not the server response. Before verifying the signature, the lease contents must not be parsed for any decisions.
+2. **`file_id`** matches the container's `file_id`.
+3. **`policy_hash`** matches the container policy hash. The server must not be able to issue permission under rules the author did not write.
+4. **`device_fpr`** is ours. `oc_policy::evaluate` decides from there; all remaining checks (expiry, rollback, binding, action) reside there.
 
-### 2.6 Файл лизинга
+### 2.6 Lease file
 
-Пока сервера нет, лизинг лежит файлом и передаётся флагом `cc check --lease`.
-Раскладка:
+Until a server exists, the lease resides in a file supplied through `cc check --lease`. Layout:
 
 ```
-подпись(64) ‖ тело
+signature(64) ‖ body
 ```
 
-Подпись впереди намеренно: её длина фиксирована, и читатель добирается до неё, не
-разобрав ни байта тела. Это та же доктрина, по которой MAC изменяемой области
-проверяется до разбора её TLV (И-5) — разбирать незаверенное нельзя, потому что
-различимые коды ошибок для незаверенных байтов сами по себе оракул.
+The signature deliberately comes first: its length is fixed, and the reader reaches it without parsing a single body byte. This is the same doctrine that checks the mutable area's MAC before parsing its TLV (I-5): unauthenticated data must not be parsed, because distinguishable error codes for unauthenticated bytes are themselves an oracle.
 
-Когда появится транспорт, тот же документ поедет по сети без изменений: файл — это
-способ доставки, а не часть формата.
+When transport arrives, the same document will travel over the network unchanged: the file is a delivery mechanism, not part of the format.
 
-## 3. Защита от отката
+## 3. Rollback protection
 
-Три механизма, и они закрывают разное. Смешивать их нельзя: каждый оставляет щель,
-которую закрывает следующий. Механизмы — «пол» монотонности, `seq` и `tpm_clock`;
-`epoch` в их числе НЕ состоит, и почему — сказано ниже.
+Three mechanisms cover different things. They must not be confused: each leaves a gap covered by the next. They are the monotonic floor, `seq`, and `tpm_clock`; `epoch` is NOT among them, for the reason below.
 
-**`seq`** строго возрастает на пару (файл, устройство). Клиент помнит
-`highest_seq_seen`; меньшее значение означает восстановленный кеш. Щель:
-`highest_seq_seen` лежит в файле состояния, а файл возвращается вместе со
-снапшотом.
+**`seq`** strictly increases per (file, device) pair. The client remembers `highest_seq_seen`; a smaller value means a restored cache. Gap: `highest_seq_seen` is in a state file, and that file returns with a snapshot.
 
-**«Пол» монотонности** — наибольшее время, которое клиент когда-либо видел. Ловит
-отвод системных часов назад. Поднимается ДО решения, а не после: иначе противник,
-дождавшись отказа, получал бы часы «как раньше». Щель та же, что у `seq`, — пол
-лежит в том же файле состояния.
+**The monotonic floor** is the greatest time the client has ever seen. It detects the system clock being set back. It advances BEFORE the decision, not afterwards; otherwise an adversary who waited for a denial could obtain the clock “as before.” The gap is the same as for `seq`: the floor lives in the same state file.
 
-**`epoch`** растёт при отзыве и служит **меткой журнала**, а не проверкой клиента.
-По ней лизинг, выданный до отзыва, опознаётся в журнале сервера.
+**`epoch`** increases on revocation and serves as a **journal marker**, not a client check. It identifies in the server journal a lease issued before revocation.
 
-Предыдущая редакция этого раздела обещала иное: «клиент, увидевший новую эпоху, не
-примет лизинг старой». Обещание не исполнялось и исполниться не могло. `revoke`
-поднимает эпоху и тем же вызовом защёлкивает `revoked`, а `activate` отказывает
-отозванному файлу первым делом — значит лизинга с эпохой выше нулевой сервер
-выдать не может в принципе, и проверка не срабатывала бы никогда. Сверх того она и
-не нужна: `revoke` не трогает счётчик номеров, поэтому на паре (файл, устройство)
-`seq` монотонен сквозь смену эпох, и любой лизинг старой эпохи несёт заодно
-меньший `seq` — то есть целиком лежит внутри уже описанной проверки.
+The previous revision promised otherwise: “a client that has seen a new epoch will not accept a lease from an old one.” That promise was not and could not be fulfilled. `revoke` increments the epoch and latches `revoked` in the same call; `activate` rejects a revoked file immediately — the server therefore cannot issue a lease with an epoch above zero at all, and the check could never trigger. Nor is it needed: `revoke` leaves the sequence counter untouched, so `seq` is monotone across epochs for a (file, device) pair; any old-epoch lease also has a smaller `seq`, fully covered by the check already described.
 
-Работа, которую эпоха умеет, а `seq` нет, одна: донести знание об отзыве **вне
-лизинга** — подписанной головой журнала. Это отдельный механизм, он приедет с
-транспортом, память для него нужна рядом с каналом отзыва, а не в счётчиках файла,
-и причина отказа там — «доступ отозван», а не «откат».
+There is one job an epoch can do that `seq` cannot: convey knowledge of revocation **outside a lease**, through a signed journal head. This is a separate mechanism; it will arrive with the transport, needs memory beside the revocation channel rather than in file counters, and its denial reason is “access revoked,” not “rollback.”
 
-**`tpm_clock`** — пара (`reset_count`, `clock_ms`). Откатом считается уменьшение
-**любой** из двух величин.
+**`tpm_clock`** is the pair (`reset_count`, `clock_ms`). A decrease in **either** value is rollback.
 
-> **Здесь стояло сравнение по лексикографическому порядку, и оно пропускало
-> откат.** Обоснованием служила модель «часы обнуляются при сбросе платформы, а
-> счётчик при этом растёт, поэтому меньшее время само по себе откатом не
-> является». Модель неверна: по TPM 2.0 `clock` энергонезависим и переживает
-> выключение питания, обнуляет его только `TPM2_Clear` — и тот обнуляет заодно
-> счётчик сбросов. Обнуляется при включении другая величина, `time`, и продукт её
-> намеренно не читает.
+> **This section used to specify lexicographic comparison, and that allowed rollback.** Its rationale was “the clock resets on platform reset while the counter increases, so a smaller time alone is not rollback.” That model is wrong: in TPM 2.0, `clock` is nonvolatile and survives power-off; only `TPM2_Clear` clears it, and that clears the reset counter as well. A different quantity, `time`, resets at power-on; the product deliberately does not read it.
 >
-> Цена ошибки была не в словах: пара «счётчик больше, часы меньше» проходила как
-> законная перезагрузка, а получить её можно ровно одним способом — откатить
-> снапшот и перезагрузиться. Проверка, заведённая против отката снапшота,
-> пропускала откат снапшота.
+> This was not merely a wording error: the pair “larger counter, smaller clock” passed as a legitimate reboot, and exactly one action could produce it — restoring a snapshot and rebooting. A check introduced to prevent snapshot rollback allowed snapshot rollback.
 
-Перезагрузка по-прежнему не считается откатом: счётчик растёт, `clock` продолжает
-расти вместе с ним, ни одна величина не уменьшается. Пара нужна затем, что
-`TPM2_Clear` обнуляет обе, и уменьшение счётчика — самостоятельный признак.
+A reboot still is not rollback: the counter increases, `clock` continues increasing with it, and neither value decreases. Both are needed because `TPM2_Clear` clears both, and a decreasing counter is an independent signal.
 
-Это единственный механизм, переживающий откат снапшота: `seq` и «пол» монотонности
-живут в файле, а счётчик TPM снапшотом не возвращается — **если TPM настоящий**.
-Внутри виртуальной машины с vTPM гипервизор возвращает и его; оговорка записана в
-`cc_keystore::ladder` и в README.
+This is the only mechanism surviving snapshot rollback: `seq` and the monotonic floor live in a file, whereas a snapshot does not restore the TPM counter — **if the TPM is real**. In a virtual machine with vTPM, the hypervisor restores it too; the qualification is recorded in `cc_keystore::ladder` and the README.
 
-**Сравнение направления ловит меньше, чем здесь раньше утверждалось.** Прежняя
-редакция обещала, что часы TPM ловят «и копирование папки, и возврат всей машины».
-Это неверно, и неверность измерена. Проверка `presented < issued` срабатывает лишь
-тогда, когда назад пошли САМИ часы, то есть при откате снапшота вместе с
-виртуальным TPM. На живой машине с настоящим TPM они идут вперёд всегда — и
-противник, восстановивший профиль и отведший системные часы, получал разрешение,
-хотя живое состояние до копирования давало отказ.
+**Comparing direction detects less than this text previously claimed.** The previous revision promised that the TPM clock detected “both copying the folder and restoring the whole machine.” That is incorrect, and the error was measured. `presented < issued` triggers only when the clock ITSELF moves backwards, namely when a snapshot including the virtual TPM is restored. On a live machine with a real TPM, it always moves forward; an adversary who restored the profile and set back the system clock obtained permission even though live state before the copy yielded denial.
 
-**`tpm_clock` как мера ЭЛАПСА.** Поэтому сравниваются **два элапса**: аппаратный —
-разность `clock_ms`, и системный — разность `now − issued_at`.
+**`tpm_clock` as a measure of ELAPSED TIME.** Therefore **two elapsed durations** are compared: hardware duration — the difference in `clock_ms`; and system duration — the difference `now − issued_at`.
 
-Инвариант, на котором это держится: часы TPM идут **не быстрее** настенных, потому
-что идут только пока машина включена. Значит аппаратный элапс, превысивший
-системный, означает ровно одно — системные часы отвели назад. Восстановление
-профиля разность `clock_ms` не трогает, поэтому мера переживает его.
+The supporting invariant is that the TPM clock runs **no faster** than wall time because it runs only while the machine is on. Hardware elapsed time exceeding system elapsed time therefore means exactly one thing: the system clock was set back. Restoring a profile does not change the `clock_ms` difference, so this measure survives it.
 
-Сравнивать аппаратный элапс с ДЛИНОЙ ЛИЗИНГА — ошибка, и она была допущена в
-первой редакции. Показания снимает клиент, а лизинг выдаётся позже, иногда намного;
-разрыв входит в аппаратный элапс целиком, и законный пользователь, снявший
-показания накануне, получал отказ на первом же открытии. Отсюда два требования.
+Comparing hardware elapsed time with LEASE DURATION is a mistake made in the first revision. The client takes the reading; the lease is issued later, sometimes much later. The entire gap contributes to hardware elapsed time, so a legitimate user who took a reading the previous day was denied on the first opening. Two requirements follow.
 
-**Показания сопровождаются моментом снятия.** Клиент сообщает тройку: счётчик
-сбросов, миллисекунды и системное время того же мгновения. Сервер приводит
-показания к моменту выдачи, допуская, что машина всё это время работала.
-Приведение идёт в сторону БОЛЬШИХ часов, то есть меньшего измеренного элапса:
-ошибка направлена в сторону разрешения, и это выбрано осознанно — ложный отказ
-законному пользователю здесь дороже ослабления на длину разрыва.
+**Readings include their sampling time.** The client reports a triple: reset counter, milliseconds, and system time at that same instant. The server adjusts the reading to issue time, assuming the machine may have run throughout. Adjustment is towards a LARGER clock, hence a smaller measured elapsed duration: the error favors permission. This is deliberate — wrongly denying a legitimate user costs more here than weakening protection by the gap's length.
 
-Момент снятия недоверенный, и доверять ему не требуется: соврав, устройство
-ослабляет проверку в свою пользу ровно на величину лжи и ничего сверх не получает,
-потому что сравниваются элапсы, а не абсолюты.
+The sampling time is untrusted and need not be trusted: by lying, the device weakens the check in its favor by exactly the lie's magnitude and gains nothing more, because durations, not absolutes, are compared.
 
-Две меры складываются, а не заменяют друг друга. Часы TPM идут, только пока машина
-включена: пролежав неделю выключенной, она покажет элапс в минуту, и одна
-аппаратная мера пропустила бы просроченный лизинг. Системная мера этот случай
-ловит. Отказ по ЛЮБОЙ из двух строго сильнее каждой порознь.
+The two measures combine rather than replace each other. The TPM clock runs only while the machine is on: after a week powered off, it may show one minute elapsed, so hardware time alone would admit an expired lease. System time catches that case. Denial on EITHER measure is strictly stronger than either alone.
 
-Отказ сообщается ОТДЕЛЬНОЙ причиной, названной по существу: «аппаратные часы
-обогнали системные». «Срок истёк» — обычное событие; обгон — отчёт об отводе, и
-оператору надо знать именно его.
+The denial has its OWN substantive reason: “hardware clock has overtaken system clock.” “Expired” is ordinary; overtaking reports a clock setback, which is what the operator needs to know.
 
-**Часы сообщает само устройство**, и занижение ловится не доверием, а памятью
-сервера: он хранит наибольшее виденное от этого устройства показание и отказывает
-в активации при меньшем. Раз предъявив часы, устройство обязано предъявлять их и
-дальше — иначе «забыть про TPM» было бы способом снять проверку одной строкой.
+**The device reports its own clock**; under-reporting is detected by server memory rather than trust: the server stores the greatest reading seen from that device and refuses activation for a smaller one. Once a device has presented a clock, it must continue doing so — otherwise “forgetting the TPM” would disable the check in one line.
 
-Лизинг **без** часов их не требует. Лизинг **с** часами при их отсутствии у
-устройства — отказ: «не смогли проверить» обязано читаться как «нельзя» (И-10).
-Обратный выбор был бы обходом в одну строку — предъяви устройство без часов, и
-проверка отката исчезала бы.
+A lease **without** a clock does not require one. A lease **with** a clock is denied if the device lacks it: “could not verify” must mean “not allowed” (I-10). The opposite would be a one-line bypass — present a clockless device and rollback checking disappears.
 
-**Сбой чтения часов — не «часов нет»; решение 2026-09-15 (A2a).** Клиент знает о
-своих часах одно из трёх: показания, отсутствие (не Windows, `TBS_E_TPM_NOT_FOUND`,
-`TBS_E_SERVICE_DISABLED`) или сбой чтения (`oc_policy::DeviceClock`). До решения
-второе и третье были одним «нет», одной попыткой: случайный отказ TBS на машине
-с часами назывался «устройство их не предъявило» — неотличимо от машины без
-TPM (перемежающийся отказ пробы `dod_scenario::a_clock_bound_licence_opens_the_file`).
+**A clock-read failure is not “no clock”; decision of 2026-09-15 (A2a).** The client knows one of three things about its clock: a reading, absence (non-Windows, `TBS_E_TPM_NOT_FOUND`, `TBS_E_SERVICE_DISABLED`), or a read failure (`oc_policy::DeviceClock`). Previously, the last two were one “none,” from one attempt: a transient TBS failure on a machine with a clock was called “the device did not present one,” indistinguishable from a machine without TPM (intermittent failure in `dod_scenario::a_clock_bound_licence_opens_the_file`).
 
-* **Процессы продукта встают в очередь** (`cc_keystore::queue`, именованный
-  мьютекс сеанса входа) на чтение часов и на каждую операцию ключа устройства в
-  TPM: одновременные команды TBS отменяет сам. Очередь — не условие: не
-  дождались за 5 с — операция идёт без неё.
-* **Преходящие отказы повторяются** — до восьми попыток, паузы 20…320 мс с
-  дрожанием (`cc_keystore::clock::RETRY_PAUSES_MS`). Преходящими считаются только
-  коды, про которые документация говорит «повторить»: предупреждения TPM 2.0
-  `TPM_RC_YIELDED`, `TPM_RC_CANCELED`, `TPM_RC_TESTING`, `TPM_RC_RETRY` и коды
-  TBS `TBS_E_COMMAND_CANCELED`, `TBS_E_TOO_MANY_TBS_CONTEXTS`,
-  `TBS_E_TOO_MANY_RESOURCES`, `TBS_E_SERVICE_START_PENDING`. `TPM2_ReadClock`
-  ничего не пишет и авторизации не требует, повтор не трогает ни состояния TPM, ни
-  защиты от подбора. Незнакомый код и сброшенный флаг `safe` не повторяются.
-  Основание и замер — `cc_keystore::clock` и `docs/evidence/local-completion.md`, A2a.
-* **Оставшийся сбой — отказ своей причиной**: `DenyReason::TpmClockUnreadable`,
-  код возврата 6 (как у сбоя ввода-вывода: беда в устройстве этой минуты) и текст
-  с кодом ответа и числом попыток. Совет «повторить» — только преходящему коду,
-  исчерпавшему попытки; непреходящему текст говорит обратное (последний пункт
-  ниже), и код возврата у обоих один. Отсутствие часов —
-  прежний `TpmClockMissing`, код 5. Решение не меняется ни в одном случае: лизинг
-  под часы без показаний — отказ (И-10); меняются причина и код.
-* **Активация и продление при сбое чтения не уходят на провод.** Без показаний
-  сервер, видевший часы устройства, отказал бы «часы предъявлялись, а теперь нет»
-  и записал бы `ClockWithdrawnRefused` в журнал автора: случайный сбой TBS
-  становился бы записью, похожей на попытку снять проверку отката. Клиент
-  отказывает сам, кодом 6, ничего не отправив.
-* **Цена — доступность, и она названа (ревью A2a).** Машина, где чтение часов
-  стойко падает НЕ «отсутствием» — отказ доступа к TBS, `TBS_E_INTERNAL_ERROR`,
-  сброшенный `safe`, незнакомый код, — не активирует и не продлевает НИ ОДНОГО
-  файла, включая файлы серверов, чей лизинг часов не требует: клиент до
-  разговора не знает, потребует ли их сервер, а сервер, однажды видевший часы
-  устройства, отказал бы с записью в журнал. Уже выданные лизинги без часов
-  открываются по-прежнему — решатель спрашивает часы только у лизинга под часы.
-  Выход у человека один — починить TBS/TPM; различать «сбой» и «часов нет» по
-  воле пользователя значило бы вернуть обход в одну строку. Текст отказа
-  говорит «повторите позже» только преходящему коду, исчерпавшему попытки;
-  непреходящему — что повтор не поможет и отказ касается любого файла
-  (`cc_keystore::clock::Reading::is_persistent_failure`). Код 6 у всех трёх
-  путей к содержимому — `cc`, `ccview`, `ccbroker`: таблица кодов у них одна
-  (`cc_cli::exit`).
+* **Product processes queue** (`cc_keystore::queue`, a named mutex for the login session) for clock reads and every TPM device-key operation: TBS itself cancels simultaneous commands. The queue is not a prerequisite: after waiting 5 s, the operation proceeds without it.
+* **Transient failures are retried** — up to eight attempts, pauses of 20…320 ms with jitter (`cc_keystore::clock::RETRY_PAUSES_MS`). Only codes whose documentation says “retry” are transient: TPM 2.0 warnings `TPM_RC_YIELDED`, `TPM_RC_CANCELED`, `TPM_RC_TESTING`, `TPM_RC_RETRY`, and TBS codes `TBS_E_COMMAND_CANCELED`, `TBS_E_TOO_MANY_TBS_CONTEXTS`, `TBS_E_TOO_MANY_RESOURCES`, `TBS_E_SERVICE_START_PENDING`. `TPM2_ReadClock` writes nothing and requires no authorization; retries affect neither TPM state nor guessing protection. Unknown codes and a cleared `safe` flag are not retried. Rationale and measurements: `cc_keystore::clock` and `docs/evidence/local-completion.md`, A2a.
+* **A remaining failure is denied with its own reason**: `DenyReason::TpmClockUnreadable`, exit code 6 (as for I/O failure: a problem with the device at this moment), and text containing the response code and attempt count. “Retry” is advised only for a transient code that exhausted its attempts; for a persistent code, the text says the opposite (last item below), and both use the same exit code. Clock absence remains `TpmClockMissing`, code 5. The decision is unchanged in every case: a clock-bound lease without readings is denied (I-10); the reason and code change.
+* **Activation and renewal do not go onto the wire after a clock-read failure.** Without readings, a server that had seen the device clock would deny with “clock was presented before, now absent” and record `ClockWithdrawnRefused` in the author's journal: a transient TBS failure would resemble an attempt to disable rollback checking. The client denies locally, code 6, sending nothing.
+* **The cost is availability, explicitly acknowledged (A2a review).** A machine with persistently failing clock reads other than “absence” — TBS access denied, `TBS_E_INTERNAL_ERROR`, cleared `safe`, unknown code — cannot activate or renew ANY file, including files on servers whose leases do not require a clock: before the conversation the client does not know whether the server requires it, and a server that once saw the device clock would deny and journal it. Already issued clockless leases still open — the evaluator requests a clock only for clock-bound leases. The user's only remedy is to repair TBS/TPM; letting the user choose between “failure” and “no clock” would restore the one-line bypass. The denial text says “retry later” only for a transient code with exhausted attempts; for a persistent failure, it says retrying will not help and the denial affects any file (`cc_keystore::clock::Reading::is_persistent_failure`). All three content paths — `cc`, `ccview`, `ccbroker` — use code 6: they share one exit-code table (`cc_cli::exit`).
 
-### 3.1. Свидетель вне профиля и журнал принятого — решение 2026-09-17 (D2)
+### 3.1. Witness outside the profile and accepted-history journal — decision of 2026-09-17 (D2)
 
-Состояние доступа (`access-state`) хранит пол и планку `highest_seq_seen`, и
-файл этот возвращается вместе с профилем. Против возврата профиля работают две
-вещи, и отвечают они на разные вопросы.
+Access state (`access-state`) stores the floor and `highest_seq_seen` threshold; this file returns with the profile. Two things protect against profile restoration, answering different questions.
 
-**Голова свидетеля** (`cc_cli::witness`) — «не отстало ли состояние». Лежит в
-профиле и вне его (`%ProgramData%\CloseCrate\<пользователь>`), заверена K12
-(`CC/v1/cached-lease`), умеет только подниматься. Голова второй версии (80 байт)
-несёт, кроме эпохи, длину журнала принятого и тег его последней записи; голова
-первой версии (40 байт) читается по-прежнему и о журнале не свидетельствует.
+**Witness head** (`cc_cli::witness`) — “has state fallen behind?” Stored within and outside the profile (`%ProgramData%\CloseCrate\<user>`), authenticated with K12 (`CC/v1/cached-lease`), and can only advance. A version 2 head (80 bytes) carries the epoch, accepted-history journal length, and final-record tag; a version 1 head (40 bytes) remains readable but does not witness the journal.
 
-**Журнал принятого** (`cc_cli::accepted`, файл `accepted-journal` в каталоге
-ключей) — «что именно было принято»: для каждого файла — какой лизинг под каким
-`seq` (SHA-256 проверенных байтов лизинга) и какая редакция под каким счётчиком.
-Каждая запись заверена K12 вместе с тегом предыдущей и своим номером.
+**Accepted-history journal** (`cc_cli::accepted`, file `accepted-journal` in the key directory) — “what exactly was accepted?” For each file: which lease under which `seq` (SHA-256 of verified lease bytes) and which revision under which counter. Every record is authenticated with K12 together with the preceding tag and its own number.
 
-Порядок — нормативно для клиента:
+The order is normative for the client:
 
-1. проверенный лизинг или редакция;
-2. под замком журнала (`accepted-journal.lock`, замок ОС — снимается смертью
-   процесса): перечитать журнал и счётчики с диска, сверить журнал с головами;
-3. запись журнала (временный файл, `sync_all`, переименование);
-4. запись состояния (так же);
-5. запись головы;
-6. доступ — первый байт содержимого.
+1. Verified lease or revision;
+2. under the journal lock (`accepted-journal.lock`, an OS lock released upon process death): reread journal and counters from disk, compare journal against heads;
+3. write journal (temporary file, `sync_all`, rename);
+4. write state (likewise);
+5. write head;
+6. access — the first content byte.
 
-Отказ любой записи до шага 6 — отказ доступа: принятие не подтверждено, пока не
-записано. Обрыв между записями безопасен по построению: журнал впереди
-состояния узнаётся (тот же лизинг — «уже принят», второй раз не пишется),
-состояние впереди головы — голова не свидетельствует, пока не догонит. Голова
-впереди журнала невозможна: голова пишется из журнала, прочитанного или
-записанного этим же процессом.
+Any write failure before step 6 denies access: acceptance is not confirmed until recorded. Interruption between writes is safe by construction: a journal ahead of state is recognized (the same lease is “already accepted” and not written twice); when state is ahead of the head, the head does not witness it until caught up. A head ahead of the journal is impossible: the head is written from a journal read or written by the same process.
 
-Отказы (все — до решателя, код возврата 6, как у ввода-вывода):
+Failures (all before the evaluator, exit code 6, as for I/O):
 
-* **раздвоение**: под принятым `seq` — другие байты лизинга; под принятым
-  счётчиком — другое содержимое редакции. Так выглядит сервер, выдающий разную
-  правду, или подмена лизинга после приёма. Планка это пропускала: номер не ниже
-  её;
-* **откат редакции**: счётчик ниже принятого. Для лизинга меньший номер журнал
-  не судит — это делает решатель по `highest_seq_seen`; принятый решателем
-  пишется;
-* **усечение**: журнал короче, чем видела любая голова;
-* **подмена истории**: на виденной головой длине в журнале другой тег — например,
-  профиль возвращён из копии и дописан другой историей той же длины при
-  спрятанном свидетеле вне профиля. Эпохи при этом сходятся, и свежесть
-  состояния такого не видит;
-* **порча**: строка не разбирается или цепочка не сходится. Оборванная
-  ПОСЛЕДНЯЯ строка без перевода строки пропускается — отставание журнала ловит
-  сверка с головой.
+* **equivocation**: different lease bytes under an accepted `seq`, or different revision contents under an accepted counter. This represents a server issuing conflicting truths or a lease replaced after acceptance. The threshold alone missed this: the number was not below it;
+* **revision rollback**: counter below the accepted one. For leases, the journal does not judge a lower number — the evaluator does so using `highest_seq_seen`; whatever it accepts is recorded;
+* **truncation**: journal shorter than any head has seen;
+* **history substitution**: a different tag at the length witnessed by a head — for example, a profile restored from a backup and extended with different history of the same length while the outside-profile witness was hidden. Epochs still match; state freshness cannot see this;
+* **corruption**: unparseable line or broken chain. An interrupted LAST line without a newline is skipped — comparison with the head detects the journal falling behind.
 
-Размер ограничен: после 512 записей старые сворачиваются в контрольную точку
-(заверена той же цепочкой; хранит для вида и файла наибольший номер и сумму),
-остаются последние 128. Цена названа: раздвоение СТАРЕЕ точки ловится только
-для наибольшего номера; голова, указывающая внутрь свёрнутой части, сверяется
-лишь длиной.
+Size is bounded: after 512 records, older ones are folded into a checkpoint (authenticated by the same chain; retains the highest number and digest per kind and file); the last 128 remain. The cost is explicit: equivocation OLDER than the checkpoint is detected only for the highest number; a head pointing into the compacted part is compared by length alone.
 
-**Чего это не даёт.** Защиты от владельца машины: K12 выводится из ключа
-устройства, лежащего в его профиле. Снапшота ВСЕЙ машины: голова вне профиля
-возвращается вместе с ним — против этого работают только часы TPM (выше).
-Выход для того, кто восстановил профиль намеренно, назван в тексте отказа:
-новый лизинг у сервера либо удаление файлов свидетеля, снимающее защиту
-целиком.
+**What this does not provide.** Protection against the machine owner: K12 derives from the device key in their profile. Protection against a WHOLE-machine snapshot: the outside-profile head returns with it — only the TPM clock (above) addresses that. The refusal text states the remedy for someone who intentionally restored a profile: a new lease from the server, or deletion of witness files, removing this protection entirely.
 
-Доли и ключи в журнал не пишутся: в нём только номера, суммы и эпохи.
-Пробы: `cc_cli::accepted` (цепочка, правка, чужой ключ, склейка двух историй,
-обрыв, свёртка, замок),
-`cc_cli::witness` (голова второй версии), `crates/cc-cli/tests/accepted_history.rs`
-(процессами: подмена, редакции, обрезка и удаление, подмена истории той же
-длины, пять соседей без потерь, снятие процесса посреди записи, отказ записи).
+Neither shares nor keys are written to the journal: only numbers, digests, and epochs. Tests: `cc_cli::accepted` (chain, tampering, wrong key, splicing histories, interruption, compaction, lock), `cc_cli::witness` (version 2 head), `crates/cc-cli/tests/accepted_history.rs` (using processes: substitution, revisions, truncation and deletion, same-length history substitution, five concurrent peers without loss, killing a process mid-write, write failure).
 
-## 4. Чего протокол не даёт
+## 4. What the protocol does not provide
 
-Список короткий и честный; он повторяется в README, потому что касается
-пользователя, а не реализации.
+The list is short and honest; it is repeated in the README because it concerns users, not implementation.
 
-- **Сговор сервера с получателем открывает файл.** Это граница схемы 2-из-2, а не
-  дефект: две доли у двух сторон, и если стороны заодно, долей две у одной.
-- **Подмену ключа получателя криптографией не закрываем.** Сервер выдаёт ключи
-  получателей и потому является каталогом ключей; автор закрепляет в заголовке тот
-  ключ, который ему подставили. Закрепление даёт **обнаружение постфактум**, а не
-  предотвращение.
-- **Лимит устройств — контроль коммерческий, а не криптографический.** Противник
-  предъявляет собственные свежие пары ключей, честно доказывает владение каждой и
-  расходует лимит за один заход. Лимит останавливает пользователя, а не атакующего.
-- **Отзыв не действует мгновенно у того, кто уже в оффлайне.** Он подействует не
-  позже конца текущего окна, и длину окна задаёт `max_offline_seconds` в политике
-  автора — флагом `--offline-window` у `protect`. Сервер его не ужесточает:
-  серверной политики не существует, см. §1. До появления флага окно всегда
-  равнялось длине лизинга, и отзыв ждал её конца.
-- **Журнал ловит правку, но не обрезание.** Цепочка MAC (K13) обнаруживает
-  изменение записи; чтобы обнаружить отброшенный хвост, нужен внешний якорь — это
-  Ф-10.
-- **Файл состояния сервера НЕ ЗАВЕРЕН, и это граница модели угроз.** Противник с
-  правом записи в каталог сервера находится **вне периметра**: он может стереть
-  отзыв, поднять предел устройств, откатить счётчики. Заверение файла его не
-  остановило бы — ключ заверения лежал бы на той же машине и был бы доступен тому
-  же противнику.
+- **Server–recipient collusion opens the file.** This is a boundary of the 2-of-2 scheme, not a defect: two parties hold two shares; if they cooperate, one party has both.
+- **Recipient-key substitution is not prevented cryptographically.** The server supplies recipient keys and is therefore a key directory; the author pins in the header whichever key was supplied. Pinning provides **after-the-fact detection**, not prevention.
+- **The device limit is a commercial control, not a cryptographic one.** An adversary presents fresh key pairs of their own, honestly proves possession of each, and consumes the limit in one go. It stops a user, not an attacker.
+- **Revocation is not immediate for someone already offline.** It takes effect no later than the end of the current window; the author sets its length with `max_offline_seconds` via the `protect` flag `--offline-window`. The server does not tighten it: no server policy exists, see §1. Before the flag existed, the window always equaled lease duration, and revocation waited until its end.
+- **The journal detects editing but not truncation.** The MAC chain (K13) detects record modification; detecting a discarded tail requires an external anchor — F-10.
+- **The server state file is NOT AUTHENTICATED; this is a threat-model boundary.** An adversary with write access to the server directory is **outside the perimeter**: they can erase revocation, raise device limits, and roll back counters. Authenticating the file would not stop them — the authentication key would reside on the same machine and be accessible to the same adversary.
 
-  Записано здесь, потому что раньше это решение жило только в докстроке модуля.
-  Докстрока спекой не является, и «решение, о котором знает лишь автор кода» — то
-  же самое, что решения нет: следующий читатель кода примет отсутствие MAC за
-  упущение и либо заведёт его зря, либо решит, что защита есть.
+  This is recorded here because previously the decision existed only in a module docstring. A docstring is not a specification; “a decision known only to the code author” is equivalent to no decision: the next reader will consider the missing MAC an oversight and either add it needlessly or assume protection exists.
 
-  Что от этой границы НЕ следует: право читать испорченные байты снисходительно.
-  Разбор состояния обязан отвергать структурно неверное — короткое поле, длинное
-  поле, повторяющийся тег, — и отвергает (И-8). Частичная запись и порча тома
-  случаются без всякого противника, и «самое слабое значение по умолчанию» там
-  означало бы, что отозванный файл тихо становится действующим.
+  What this boundary does NOT imply is permission to read corrupted bytes leniently. State parsing must reject malformed structures — short fields, long fields, repeated tags — and does (I-8). Partial writes and volume corruption occur without adversaries; “the weakest default” would silently turn a revoked file active.
 
-  Настоящее смягчение — держать состояние там, куда пишет только служба, и это
-  вопрос развёртывания, а не формата.
+  The real mitigation is to keep state where only the service may write, which is deployment, not format.
 
-## 5. Активация и выдача доли
+## 5. Activation and share issuance
 
-На проводе после `Prove` кадр `Activate`/`Renew` имеет вид
-`u8(kind) ‖ закодированное тело ‖ MAC(32)`. K25 заверяет вид и сырое тело,
-не внешнюю длину кадра. Сервер требует доказательство и проверяет MAC ДО
-разбора полей (И-5). Отсутствующий или неверный MAC означает отказ и закрытие
-разговора: лизинг не выписывается, журнал не пишется.
+After `Prove`, an `Activate`/`Renew` wire frame is `u8(kind) ‖ encoded body ‖ MAC(32)`. K25 authenticates the kind and raw body, not the outer frame length. The server requires proof and verifies the MAC BEFORE parsing fields (I-5). A missing or invalid MAC causes rejection and closes the conversation: no lease is issued and no journal entry written.
 
-Автор **регистрирует** файл: сообщает `file_id`, правила, их хеш и предел
-устройств. Содержимое не передаётся и не запрашивается.
+The author **registers** the file: supplies `file_id`, rules, their hash, and the device limit. Content is neither transmitted nor requested.
 
-Устройство **активируется**: присылает свой отпечаток, публичный ключ, механизм и
-**запись слота `Server`** из контейнера. Сервер открывает слот своим ключом,
-получает долю `secret_A`, перезапечатывает её на ключ устройства производной K11 и
-возвращает вместе с подписанным лизингом.
+The device **activates**: sends its fingerprint, public key, mechanism, and the container's **`Server` slot record**. The server opens the slot with its key, obtains `secret_A`, reseals it to the device key using derivation K11, and returns it with a signed lease.
 
-Доля в базе **не остаётся**. Это и есть причина, по которой утечка базы сервера не
-открывает ни одного контейнера: в ней лежат идентификаторы, хеши, отпечатки и
-журнал — и ничего секретного.
+The share **does not remain** in the database. That is why a server database leak opens no container: it stores identifiers, hashes, fingerprints, and a journal — nothing secret.
 
-`info` производной K11:
+K11 derivation `info`:
 
 ```
 "CC/v1/a-to-device" ‖ u8(kem_id) ‖ file_id(16) ‖ device_fpr(32) ‖ u64be(seq)
 ```
 
-`u8(kem_id)` внесён версией 2 формата до первого использования. У устройства теперь
-два механизма — P-256 в TPM и X25519 у программной ступени, — и без механизма в
-выводе слот, переразмеченный чужим `kem_id`, давал бы **тот же ключ**. Разбор этой
-ошибки для K10 записан в §3.3 формата; повторять её не стали.
+`u8(kem_id)` was added in format version 2 before first use. A device now has two mechanisms — P-256 in the TPM and X25519 for the software tier — and without the mechanism in the derivation, a slot relabeled with a different `kem_id` would produce **the same key**. Format §3.3 analyzes this error for K10; it was not repeated.
 
-**Повторная активация известного устройства лимита не расходует.** Считаются
-устройства, а не активации: иначе переустановка клиента на той же машине съедала бы
-место, и предел в три устройства кончался бы на одном человеке.
+**Reactivating a known device does not consume the limit.** Devices, not activations, are counted: otherwise reinstalling the client on the same machine would consume a slot, and one person would exhaust a three-device limit.
 
-**Срок лизинга урезается до разрешённого автором.** Сервер вправе ужесточать и не
-вправе расширять; запрос на больший срок исполняется меньшим, а не отвергается.
+**Lease duration is capped at what the author permits.** The server may tighten but not expand; a request for a longer term is fulfilled with a shorter term, not rejected.
 
-**Повтор активации безопасен только под тождеством операции** (§9.10, решение
-2026-09-15). Запрос без тождества исполняется, как исполнялся: потерявший ответ
-и повторивший получает вторую выдачу.
+**Retrying activation is safe only under an operation identity** (§9.10, decision of 2026-09-15). A request without identity executes as before: a client losing the response and retrying receives a second grant.
 
-### 5.1. Продление — решение 2026-09-03
+### 5.1. Renewal — decision of 2026-09-03
 
-Открытый документ продлевает лизинг каждые несколько минут (Ф-18, ярус 1), и
-первая редакция делала это той же активацией. Цена была названа вслух и
-оказалась неприемлемой: каждое продление — запись `LeaseIssued` в журнале
-автора и расход предела выдач, то есть один читатель с открытым окном писал в
-журнал двенадцать раз в час и один исчерпывал `--max-grants`.
+An open document renews its lease every few minutes (F-18, tier 1); the first revision used activation for this. The cost was explicitly stated and proved unacceptable: each renewal wrote `LeaseIssued` to the author's journal and consumed the grant limit, so one reader with an open window wrote twelve records per hour and exhausted `--max-grants` alone.
 
-Поэтому продление — **свой вид запроса** (`Renew`, вид 22) с тем же телом, что
-у активации, и тем же ответом `Granted`. Тело то же не из лени: производная
-K11 включает номер лизинга, поэтому новый номер требует новой доли, а её сервер
-получает только из слота `Server` — продлению нужны ровно те же поля. Отличия
-ровно три, и все три — на сервере:
+Renewal therefore has **its own request kind** (`Renew`, kind 22), with the same body as activation and the same `Granted` response. The body is identical for a reason: derivation K11 includes the lease sequence number, so a new number requires a new share, obtained by the server only from the `Server` slot — renewal needs exactly the same fields. There are exactly three differences, all on the server:
 
-* устройство обязано быть **уже активированным** по этому файлу, иначе отказ
-  «не активировано»: продление не выдаёт ничего, чего у устройства не было;
-* **в журнал не пишется**: продление — не событие, а продолжение выданного;
-* **предел выдач не расходуется**: предел — про то, скольким устройствам автор
-  согласен раздать долю, а не про то, как долго они читают.
+* The device must be **already activated** for this file, otherwise “not activated” is returned: renewal grants nothing the device did not already have;
+* **no journal entry**: renewal is continuation of an existing grant, not an event;
+* **no grant-limit consumption**: the limit concerns how many devices the author agrees to give a share, not how long they read.
 
-Всё остальное проверяется как при активации: отзыв, хеш политики,
-доказательство владения, часы устройства. Отказы по часам в журнал пишутся и
-здесь — попытка отката это событие, а не выдача.
+Everything else is checked as for activation: revocation, policy hash, proof of possession, device clock. Clock refusals are journaled here too — a rollback attempt is an event, not a grant.
 
-**Предел выдач с этого дня считается по журналу**, а не суммой номеров
-лизингов: продление берёт следующий номер, но выдачей не является. Журнал и
-есть счёт — число, с которым сравнивается предел, и число, которое видит
-оператор, одно по построению.
+**Since this date, the grant limit is counted from the journal**, not the sum of lease sequence numbers: renewal takes the next number but is not a grant. The journal is the count — the number compared with the limit and the number shown to the operator are identical by construction.
 
-Клиент продлевает `Renew`, а при отказе пробует активацию: сервер прежней
-редакции вида 22 не знает, а лизинг тот же — ценой одной записи в журнале.
+The client renews with `Renew`, then tries activation if refused: an older server does not know kind 22, while the lease is the same — at the cost of one journal entry.
 
-## 6. Отзыв
+## 6. Revocation
 
-`revoke` поднимает эпоху файла и запрещает дальнейшую активацию. Уже выданные
-лизинги продолжают действовать до истечения — иначе отзыв означал бы мгновенное
-отключение всех, включая тех, кто в оффлайне и о нём не знает.
+`revoke` advances the file epoch and forbids further activation. Already issued leases remain valid until expiry — otherwise revocation would mean instantly disconnecting everyone, including offline users who do not know about it.
 
-Границу стоит помнить, и она записана в §3: эпоха ловит восстановление кеша
-**после** того, как новая эпоха замечена. Ушедшего в оффлайн за секунду до отзыва
-она не ловит.
+The boundary matters and is recorded in §3: the epoch detects cache restoration **after** a new epoch has been observed. It does not catch someone who went offline one second before revocation.
 
-### 6.1. Отзывная — решение 2026-09-02
+### 6.1. Revocation notice — decision of 2026-09-02
 
-Отзыв, который действует только тем, что сервер перестаёт выдавать лизинги,
-доходит лишь до того, кто к серверу ходит. **Отзывная** делает отзыв данными:
-документ `подпись(64) ‖ тело`, тело — TLV (`версия u16le`, `file_id`,
-`эпоха u64le`, `момент i64le`), подпись — ключом подписи лизингов по
-транскрипту с меткой `"CC/v1/revocation"` из реестра §3.6 (метка была
-заведена заранее и до этого дня не применялась). Проверяется тем же ключом,
-что лизинг, — закреплённым автором в заголовке; второго доверия не заводится.
-Раскладка — `oc_protocol::revocation`; документ незамороженный, как и остальные
-документы протокола.
+Revocation implemented solely by withholding new leases reaches only those who contact the server. A **revocation notice** makes revocation data: a document `signature(64) ‖ body`, with a TLV body (`version u16le`, `file_id`, `epoch u64le`, `time i64le`), signed by the lease-signing key over a transcript labeled `"CC/v1/revocation"` from the §3.6 registry (the label was reserved in advance but unused until this date). Verification uses the same key as the lease — pinned by the author in the header; no second trust relationship is introduced. Layout: `oc_protocol::revocation`; the document is unfrozen, like the other protocol documents.
 
-Читатель принимает отзывную из трёх мест, ни одно из которых не требует
-дороги к серверу в момент чтения: из кеша рядом с лицензиями
-(`<id>.revoked` в каталоге ключей), из файла рядом с контейнером
-(`<контейнер>.revoked` — автор пересылает тем же письмом; `cca revoke` кладёт
-её файлом), с провода (запрос `Revocation { file_id }`, вид 19; ответы
-`Revocation(bytes)`, вид 20, и `NotRevoked`, вид 21 — без доказательства
-владения: тайны в ней нет). Просмотрщик, услышав отзыв по подписке, берёт
-отзывную по проводу, проверяет и кладёт в кеш: следующий запуск откажет без
-сети. Найденная рядом с контейнером перекладывается в кеш.
+The reader accepts notices from three places, none requiring server connectivity at read time: the cache beside licenses (`<id>.revoked` in the key directory); a file beside the container (`<container>.revoked` — the author forwards it in the same message; `cca revoke` writes it as a file); the wire (`Revocation { file_id }`, kind 19; responses `Revocation(bytes)`, kind 20, and `NotRevoked`, kind 21 — no proof of possession, since it contains no secret). A viewer hearing a revocation through a subscription fetches the notice over the wire, verifies it, and caches it: the next launch denies without a network. A notice found beside the container is copied to the cache.
 
-Что она даёт: отзыв окончателен и перебивает действующий лизинг в кеше —
-`cc check`, `cc unprotect` и просмотрщик отказывают ею раньше лизинга и
-решателя; `cc inspect` называет файл отозванным. Чего не даёт: подделать её
-нельзя, а распространить настоящую значит распространить правду — поэтому
-подброшенная отзывная с чужой подписью не мешает ничему, и это проверено.
-Автору она не мешает: правила к нему не применяются.
+What it provides: revocation is final and overrides an active cached lease — `cc check`, `cc unprotect`, and the viewer deny on it before the lease and evaluator; `cc inspect` identifies the file as revoked. What it does not: it cannot be forged, while distributing an authentic notice distributes the truth — a planted notice with someone else's signature therefore interferes with nothing, as tested. It does not obstruct the author: policy does not apply to them.
 
-## 7. Журнал
+## 7. Journal
 
-Цепочка на K13: ключ каждой записи — MAC предыдущей. Секрета не требует вовсе,
-голова публична, проверить может кто угодно.
+A K13 chain: each record's key is the preceding MAC. No secret is required; the head is public and anyone may verify it.
 
-Записываются: регистрация файла, активация устройства, выдача лизинга, отзыв и
-**отказ по лимиту устройств**. Отказ — тоже событие, и знать о нём надо не меньше,
-чем об успехе.
+Recorded events: file registration, device activation, lease issuance, revocation, and **device-limit refusal**. A refusal is an event too, and knowing about it matters no less than knowing about success.
 
-Отсутствующий отпечаток кодируется отдельным байтом, а не нулями: нули — законное
-значение отпечатка, и спутать «устройства нет» с «отпечаток из нулей» значило бы
-дать двум записям одно представление.
+An absent fingerprint is encoded with a separate byte rather than zeros: zeros are a legitimate fingerprint value; confusing “no device” with “all-zero fingerprint” would give two records the same representation.
 
-**Обрезание журнала цепочкой не обнаруживается** — и закрывается подписанной
-головой. Отбросив хвост, злоумышленник получает журнал, сходящийся сам с собой:
-цепочка свидетельствует о внутренней целостности, но не о длине.
+**The chain does not detect journal truncation** — a signed head addresses this. Discarding the tail leaves an internally consistent journal: the chain witnesses internal integrity, not length.
 
-Голова — это `size ‖ root ‖ signature`, где `root` — корень дерева над MAC записей,
-а подпись под транскриптом `"CC/v1/audit-head" ‖ 0x00 ‖ u64be(size) ‖ root`. Метка
-своя, не общая с записями: голова и запись — разные утверждения, и подпись под
-одним не должна годиться для другого.
+The head is `size ‖ root ‖ signature`, where `root` is the tree root over record MACs, and the signature covers `"CC/v1/audit-head" ‖ 0x00 ‖ u64be(size) ‖ root`. It has its own label, separate from records: a head and a record assert different things; a signature for one must not work for the other.
 
-Проверка: взять первые `size` записей текущего журнала, посчитать по ним корень,
-сравнить с засвидетельствованным. Обрезали — записей меньше обещанного; подменили
-середину и дописали заново — корень префикса разошёлся, даже когда длина совпала.
+Verification: take the first `size` records of the current journal, compute their root, and compare with the witnessed root. Truncation means fewer records than promised; rewriting the middle and rebuilding the rest makes the prefix root diverge even when length matches.
 
-**Условие, без которого это не работает: голову должен хранить кто-то, кроме
-сервера.** Голова, лежащая рядом с журналом, свидетельствует лишь о том, что сервер
-согласен сам с собой. Внешний якорь (OpenTimestamps) снимает требование «получатель
-обязан помнить», но сути не меняет — свидетель должен быть снаружи.
+**A necessary condition: someone other than the server must store the head.** A head beside the journal only witnesses that the server agrees with itself. An external anchor (OpenTimestamps) removes the “recipient must remember” requirement but not the principle — the witness must be outside.
 
-Команды: `cca checkpoint --out <файл>` снимает голову, `cca checkpoint --verify
-<файл>` сверяет. Расхождение — ненулевой код возврата, а не строка в выводе.
+Commands: `cca checkpoint --out <file>` captures the head; `cca checkpoint --verify
+<file>` verifies it. A mismatch produces a nonzero exit code, not merely a line of output.
 
-При чтении состояния журнал **пересобирается**, а не восстанавливается вместе с
-сохранёнными MAC: MAC из того же файла, что и записи, не свидетельствует ни о чём —
-подделавший записи подделает и его.
+When state is read, the journal is **rebuilt**, not restored with saved MACs: a MAC in the same file as its records witnesses nothing — whoever forges the records can forge it too.
 
-## 8. Чего ещё нет
+## 8. What is still missing
 
-**~~Сетевого транспорта.~~ ПОСТРОЕН; статус исправлен 2026-09-08.** Здесь
-стояло «кода сети в продукте нет ни строки», и это перестало быть правдой,
-когда §9 был исполнен: `crates/cc-authority/src/serve.rs:129` берёт
-`TcpListener`/`TcpStream`, сервер обслуживает несколько соединений, а сквозные
-пробы гоняют настоящие бинарники через сокет. Абзац оставлен зачёркнутым, а не
-стёрт: раздел называется «чего ещё нет», и исчезнувшая строка не сообщила бы
-читателю, что пункт закрыт.
+**~~Network transport.~~ BUILT; status corrected on 2026-09-08.** This section said “there is not one line of networking code in the product.” That ceased to be true when §9 was implemented: `crates/cc-authority/src/serve.rs:129` uses `TcpListener`/`TcpStream`; the server handles multiple connections; end-to-end tests run real binaries through a socket. The paragraph remains struck through rather than erased: the section is called “what is still missing,” and a vanished line would not tell a reader the item was completed.
 
-Статус разошёлся с кодом молча — ровно тем способом, о котором предупреждает
-закон репозитория: документ утверждал отсутствие, а отсутствие проверять нечем,
-пока кто-нибудь не спросит. Нашёл это разбор жизненного цикла 2026-09-08.
+Status silently diverged from code in exactly the manner warned about by repository law: the document asserted absence, and absence has no check until someone asks. The lifecycle review found this on 2026-09-08.
 
-**Журнала прозрачности ключей.** Он нужен Ф-10 для анкоринга, и заводить его
-раньше потребителя значило бы замораживать формат, который некому проверить.
+**A key transparency log.** F-10 needs it for anchoring; introducing it before its consumer would freeze a format nobody could verify.
 
-**Аттестации EK.** Перенесена сюда из Ф-6 и остаётся нерешённой: измерения
-записаны в `crates/cc-keystore/tests/hardware.rs`. Ключ, который можно аттестовать,
-надо **создавать** аттестуемым, и это решение со сроком годности — после первого
-выпуска пользовательских ключей оно потребует их пересоздания.
+**EK attestation.** Moved here from F-6 and still unresolved: measurements are in `crates/cc-keystore/tests/hardware.rs`. An attestable key must be **created** as attestable; this decision has an expiry date — once user keys have first shipped, it will require recreating them.
 
 ---
 
-## 9. Транспорт: решение 2026-08-26
+## 9. Transport: decision of 2026-08-26
 
-Пункт был отложен осознанно (`docs/deferred.md` §6.1) и разобран, когда
-понадобился. Ниже — что решено, чем это измерено и при каких условиях
-пересматривается.
+This item was deliberately deferred (`docs/deferred.md` §6.1) and addressed when needed. What follows records the decision, measurements, and conditions for reconsideration.
 
-### 9.1. Что берём
+### 9.1. What we use
 
-**Документы протокола отдельно от способа доставки.** Это два разных предмета, и
-путать их нельзя: документ — обязательство, сокет — перенос байтов. Лизинг уже
-устроен так (подпись ‖ тело, §2) и переживает любую смену транспорта.
+**Protocol documents separate from delivery.** These are different things and must not be confused: a document is a commitment, a socket carries bytes. The lease already follows this pattern (signature ‖ body, §2) and survives any transport change.
 
-Значит: запрос активации, выдача и отказ становятся ДОКУМЕНТАМИ — TLV по правилам
-И-7 и И-8, разбор строгий, вектор рядом с `tests/kat/lease.kat`. Доставка —
-кадры «длина ‖ тело» поверх голого TCP, тем же приёмом, каким уже говорит движок
-(`oc_engine::wire`).
+Thus activation requests, grants, and refusals become DOCUMENTS — TLV under I-7 and I-8, strict parsing, a vector beside `tests/kat/lease.kat`. Delivery uses “length ‖ body” frames over bare TCP, the same technique already used by the engine (`oc_engine::wire`).
 
-**Ноль новых зависимостей.** `std::net` в языке есть, кадр со строгим разбором
-написан, а `MAX_MESSAGE` под протокол берётся СВОЙ: у движка он равен `1 << 20`,
-ровно как `MAX_HEADER_LEN`, и предельный пролог в его кадр не помещается.
+**Zero new dependencies.** The language provides `std::net`; a strictly parsed frame already exists; the protocol gets its OWN `MAX_MESSAGE`: the engine uses `1 << 20`, exactly `MAX_HEADER_LEN`, and a maximum-sized prologue will not fit its frame.
 
-### 9.2. Чего НЕ берём: HTTP и TLS
+### 9.2. What we do NOT use: HTTP and TLS
 
-Отвергнуто замером, по образцу решения о CMS (Ф-10). Каждое основание
-самодостаточно.
+Rejected based on measurement, following the CMS decision (F-10). Each reason stands independently.
 
-1. **Ни одного свойства стойкости транспорт не приносит.** Подпись лизинга
-   проверяется ключом, который автор закрепил в подписанном заголовке; доля
-   запечатана на ключ устройства производной K11, куда входит номер лизинга;
-   отсутствие лизинга по И-10 означает отказ. TLS не добавляет к этому ничего —
-   он добавляет приватность метаданных и доступность, и только их.
-2. **Дубль `getrandom`.** Граф TLS приносит ветку 0.2 при нашей 0.4.3, а
-   `deny.toml` держит `multiple-versions = "deny"` — и держит по существу: две
-   версии источника энтропии в одном дереве это два разных ответа на вопрос,
-   откуда берутся ключи.
-3. **Лицензия вне allow-списка.** В графе встречается `CDLA-Permissive-2.0`,
-   которого в `deny.toml` нет. Добавлять лицензию ради транспорта — решение
-   отдельное и большее, чем сам транспорт.
-4. **Сборочная цепочка.** Умолчание `rustls` тянет `aws-lc-sys`, а с ним `cmake`
-   в сборку — ровно то, за что в этом репозитории поимённо запрещён `openssl`.
+1. **Transport contributes no cryptographic-strength property.** The lease signature is checked with the key pinned by the author in the signed header; the share is sealed to the device key through K11, which includes the lease number; absence of a lease means denial under I-10. TLS adds nothing to this — it adds metadata privacy and availability, and only those.
+2. **Duplicate `getrandom`.** The TLS graph introduces branch 0.2 alongside our 0.4.3, while `deny.toml` enforces `multiple-versions = "deny"` for a substantive reason: two entropy-source versions in one tree give two different answers to where keys come from.
+3. **A license outside the allowlist.** The graph includes `CDLA-Permissive-2.0`, absent from `deny.toml`. Adding a license for transport is a separate decision larger than the transport itself.
+4. **Build toolchain.** Default `rustls` pulls in `aws-lc-sys`, and with it `cmake` — exactly why this repository explicitly bans `openssl`.
 
-**Честно о точности замера.** Число новых крейтов (порядка семидесяти) не
-перепроверялось по индексу и приведено как порядок величины; закрытие
-`aws-lc-rs` через `ring` НЕ измерено — известен только блокирующий факт про
-`cmake`. Основания 2–4 проверены и стоят самостоятельно, поэтому вывод от
-точности числа не зависит. База сравнения сегодня — 334 исключения в
-`supply-chain/config.toml`, а не 76, как в тексте Ф-10: та цифра относится к
-августу 2026 и устарела.
+**Measurement precision, honestly stated.** The new-crate count (roughly seventy) was not rechecked against the index and is an order-of-magnitude estimate; replacing `aws-lc-rs` with `ring` was NOT measured — only the blocking `cmake` fact is known. Reasons 2–4 were verified and stand independently, so the conclusion does not depend on the count's accuracy. Today's comparison baseline is 334 exemptions in `supply-chain/config.toml`, not the 76 quoted in F-10: that figure belongs to August 2026 and is outdated.
 
-**Условия пересмотра.** Приватность метаданных станет требованием заказчика; либо
-появится TLS-реализация без дубля `getrandom`, без лицензий вне списка и без
-сборочной цепочки на C. До тех пор туннель ставит СРЕДА развёртывания, а не наше
-дерево зависимостей, и это записано как требование, а не как умолчание.
+**Conditions for reconsideration.** Metadata privacy becomes a customer requirement; or a TLS implementation appears without duplicate `getrandom`, off-list licenses, and a C build toolchain. Until then, the deployment ENVIRONMENT provides the tunnel, not our dependency tree; this is recorded as a requirement, not left implicit.
 
-### 9.3. Что выставляется по сети, и чем прикрыты три дыры
+### 9.3. What is exposed over the network, and how three holes are closed
 
-Первая редакция (2026-08-26) выставляла по сети ОДНУ операцию — активацию, —
-а `register` и `revoke` оставляла операторскими командами. (Позже добавились
-просьба о доступе и решение автора — §10, подписка — §9.9, отзывная — §6.1,
-продление — §5.1; ни одна не даёт устройству ничего сверх активации.)
+The first revision (2026-08-26) exposed ONE network operation — activation — leaving `register` and `revoke` as operator commands. (Access requests and author decisions followed in §10, subscription in §9.9, revocation notices in §6.1, and renewal in §5.1; none gives a device anything beyond activation.)
 
-Причина — не осторожность, а три дыры, которые файловая граница прятала, и все
-три подтверждены кодом:
+The reason was not caution but three holes concealed by the file boundary, all confirmed in code:
 
-* **`register` вставляет запись через `or_insert`.** Пределы задаёт ПЕРВЫЙ
-  записавший. Контейнер, ушедший получателю до регистрации автором, позволяет
-  получателю зарегистрировать файл на своих условиях — и `policy_hash` при этом
-  сойдётся, он взят из того же контейнера;
-* **`revoke` не спрашивает ничьих полномочий**, а `file_id` лежит в заголовке
-  открытым;
-* **`activate` не требует доказательства владения** предъявленным ключом: он
-  расходует пределы устройств и выдач по одному лишь предъявлению чужого
-  отпечатка.
+* **`register` inserts through `or_insert`.** The FIRST writer sets the limits. A container reaching a recipient before author registration lets that recipient register the file on their own terms — with a matching `policy_hash`, taken from the same container;
+* **`revoke` checks nobody's authority**, while `file_id` is plaintext in the header;
+* **`activate` requires no proof of possession** of the presented key: merely presenting someone else's fingerprint consumes device and grant limits.
 
-Тогда все три были прикрыты ровно тем, что команды запускает человек. Провод
-эту защиту снимает, и «транспорт не меняет ни одной проверки» — формулировка,
-которая была в этом документе, в `docs/deferred.md` и в докстроке `cca`, — для
-этих трёх операций **неверна**. Исправлено тем же коммитом.
+All three were then protected solely by a human running the commands. The wire removes this protection; “transport changes no check” — wording that appeared here, in `docs/deferred.md`, and in the `cca` docstring — is **false** for these three operations. Corrected in the same commit.
 
-**Состояние 2026-09-03: все три прикрыты, и регистрация с отзывом ходят по
-проводу — как РАСПОРЯЖЕНИЯ АВТОРА.** `Register` (вид 23) и `Revoke` (вид 24),
-ответ — `Accepted`. Распоряжение — документ `oc_protocol::order` за подписью
-ключа автора (метка `CC/v1/author-order`, раскладка `подпись(64) ‖ тело`,
-в теле — `file_id`, вид, момент выписки, у регистрации — пределы устройств и
-выдач).
+**Status on 2026-09-03: all three are covered, and registration and revocation travel over the wire as AUTHOR ORDERS.** `Register` (kind 23) and `Revoke` (kind 24), response: `Accepted`. An order is an `oc_protocol::order` document signed with the author's key (label `CC/v1/author-order`, layout `signature(64) ‖ body`; body: `file_id`, kind, issue time, and, for registration, device and grant limits).
 
-* **Регистрация несёт ЗАГОЛОВОК контейнера** — начало файла до конца подписи
-  автора, без содержимого. Сервер проверяет подпись заголовка, берёт из него
-  ключ автора и им проверяет распоряжение.
+* **Registration carries the container HEADER** — the file prefix through the end of the author's signature, without content. The server verifies the header signature, takes the author key from it, and verifies the order with that key.
 
-  **Этого недостаточно, и первая редакция этого абзаца утверждала обратное.**
-  Она говорила: «зарегистрировать чужой файл на своих условиях нельзя — ключа
-  автора у получателя нет». Ключ автора получателю и не нужен. Подпись
-  заголовка проверяется ключом, лежащим В ЭТОМ ЖЕ заголовке, то есть
-  доказывает лишь знание собственного ключа; `file_id` рождается случайными
-  байтами упаковщика и лежит открытым, ни к какому ключу не привязанный.
-  Посторонний берёт настоящий заголовок, ставит свой ключ автора, подписывает
-  своим — `file_id` тот же — и занимает файл раньше настоящего автора. Дыра
-  «пределы задаёт первый записавший» была не закрыта, а **перенесена с
-  оператора на сеть** (ревью 2026-09-03, `docs/plan.md`, `Д-сокет`, П-6).
+  **This is insufficient, contrary to the first revision of this paragraph.** It said: “one cannot register someone else's file on one's own terms — the recipient lacks the author's key.” The recipient does not need it. The header signature is verified using a key IN THAT SAME header, proving only knowledge of one's own key; `file_id` originates as random packer bytes and is public, bound to no key. An outsider takes the real header, substitutes their own author key, signs with it — preserving `file_id` — and claims the file before its real author. The “first writer sets the limits” hole was not closed but **moved from operator to network** (review of 2026-09-03, `docs/plan.md`, `D-socket`, P-6).
 
-  **Закрывает её список допущенных ключей автора у оператора**:
-  `cca author add <hex> | remove <hex> | list`, хранится в состоянии сервера
-  (тег 7). Регистрация по проводу проходит, только если ключ автора из
-  заголовка в списке; иначе отказ «ключ автора не допущен оператором этого
-  сервера». Пустой список означает «по проводу не регистрирует никто» — И-10 в
-  чистом виде. Список — единственный якорь, не зависящий от присланного
-  документа: за ключ ручается тот, кто держит сервер. Регистрация командой
-  `cca register` от списка не зависит: там за файл ручается тот, кто запустил
-  команду, и запуск команды на машине сервера сам по себе есть полномочие.
+  **The operator's author-key allowlist closes it**: `cca author add <hex> | remove <hex> | list`, stored in server state (tag 7). Wire registration succeeds only if the header's author key is listed; otherwise: “author key is not admitted by this server's operator.” An empty list means “nobody registers over the wire” — pure I-10. The list is the only anchor independent of the submitted document: the server operator vouches for the key. `cca register` does not depend on the list: whoever runs the command vouches for the file, and running a command on the server machine is itself authority.
 
-  Отзыв допуска уже зарегистрированные файлы не трогает: ключ автора записан у
-  файла, и распоряжения по нему проверяются им, а не списком. Список решает
-  только, кто вправе занять НОВЫЙ файл.
+  Removing admission does not affect already registered files: their author key is recorded with the file, and orders are checked against that key, not the list. The list decides only who may claim a NEW file.
 
-  Повторная регистрация тем же автором ничего не меняет и в журнал не
-  пишется; другим ключом — отказ «не автор». Файл, зарегистрированный
-  оператором без ключа автора, получает ключ из первого подписанного
-  распоряжения допущенного автора.
-* **Отзыв проверяется ключом автора, записанным при регистрации.** Файл без
-  записанного ключа по проводу не отзывается. Уже отозванный второй раз не
-  отзывается: эпоха не растёт, журнал не пишется — повтор перехваченного
-  распоряжения ничего не даёт.
-* **Активация** требует доказательства владения с 2026-08-26 (§9.4).
+  Re-registration by the same author changes nothing and is not journaled; a different key yields “not the author.” A file registered by the operator without an author key obtains its key from the first signed order by an admitted author.
+* **Revocation is verified with the author key recorded at registration.** A file without a recorded key cannot be revoked over the wire. An already revoked file is not revoked again: no epoch advance or journal entry — replaying an intercepted order gains nothing.
+* **Activation** has required proof of possession since 2026-08-26 (§9.4).
 
-Распоряжение принимается только СВЕЖИМ: расхождение момента выписки с часами
-сервера больше допуска перекоса (`MAX_CLOCK_SKEW_SECONDS`, пять минут) — отказ
-с названным возрастом. Это не защита от повтора — обе операции идемпотентны, и
-повтор безвреден, — а от документа, пролежавшего где-то и всплывшего.
-Доказательства владения ключом устройства распоряжения не требуют, как и
-решение автора (§10): подпись стоит ключом автора, и проверять надо её.
+An order is accepted only while FRESH: issue time differing from the server clock by more than the skew allowance (`MAX_CLOCK_SKEW_SECONDS`, five minutes) is rejected with its age stated. This protects against a document resurfacing after sitting somewhere, not replay — both operations are idempotent and replay harmless. Orders need no proof of possession of a device key, like an author decision (§10): they are signed with the author key, and that signature is what must be checked.
 
-`cca register` и `cca revoke` остаются операторскими командами того же сервера
-— для машины, где сервер и автор одно лицо и второй программы нет. Упаковка
-`cc protect --url` регистрирует по проводу и лишь при отказе зовёт `cca`
-рядом; `cc revoke` отзывает по проводу и тут же забирает отзывную (§6.1) —
-кладёт её рядом с контейнером.
+`cca register` and `cca revoke` remain operator commands for the same server — for a machine where author and server are the same person and no second program exists. Packaging with `cc protect --url` registers over the wire and calls a neighboring `cca` only after failure; `cc revoke` revokes over the wire and immediately retrieves the revocation notice (§6.1), placing it beside the container.
 
-### 9.4. Доказательство владения — запечатыванием, а не подписью
+### 9.4. Proof of possession — by sealing, not signing
 
-Устройство подписывать НЕ УМЕЕТ: его ключ согласовательный, `device_agreements`
-отдаёт только `KeyAgreement`, и слова `sign` в `cc-keystore` нет вовсе.
+A device CANNOT sign: its key is for agreement, `device_agreements` returns only `KeyAgreement`, and `cc-keystore` has no `sign` at all.
 
-Значит доказательство строится тем же примитивом, каким уже запечатана доля:
-сервер шлёт вызов, запечатанный на
-предъявленный ключ. Устройство возвращает ЭХО, а не сам вызов: HMAC-SHA256 с
-ключом = вызов (форма прообраза — ниже, K31). Бюджеты `max_devices` и
-`max_grants` расходуются только после сошедшегося эха.
+Proof therefore uses the primitive already sealing the share: the server sends a challenge sealed to the presented key. The device returns an ECHO, not the challenge itself: HMAC-SHA256 keyed by the challenge (input form below, K31). `max_devices` and `max_grants` budgets are consumed only after the echo matches.
 
-Тот же приём, применённый к обоим ключам сразу, закрывает и разрыв между
-`device_fpr` и ключом из `--device-tpm-key`, который сервер сегодня не проверяет
-ничем.
+Applied to both keys simultaneously, the same technique also closes the gap between `device_fpr` and the `--device-tpm-key` key, which the server currently checks by no means.
 
-Сам вызов остаётся секретом двух сторон и становится материалом K24 — ключа
-MAC сессии. Эхо всегда ровно 32 байта; аппаратная половина 64-байтового вызова
-входит в ключ HMAC, не в длину эха. Проверка — одно сравнение `digest_eq` над
-32 байтами. Просьба и подписка не доказывают владение: просит неизвестное
-устройство, подписка несёт лишь извещение. Распоряжение заверено подписью
-автора. Они не получают MAC сессии; K25 покрывает только Activate и Renew.
+The challenge remains secret between the two parties and becomes material for K24 — the session MAC key. The echo is always exactly 32 bytes; the hardware component of the 64-byte challenge contributes to the HMAC key, not echo length. Verification is one `digest_eq` comparison over 32 bytes. Requests and subscriptions do not prove possession: an unknown device requests, and a subscription carries only notifications. Orders are authenticated with the author's signature. These receive no session MAC; K25 covers only Activate and Renew.
 
-**Секрет ВЫВОДИТСЯ, а не берётся из генератора (с 2026-09-20, K30).** Сервер
-тянет из генератора 32 байта ЗАСЕВА и разворачивает секрет производной K30
-(`docs/format.md` §3.5 и раздел «СВЕЖЕСТЬ СЕРВЕРА ВЫВОДИТСЯ 2026-09-20»):
-`kind = 2`, в прообразе — засев, показания часов сервера и отпечаток
-устройства; половин столько же, сколько предъявленных ключей, и разводит их
-счётчик внутри `HKDF-Expand`. Довод тот же, что у засевов nonce (И-1, С-13):
-генератор повторяется при откате снапшота, а вместе с ним откатывается и
-состояние сервера, поэтому повторившийся секрет означал бы повторившееся эхо
-(K23) и повторившийся ключ MAC сессии (K24) для того же отпечатка. Цена
-повтора и границы защиты названы там же, в разделе-решении.
+**The secret is DERIVED, not taken directly from the generator (since 2026-09-20, K30).** The server draws 32 SEED bytes and expands the secret through K30 (`docs/format.md` §3.5 and “SERVER FRESHNESS IS DERIVED 2026-09-20”): `kind = 2`; the input contains the seed, server clock reading, and device fingerprint; there is one component per presented key, separated by the counter inside `HKDF-Expand`. The reasoning matches nonce seeds (I-1, S-13): the generator repeats after snapshot rollback, together with server state, so a repeated secret would mean a repeated echo (K23) and repeated session MAC key (K24) for the same fingerprint. The decision section also states the cost of repetition and protection boundaries.
 
-**Устройству и посреднику это НЕ видно и видно быть не должно.** Секрет
-приходит запечатанным, как и раньше; ни формат `Challenge`, ни длина эха, ни
-проверка не меняются. Получатель значение не вычисляет — он его открывает.
+**The device and intermediary do NOT see this and must not see it.** The secret arrives sealed as before; the `Challenge` format, echo length, and verification do not change. The recipient does not compute the value — it opens it.
 
-Флаг-день 2026-09-08: старое сырое 32-байтовое эхо получает `NotProven`,
-старое 64-байтовое аппаратное эхо отвергается разборщиком по длине.
-Совместимости нет: принять сырой вызов означало бы раскрыть посреднику K24
-и вернуть понижение защиты. Версия контейнера при этой смене протокола не меняется.
+Flag day 2026-09-08: the old raw 32-byte echo receives `NotProven`; the old 64-byte hardware echo is rejected by the length parser. No compatibility: accepting a raw challenge would disclose K24 to an intermediary and restore the downgrade. The container version does not change with this protocol change.
 
-**Эхо считается по ТРАНСКРИПТУ РАЗГОВОРА (с 2026-09-21, K31).** До этого дня
-эхо было `HMAC(секрет, "CC/v1/prove-echo" ‖ device_fpr)` и не зависело от
-разговора ничем, кроме самого секрета: записанное с провода, оно годилось в
-любом другом разговоре того же устройства, где секрет повторился. Теперь
-прообраз включает хеш рукопожатия, и обе стороны считают его одинаково:
+**The echo covers the CONVERSATION TRANSCRIPT (since 2026-09-21, K31).** Until then, it was `HMAC(secret, "CC/v1/prove-echo" ‖ device_fpr)`, depending on the conversation only through the secret itself: a captured echo worked in any other conversation by that device where the secret repeated. Now the input includes the handshake hash, computed identically by both parties:
 
 ```
-транскрипт = "CC/v1/echo-transcript" ‖ 0x00 ‖
+transcript = "CC/v1/echo-transcript" ‖ 0x00 ‖
              u32le(len(hello)) ‖ hello ‖ u32le(len(challenge)) ‖ challenge
-handshake  = SHA-256(транскрипт)
-эхо        = HMAC-SHA256(ключ = секрет вызова,
+handshake  = SHA-256(transcript)
+echo       = HMAC-SHA256(key = challenge secret,
                          "CC/v1/echo-transcript" ‖ device_fpr ‖ handshake)
 ```
 
-`hello` — СЫРЫЕ байты кадра приветствия (`вид ‖ TLV`), `challenge` — СЫРЫЕ байты
-кадра вызова (`вид ‖ TLV`), в том порядке, в каком они прошли по проводу.
-Именно сырые: пересборка из разобранного разошлась бы с посредником молча
-(довод И-5). Длины обязательны — без них байты переносились бы из одного кадра
-в другой, не меняя хеша.
+`hello` is the RAW greeting-frame bytes (`kind ‖ TLV`); `challenge` is the RAW challenge-frame bytes (`kind ‖ TLV`), in wire order. Specifically raw: reconstruction from parsed data would silently diverge in the presence of an intermediary (I-5 rationale). Lengths are mandatory — without them bytes could move between frames without changing the hash.
 
-**Кто что держит.** Сервер запоминает `handshake` вместе с отпечатком, на
-который выдал вызов, — одной величиной, чтобы они не разъехались
-(`Session::greeted`, `crates/cc-authority/src/serve.rs`), и передаёт его в
-`Authority::prove` обязательным параметром: транскрипт знает транспорт, а не
-`Authority`, и забыть привязку невозможно — её нечем не передать. Устройство
-считает `handshake` по кадру, который ОТПРАВИЛО, и кадру, который ПОЛУЧИЛО
-(`cc_cli::activate::greet`). Разойдись байты по дороге — эхо честного
-устройства не сойдётся, и отказ будет именно «не доказано», а не отказ разбора
-и не паника.
+**Who holds what.** The server remembers `handshake` together with the fingerprint it challenged, as one value so they cannot diverge (`Session::greeted`, `crates/cc-authority/src/serve.rs`), and passes it to `Authority::prove` as a required parameter: transport knows the transcript, not `Authority`; forgetting the binding is impossible because it cannot be omitted. The device computes `handshake` from the frame it SENT and the frame it RECEIVED (`cc_cli::activate::greet`). If bytes diverge in transit, the honest device's echo will not match; failure is specifically “not proven,” not a parse failure or panic.
 
-Тогда эхо, записанное в одном разговоре, не подходит к другому даже при
-повторившемся секрете: сервер в каждом разговоре запечатывает заново, эфемерная
-пара `Seal` своя, и кадр вызова расходится байтами. Границы гарантии и оценка
-того, что решение НЕ даёт, — `docs/format.md`, раздел «ЭХО ПРИВЯЗАНО К
-РАЗГОВОРУ 2026-09-21».
+An echo captured in one conversation therefore does not fit another even if the secret repeats: the server seals afresh in each conversation, with its own ephemeral `Seal` pair, and the challenge-frame bytes differ. Guarantee boundaries and what this decision does NOT provide are in `docs/format.md`, “ECHO BOUND TO THE CONVERSATION 2026-09-21.”
 
-**Ключ MAC сессии (K24) привязкой не покрыт намеренно.** Он выводится из
-секрета, а секрет достаётся только держателю приватного ключа устройства; эхо
-его не выдаёт. Противник, неспособный составить привязанное эхо, неспособен и
-вывести K24, поэтому второй замок на той же двери не заводится — разбор цены и
-выгоды в том же разделе спеки.
+**The session MAC key (K24) is deliberately not covered by this binding.** It derives from the secret, available only to the holder of the device private key; the echo does not disclose it. An adversary unable to construct the bound echo also cannot derive K24, so a second lock on the same door is not introduced — the same specification section discusses costs and benefits.
 
-**Флаг-день 2026-09-21.** Эхо старой формы (K23) сервер **отвергает**:
-переходного периода нет, продукт не выпущен, клиент и сервер уезжают одним
-пакетом (правило Р-3). Метка `"CC/v1/prove-echo"` и производная остаются в
-реестре помеченными «не используется протоколом», ради замороженного вектора.
+**Flag day 2026-09-21.** The server **rejects** old-form echoes (K23): there is no transition period; the product is unreleased; client and server ship together (rule R-3). Label `"CC/v1/prove-echo"` and the derivation remain in the registry marked “not used by the protocol,” for the frozen vector.
 
 
-### 9.5. Что обязано быть починено ДО того, как порт откроется
+### 9.5. What must be fixed BEFORE the port opens
 
-**Номер элемента в файле состояния — `u16`.** Отказные активации пишутся в
-журнал; 65536 записей — и `save()` начинает отказывать, то есть сохранение
-состояния ломается навсегда. Пока запросы приносит человек, это недостижимо; с
-сокетом это дешёвый и необратимый отказ в обслуживании. Чинить после открытия
-порта значит открыть порт с известной поломкой.
+**The item number in the state file is `u16`.** Refused activations are journaled; after 65536 records, `save()` begins failing, permanently breaking state persistence. With human-submitted requests this is unreachable; with a socket it is a cheap, irreversible denial of service. Fixing it after opening the port means opening with a known defect.
 
-Отказ при этом приходит не тихо — он печатается, — но ПОЗДНО: лизинг уже выдан, а
-состояние не сохранено.
+The failure is not silent — it is printed — but comes TOO LATE: the lease has already been issued while state has not been saved.
 
-### 9.6. Чего транспорт НЕ даёт
+### 9.6. What transport does NOT provide
 
-Полная картина по всем противникам — `docs/threat-model.md`; здесь только то,
-что относится к транспорту.
+The complete adversary picture is in `docs/threat-model.md`; only transport-specific limits appear here.
 
-* **мгновенного отзыва.** Уже выданный лизинг действует до истечения; поле
-  `revoked` сервер пишет `false` всегда, и производителя у него нет;
-* **защиты от владельца машины** — она невозможна по построению;
-* **приватности метаданных запроса** — без TLS сервер и всякий на пути видят,
-  кто и когда активирует какой файл;
-* **подлинности извещений** — `Notice` не подписан. Поэтому просмотрщик
-  закрывает документ по ОТЗЫВНОЙ, проверенной ключом из заголовка, а не по
-  извещению: поддельное извещение — повод спросить, не приговор (Н-5). Скрыть
-  извещение посредник может; настоящий отзыв дойдёт отказом в продлении (Ф-18).
+* **instant revocation.** An issued lease lasts until expiry; the server always writes `revoked` as `false`, and there is no producer of a true value;
+* **protection from the machine owner** — impossible by construction;
+* **request-metadata privacy** — without TLS, the server and everyone on the path see who activates which file and when;
+* **notification authenticity** — `Notice` is unsigned. The viewer therefore closes the document on a REVOCATION NOTICE verified with the header key, not a notification: a forged notification is reason to ask, not a verdict (N-5). An intermediary can suppress notification; actual revocation arrives as a renewal refusal (F-18).
 
-**Закрыто 2026-09-08: целостность ЗАПРОСА.** K25 (`docs/format.md` §3.5)
-покрывает `Activate` и `Renew` после `Prove`: подмена или удаление показаний
-часов отвергается до разбора и изменения состояния. Метаданные остаются
-открытыми. Просьба, подписка и распоряжения этим MAC не покрыты (§9.4).
+**Closed on 2026-09-08: REQUEST integrity.** K25 (`docs/format.md` §3.5) covers `Activate` and `Renew` after `Prove`: substituting or removing clock readings is rejected before parsing and state changes. Metadata remains plaintext. Access requests, subscriptions, and orders are not covered by this MAC (§9.4).
 
-**Что закрыто криптообзором 2026-09-06 на проводе.** Вызовы доказательства
-владения живут у РАЗГОВОРА, а не у отпечатка: отпечаток публичен, и чужое
-приветствие с ним больше не гасит чужой вызов (Н-3). Активация и продление с
-механизмом, отличным от 1, отвергаются на проводе, как уже отвергалась просьба:
-при P-256 присланный ключ ничем не связан с доказанным отпечатком (Н-1). Запись
-файла без ключа автора не присваивается первым допущенным автором с тем же
-`file_id` (Н-6). Сверка отпечатка с ключом у просьбы — равенство публичных
-величин, владения не доказывает, и комментарии, утверждавшие обратное,
-исправлены (Н-4).
+**Wire issues closed by the crypto review of 2026-09-06.** Proof-of-possession challenges belong to the CONVERSATION, not the fingerprint: fingerprints are public, and another party's greeting using one no longer cancels its owner's challenge (N-3). Activation and renewal with a mechanism other than 1 are rejected on the wire, as requests already were: with P-256 the supplied key is not bound to the proved fingerprint (N-1). A file record without an author key is not claimed by the first admitted author using the same `file_id` (N-6). Comparing a request's fingerprint with its key is equality of public values, not proof of possession; comments claiming otherwise were corrected (N-4).
 
-### 9.7. Что меняется в модели угроз, и это не мелочь
+### 9.7. What changes in the threat model — no small matter
 
-Сама модель — `docs/threat-model.md`, строки «наблюдатель провода» и
-«скомпрометированный сервер».
+The model itself is in `docs/threat-model.md`, rows “wire observer” and “compromised server.”
 
-Сегодня сервер узнаёт о файле, только когда автор сам приносит ему контейнер.
-С транспортом он видит активации в реальном времени — кто, когда, какой файл, с
-какого адреса. Это продаётся как аудит и является слежкой; обе стороны верны.
+Today the server learns about a file only when its author brings the container. With transport it sees activations in real time — who, when, which file, from which address. This is sold as auditing and is surveillance; both descriptions are true.
 
-Обязано быть записано до первой строки сетевого кода: перечень полей записи
-активации, включая сетевой адрес, и срок их хранения. Журнал при этом
-по-прежнему знает ВЫДАЧИ, а не открытия, — и это свойство конструкции, а не
-недоделка: обратного канала нет, а завести его нечем, пока ключ устройства не
-умеет подписывать.
+Before the first networking line is written, the activation-record fields, including network address, and their retention period must be recorded. The journal still knows about GRANTS, not openings — a construction property, not unfinished work: there is no return channel, and none can be added while the device key cannot sign.
 
-### 9.8. Что НЕ включается вместе с транспортом
+### 9.8. What is NOT introduced with transport
 
-* **отзыв внутри лизинга** (`status = 2`): он сделает `epoch` ненулевой и
-  отменит объяснение, записанное в `oc-policy` и в §3;
-* **серверное ужесточение политики**: тронет провод, а формат лизинга заморожен
-  вектором `tests/kat/lease.kat` (И-14);
-* **обратный канал счёта открытий**: упирается не в транспорт, а в отсутствие
-  подписи у устройства, и даже с ней это наблюдаемость, а не гарантия.
+* **revocation inside the lease** (`status = 2`): it would make `epoch` nonzero and invalidate the explanation in `oc-policy` and §3;
+* **server-side policy tightening**: it would affect the wire, while the lease format is frozen by `tests/kat/lease.kat` (I-14);
+* **a return channel counting openings**: the obstacle is not transport but the device's lack of signing, and even with signing it would provide observability, not a guarantee.
 
-### 9.9. Подписка — решение 2026-09-02
+### 9.9. Subscription — decision of 2026-09-02
 
-Решение заказчика по существу: сервер должен сообщать о событии сам, а не
-ждать вопроса. Записано здесь, потому что оно трогает провод — новый вид
-запроса и новый вид ответа в общем реестре (`oc_protocol::activation`, виды 17
-и 18; подписка по области автора — вид 30, B5, ниже).
+The customer's substantive decision: the server must announce events itself rather than wait to be asked. Recorded here because it changes the wire — a new request kind and response kind in the common registry (`oc_protocol::activation`, kinds 17 and 18; author-scope subscription is kind 30, B5 below).
 
-**Что берём (вторая редакция, тот же день).** `Watch { files, since }` первым
-сообщением соединения — до 32 файлов и номер первой ещё не виденной записи
-журнала (ноль — с начала; номера идут с нуля); в ответ — поток `Notice`: сердцебиение раз в двадцать пять секунд и
-`Event { seq, event, file_id, device_fpr }` — ЗАПИСИ ЖУРНАЛА сервера по
-названным файлам, сначала всё после `since`, потом живое. Подписка — хвост
-журнала, и обрыв поэтому ничего не теряет по построению: переподписался с
-последним номером — получил пропущенное. Тем же хвостом доходит сделанное
-другим процессом, например отзыв оператора: подписка перечитывает журнал по
-побудке и не реже раза в полминуты. Ради этого просьба и решение автора
-теперь тоже пишутся в журнал (события 9 и 10); номера событий на проводе —
-те же, что в журнале, и это сторожится пробой. Незнакомый номер подписчик
-пропускает, а не отвергает: журнал вправе расти. Первая редакция с тремя
-видами извещений («просьба», «решение», «отзыв») сожжена тем же днём: она
-теряла события при обрыве и не видела действий оператора.
+**What we use (second revision, same day).** `Watch { files, since }` as the connection's first message — up to 32 files and the number of the first unseen journal record (zero means from the beginning; numbering starts at zero); response: a `Notice` stream, with a heartbeat every twenty-five seconds and `Event { seq, event, file_id, device_fpr }` — server JOURNAL RECORDS for the named files, first everything from `since`, then live events. A subscription tails the journal, so disconnection loses nothing by construction: resubscribe with the last number and receive what was missed. The same tail delivers actions by another process, such as operator revocation: the subscription rereads the journal on wakeup and at least every half-minute. For this reason requests and author decisions are now journaled too (events 9 and 10); wire event numbers match journal event numbers, guarded by a test. Subscribers skip unknown numbers instead of rejecting them: the journal may grow. The first revision, with three notification types (“request,” “decision,” “revocation”), was discarded the same day: it lost events on disconnection and missed operator actions.
 
-Срок подписки — час, потом сервер закрывает её; клиентская половина
-(`cc_cli::activate::watch_forever`) переподписывается сама с курсором и
-растущей паузой с дрожанием — от пяти секунд до минуты. Потолки — 64
-подписки на сервер и 8 на файл; личность подписчика ПО ФАЙЛАМ не проверяется,
-как и у `Requests`: извещение — сигнал спросить, а не содержимое, и решение
-по-прежнему забирается `Collect` с доказательством владения. Подписка по
-области «файлы автора» — другое дело: её права не выводятся из знания номеров,
-и она требует доказательства владения ключом автора (ниже, B5).
+A subscription lasts one hour, then the server closes it; the client side (`cc_cli::activate::watch_forever`) automatically resubscribes with its cursor and an increasing jittered delay from five seconds to one minute. Limits: 64 subscriptions per server, 8 per file; subscriber identity for FILE subscriptions is not verified, just as for `Requests`: notification signals a query, not content, and decisions still require `Collect` with proof of possession. The “author's files” scope is different: authorization is not derived from knowing identifiers and requires proof of possession of the author key (B5 below).
 
-**Чего НЕ берём: WebSocket.** Он даёт проход через HTTP-прокси и работу из
-браузера, а ни того, ни другого у продукта нет; он вернул бы HTTP-рукопожатие,
-новую зависимость и спор о TLS, закрытый в §9.2. Подписка — те же кадры, тот же
-реестр видов, ноль новых зависимостей.
+**What we do NOT use: WebSocket.** It provides HTTP-proxy traversal and browser access, neither present in this product; it would reintroduce an HTTP handshake, a new dependency, and the TLS debate settled in §9.2. Subscriptions use the same frames and kind registry, with zero new dependencies.
 
-**Что пришлось изменить в приёме.** До этого дня соединения обслуживались
-строго по одному, и подписка заперла бы всех. Теперь поток на соединение;
-разговоры, меняющие состояние, — под одним замком, то есть по-прежнему по
-одному (состояние живёт на диске и перечитывается перед каждым); подписка ждёт
-извещений ВНЕ замка. Измерено пробой `crates/cc-authority/tests/watch.rs`:
-при открытой подписке просьба и решение по другим соединениям проходят;
-подписчик с нуля получает историю (регистрацию файла), затем просьбу и
-решение с отпечатком того устройства, о котором решили, с растущими
-номерами; подписка «после просьбы» досылает решение и не досылает просьбу —
-ровно то, что видит оборвавшийся и переподписавшийся клиент.
+**What had to change in connection handling.** Until this date, connections were strictly sequential, so one subscription would block everyone. Now there is a thread per connection; state-changing conversations use one lock and remain sequential (state lives on disk and is reread before each); subscriptions wait OUTSIDE the lock. Measured by `crates/cc-authority/tests/watch.rs`: with a subscription open, requests and decisions on other connections succeed; a subscriber from zero receives history (file registration), then request and decision with the affected device's fingerprint and increasing numbers; a subscription “after the request” delivers the decision but not the request — exactly what a disconnected, resubscribing client sees.
 
-**Кто слушает.** Окно запроса доступа (решение автора — забрать сразу, а не
-через двадцать секунд), просмотрщик получателя (отзыв доходит за полминуты, а
-не через окно без сети — обещание «не позже чем через N» при этом не меняется,
-подписка делает обычный случай быстрее), окно автора (новая просьба —
-обновить очередь). Опрос у всех троих остаётся запасным путём: он дёшев,
-проходит через любой NAT и работает, когда подписка порвалась.
+**Who listens.** The access-request window (retrieve the author's decision immediately rather than in twenty seconds), recipient viewer (revocation arrives within half a minute rather than after the offline window — the “no later than N” promise is unchanged; subscriptions speed up the usual case), and author window (refresh the queue on a new request). Polling remains a fallback for all three: inexpensive, works through any NAT, and survives a broken subscription.
 
-#### Подписка по области «файлы автора» — решение 2026-09-16 (B5)
+#### Subscription to the “author's files” scope — decision of 2026-09-16 (B5)
 
-**Что закрывает.** Подписка по файлам даёт до 32 файлов за соединение, и права
-на неё — знание `file_id`. Окно автора с сотней файлов видело не все, а файл,
-зарегистрированный после начала подписки, не наблюдался, пока окно не
-пересоздаст подписку. Область «все файлы этого автора» по знанию одного лишь
-публичного ключа открыла бы поток событий чужих файлов любому, кто ключ видел, —
-а видел его каждый получатель: ключ автора лежит в заголовке открыто.
+**What this addresses.** File subscriptions allow up to 32 files per connection and authorize by knowledge of `file_id`. An author window with a hundred files could not observe all of them; a newly registered file stayed unobserved until subscription recreation. Allowing “all files by this author” solely by knowledge of a public key would expose other people's file-event streams to anyone who had seen it — every recipient has, since the author key is public in the header.
 
-**Запрос.** Вид сообщения 30 `WatchAuthor`: `u64le since ‖ подписанное
-распоряжение`. Распоряжение — обычный документ §11 вида 12 `WatchAuthor`:
-`file_id` нулевой (область — все файлы ключа), `signer_key` обязателен (чья
-область), тег 20 `authority_key` обязателен (кому адресовано), `at` — момент
-выписки. У других видов тег 20 запрещён; вид 12 через дверь распоряжений
-(`Order`) не исполняется — это доказательство, а не веление.
+**Request.** Message kind 30 `WatchAuthor`: `u64le since ‖ signed
+order`. The order is the ordinary §11 document of kind 12 `WatchAuthor`: zero `file_id` (scope: all files of the key), required `signer_key` (whose scope), required tag 20 `authority_key` (addressee), and `at` (issue time). Tag 20 is forbidden for other kinds; kind 12 does not execute through the order entry point (`Order`) — it is proof, not a command.
 
-**Почему распоряжение, а не новый документ.** Контрольный документ у продукта
-один — распоряжение автора: подпись `verify_strict` (И-6) над транскриптом
-`"CC/v1/author-order"`, строгий разбор, состав полей по виду в обе стороны.
-Второй формат со своей меткой завёл бы второе определение того, «что автор
-подписал», и однажды они разошлись бы. Разделение доменов — байт вида внутри
-подписанного тела: доказательство подписки не исполняется как веление (дверь
-`Order` его отвергает), а веление не принимается как доказательство (подписка
-проверяет вид).
+**Why an order rather than a new document.** The product has one control document: the author's order, with `verify_strict` signature (I-6) over the `"CC/v1/author-order"` transcript, strict parsing, and kind-dependent field membership enforced both ways. A second format with its own label would introduce a second definition of “what the author signed,” and eventually they would diverge. Domain separation is the kind byte inside the signed body: subscription proof cannot execute as a command (the `Order` entry point rejects it); a command is not accepted as proof (subscription checks the kind).
 
-**Что проверяет сервер, по порядку.**
+**What the server checks, in order.**
 
-1. Подпись — ключом `signer_key`, `verify_strict`.
-2. `authority_key` — ключ подписи лизингов ЭТОГО сервера. У размещённого
-   профиля он свой у каждого арендатора, поэтому привязка к серверу есть и
-   привязка к арендатору: доказательство, снятое у одного, другой отвергнет.
-3. Свежесть — `|now − at| ≤ 300 с`, тот же допуск, что у распоряжений (§11).
-   Доказательство, пролежавшее дольше, отвергается: «позже» — отказ.
-4. Повтор — сервер помнит отпечатки принятых доказательств на двойное окно
-   свежести; тот же документ второй раз не открывает подписку. Память живёт в
-   процессе приёма и рестарта не переживает: доказательство, перехваченное в
-   последние пять минут перед рестартом, после рестарта принимается ещё раз.
-   Цена этого окна — поток событий по файлам автора (номера, виды, файлы,
-   отпечатки устройств) на срок одной подписки; содержимого и долей в нём нет, а
-   наблюдатель провода (модель угроз §2) видит тот же разговор и без повтора.
-5. Право — ключ записан автором хотя бы одного ЗАРЕГИСТРИРОВАННОГО и НЕ
-   замороженного файла этого сервера. Соавторы и одобряющие — не автор: их
-   область — файлы по номерам (§12 не даёт им ни наследства, ни отзыва чужого
-   ключа, и подписка по чужому ключу была бы именно этим).
+1. Signature — using `signer_key`, `verify_strict`.
+2. `authority_key` — THIS server's lease-signing key. In a hosted profile each tenant has its own, so server binding also binds the tenant: another tenant rejects proof captured at one.
+3. Freshness — `|now − at| ≤ 300 s`, the same allowance as orders (§11). Older proof is rejected: “later” means denial.
+4. Replay — the server remembers fingerprints of accepted proofs for twice the freshness window; the same document cannot open a subscription twice. This memory lives in the acceptor process and does not survive restart: proof intercepted during the five minutes before restart is accepted once again afterwards. The cost of this window is the author's file-event stream (numbers, kinds, files, device fingerprints) for one subscription's lifetime; it contains no content or shares, and a wire observer (threat-model §2) sees the same conversation even without replay.
+5. Authority — the key is recorded as author of at least one REGISTERED, NON-frozen file on this server. Co-authors and approvers are not the author: their scope is files by identifiers (§12 grants them neither inheritance nor revocation of another key; subscribing by another's key would amount to precisely that).
 
-   *Следствие для подписчика, найденное пробой 2026-09-21.* Момент `at` — целые
-   секунды, а подпись Ed25519 детерминирована: два доказательства одного ключа
-   одному серверу, выписанные в одну секунду, совпадают байт в байт, и второе
-   отвергается этим пунктом. Клиент продукта переподписывается с паузой в пять
-   секунд и этого не встречает; подписчик, зовущий подписку в цикле, обязан
-   выписывать `at` строго больше предыдущего (`cc_sdk::author::fresh_proof_moment`).
-   Правило провода от этого не меняется.
+   *Subscriber consequence found by a test on 2026-09-21.* `at` uses whole seconds, and Ed25519 signatures are deterministic: two proofs from the same key for the same server issued within one second are byte-identical, so the second is rejected by this rule. The product client resubscribes after five seconds and never encounters this; a subscriber calling in a loop must issue an `at` strictly greater than its predecessor (`cc_sdk::author::fresh_proof_moment`). This does not change the wire rule.
 
-**Вычисление области.** Сервер берёт файлы ключа на КАЖДОМ шаге хвоста журнала,
-а не на входе: файл, зарегистрированный после начала подписки, приходит без
-переподписки — регистрация будит подписки своего автора сразу, прочие шаги —
-побудкой по файлу или опросом не реже раза в 30 с.
+**Scope calculation.** The server obtains the key's files on EVERY journal-tail step, not just at entry: a file registered after subscription begins arrives without resubscription — registration immediately wakes that author's subscriptions; other steps use per-file wakeups or polling at least every 30 s.
 
-**Отзыв права.** Право перепроверяется на каждом шаге. Кнопка паники автора
-(`Freeze`, §11.9) закрывает его подписки: замороженный ключ — ключ, который
-автор сам счёл, возможно, утраченным, и поток его событий тому, кто держит
-ключ, больше не идёт. Новая подписка до оттепели отвергается. Закрытие —
-ответ `Denied` с причиной и разрыв; клиент не переподписывается молча.
-Уход подписчика освобождает место за секунду (`LIVENESS_CHECK`).
+**Revoking authority.** Authority is rechecked at every step. The author's panic button (`Freeze`, §11.9) closes their subscriptions: a frozen key is one the author themselves considers potentially lost, and its event stream no longer reaches its holder. New subscriptions are denied until thaw. Closure is a `Denied` response with a reason and disconnection; the client does not silently resubscribe. Subscriber departure frees a slot within one second (`LIVENESS_CHECK`).
 
-**Курсор.** `since` — первая ещё не виденная запись. Курсор ВПЕРЕДИ журнала
-сервера (чужой сервер, откат состояния) — отказ с названием длины журнала, а
-не молчаливое ожидание: подписчик иначе пропустил бы всё между концом журнала
-и своим курсором. То же правило действует и для подписки по файлам.
+**Cursor.** `since` is the first unseen record. A cursor AHEAD of the server journal (different server, state rollback) is rejected with the journal length stated rather than silently waiting: otherwise the subscriber would miss everything between the journal end and its cursor. The same rule applies to file subscriptions.
 
-**Очередь.** Очередью служит журнал: в памяти на подписчика — одна пачка
-досылки (256 записей). Медленный подписчик упирается в предел записи в сокет
-(30 с), подписка закрывается, клиент переподписывается со своим курсором и
-получает недоставленное — потери нет, повторов нет.
+**Queue.** The journal is the queue; memory holds one catch-up batch per subscriber (256 records). A slow subscriber hits the socket-write deadline (30 s); the subscription closes, the client resubscribes using its cursor and receives undelivered entries — no loss or duplicates.
 
-**Потолки.** 64 подписки на сервер (общие с подписками по файлам), 8 на ключ
-автора. Подписки ждут вне замка и берут его на миг досылки; насыщение пула не
-задерживает выдачу, продление и отзыв других клиентов — это проверяется пробой
-с утверждением времени.
+**Limits.** 64 subscriptions per server (shared with file subscriptions), 8 per author key. Subscriptions wait outside the lock and briefly acquire it to catch up; a saturated pool does not delay other clients' grants, renewals, or revocations — checked by a test with a timing assertion.
 
-**Совместимость.** Сервер прежней сборки отвечает на вид 30 отказом «незнакомое
-сообщение»; клиент продукта называет это словами и переходит на подписку по
-файлам ЯВНО, с пометкой в окне, — не молча.
+**Compatibility.** An older server answers kind 30 with “unknown message”; the product client states this explicitly and switches to file subscriptions with a visible window indication, not silently.
 
-### 9.10. Тождество операции — решение 2026-09-15
+### 9.10. Operation identity — decision of 2026-09-15
 
-**Что закрывает.** Стенд A2b нашёл, что выдача, зафиксированная сервером до
-ответа, при повторе клиента выдаётся второй раз: вторая запись «лицензия
-выдана», расход предела выдач, а однократный файл получатель, так и не
-получивший лизинга, теряет навсегда (A2b-1). И нашёл, что таблица операций
-хранилища на проводном пути не пишется вовсе (A2b-2). Инвентаризация всех
-меняющих состояние операций провода (`docs/managed-store-contract.md` §5.3)
-показала больше: журнал удваивают голос одобряющего и подпись под предложением
-даже на повторе ТЕХ ЖЕ байтов, а решение автора на повторе теряет исход.
+**What this addresses.** Test bench A2b found that a grant committed before the server response was issued twice upon client retry: a second “license issued” record, grant-limit consumption, and permanent loss of a one-time file for a recipient who never received the lease (A2b-1). It also found that the storage operations table was never written on the wire path (A2b-2). An inventory of all state-changing wire operations (`docs/managed-store-contract.md` §5.3) found more: an approver vote and a proposal signature duplicate journal entries even when EXACTLY THE SAME bytes are replayed, and an author decision loses its outcome on retry.
 
-До этого решения безопасный повтор не обещался (`managed-store-contract.md` §5),
-и «перечитать исход» клиенту было нечем: ни один запрос не называет устройству,
-записана ли его выдача.
+Before this decision, safe retry was not promised (`managed-store-contract.md` §5), and a client had no way to “reread the outcome”: no request told a device whether its grant had been recorded.
 
-**Тождество одно на операцию, выражений у него два, таблица одна.**
+**One identity per operation, two expressions, one table.**
 
-* **Явное** — поле `operation_id` в теле `Activate` и `Renew`. Тело запроса
-  активации НЕ подписанный документ и законно повторяется разными операциями:
-  устройство без часов шлёт в понедельник и во вторник байт в байт одинаковые
-  активации. Различить их может только идентификатор, который клиент выбрал
-  на эту операцию.
-* **Выведенное** — у запросов, чьё тело есть подписанный документ автора:
-  `Register`, `Revoke`, `Order`, `Endorse`, `Decide`. Тождество —
-  `SHA-256(u8(kind) ‖ тело)`: подпись Ed25519 детерминирована, у распоряжения
-  есть момент выписки, и одинаковые байты означают одно веление
-  (`managed-store-contract.md` §5.1). Нового поля у них нет — провод этих
-  запросов не меняется.
+* **Explicit** — the `operation_id` field in `Activate` and `Renew` bodies. The activation body is NOT a signed document and may legitimately repeat across operations: a clockless device sends byte-identical activations on Monday and Tuesday. Only a client-chosen identifier for this operation distinguishes them.
+* **Derived** — for requests whose body is a signed author document: `Register`, `Revoke`, `Order`, `Endorse`, `Decide`. Identity is `SHA-256(u8(kind) ‖ body)`: Ed25519 signatures are deterministic, orders contain an issue time, and identical bytes mean one command (`managed-store-contract.md` §5.1). They gain no new field — their wire representation is unchanged.
 
-**K28 — из засева и тела, а не голые случайные байты** (`docs/format.md` §3.5):
+**K28 — from a seed and body, not bare random bytes** (`docs/format.md` §3.5):
 
 ```
-operation_id = SHA-256("CC/v1/operation-id" ‖ 0x00 ‖ seed(32) ‖ u8(kind) ‖ тело без поля тождества)
+operation_id = SHA-256("CC/v1/operation-id" ‖ 0x00 ‖ seed(32) ‖ u8(kind) ‖ body without the operation-id field)
 ```
 
-Довод тот же, что у засевов nonce (И-1, С-13): генератор повторяется при откате
-снапшота ВМ и клоне образа, и голое случайное значение совпало бы у двух разных
-запросов — второй получил бы сохранённый исход первого. Тело в засеве разводит
-разные запросы и при повторившемся генераторе; совпадают только одинаковые, и
-для них общий исход — правда. Вид входит в засев потому, что тело у активации
-и продления одно. Секрета в тождестве нет: оно идёт по проводу открыто, от него
-требуется единственность, а не непредсказуемость. Вектор — `tests/kat/operation_id.kat`.
+The rationale matches nonce seeds (I-1, S-13): the generator repeats under VM snapshot rollback and image cloning; a bare random value would collide between two different requests, causing the second to receive the first's saved outcome. Including the body separates different requests even if the generator repeats; only identical requests coincide, for which a shared outcome is truthful. Kind is included because activation and renewal share a body. Identity contains no secret: it travels in plaintext and requires uniqueness, not unpredictability. Vector: `tests/kat/operation_id.kat`.
 
-**Байты** (`oc_protocol::activation`):
+**Bytes** (`oc_protocol::activation`):
 
-| Где | Тег | Длина | Смысл |
+| Where | Tag | Length | Meaning |
 |---|---|---|---|
-| тело `Activate`/`Renew` | 9 `operation_id` | ровно 32 | необязательное; последним, после часов (И-7). У `Renew` разбирается и не берётся: ответ без эха (ниже) |
-| выдача `Granted` | 3 `operation_id` | ровно 32 | эхо: выдача ЗАПИСАНА под этим тождеством |
-| отказ `Denied` | 2 `operation_id` | ровно 32 | эхо: сервер понял тождество, и отказ окончателен для этого запроса — под тождеством ему ничего не выдано (записан отказ или нет — ниже, правило 5) |
+| `Activate`/`Renew` body | 9 `operation_id` | exactly 32 | optional; last, after clocks (I-7). `Renew` parses but does not use it: response without echo (below) |
+| `Granted` grant | 3 `operation_id` | exactly 32 | echo: grant RECORDED under this identity |
+| `Denied` refusal | 2 `operation_id` | exactly 32 | echo: server understood the identity, and refusal is final for this request — nothing was granted under this identity (whether denial is recorded: rule 5 below) |
 
-Тег 9 **критичный** (≤ `0x7FFF`), и это выбор, а не умолчание: поле меняет смысл
-повтора. Сервер, не знающий поля и молча его пропустивший, исполнил бы повтор
-второй выдачей — ровно то, от чего клиент поле прислал. Критичное незнакомое
-поле — отказ разбора, то есть прежний сервер запрос с тождеством НЕ исполняет
-вовсе. Тождество лежит внутри тела и потому под MAC сессии (K25): посредник не
-подменит его, не сломав MAC.
+Tag 9 is **critical** (≤ `0x7FFF`), deliberately: the field changes retry semantics. A server unaware of it that silently skipped it would execute a retry as a second grant — exactly what the field prevents. An unknown critical field causes parse rejection, so an old server does NOT execute an identified request at all. Identity is inside the body and thus under the session MAC (K25): an intermediary cannot substitute it without breaking the MAC.
 
-Эхо приходит только на запрос с тегом 9: прежний клиент поля не присылает и эха
-не получает — его разборщик отверг бы незнакомый тег ответа. Эхо — сигнал
-ПОДДЕРЖКИ, а не доказательство: ответ провода не заверен (§9.6). Поэтому и
-обратное — отказ БЕЗ эха — ничего не доказывает, и клиент не выводит из него,
-что операция не исполнялась, если запрос с этим тождеством уже мог дойти до
-сервера (ниже, «Клиент»; ревью 2026-09-15).
+An echo appears only in response to tag 9: an old client sends no field and gets no echo — its parser would reject an unknown response tag. The echo signals SUPPORT, not proof: wire responses are unauthenticated (§9.6). Conversely, refusal WITHOUT an echo proves nothing; the client does not infer nonexecution from it if a request with this identity could already have reached the server (“Client” below; review of 2026-09-15).
 
-**Сервер.** Ключ таблицы — `(актор, тождество)`. Актор явного тождества —
-отпечаток, доказанный В ЭТОМ разговоре (`Proven::proves`): иначе чужой, назвавший
-то же тождество, прочёл бы чужой исход. Актор выведенного — 32 нуля: личность
-там в подписи, а подпись в теле, и прочитать исход может лишь тот, у кого уже
-есть эти байты. Хеш тела — `SHA-256(u8(kind) ‖ тело)`, без MAC: MAC у каждого
-разговора свой.
+**Server.** Table key: `(actor, operation ID)`. The actor of an explicit identity is the fingerprint proved IN THIS conversation (`Proven::proves`): otherwise someone naming the same identity could read another's outcome. The actor of a derived identity is 32 zero bytes: identity resides in the signature, which resides in the body; only someone already holding those bytes can read the outcome. Body hash: `SHA-256(u8(kind) ‖ body)`, without MAC — each conversation has its own MAC.
 
-1. Проверки разговора — механизм, имя ключа (K27), доказанность — идут ДО
-   таблицы; их отказы тождество не видят и эха не несут. Продление (`Renew`)
-   тождества не берёт вовсе: двойного эффекта у него нет, а записи продлений
-   занимали бы места защищённых выдач (ниже).
-2. Записи нет — сначала **приём тождества**: если исполнение может дать
-   защищённую выдачу (файл с пределом выдач), под неё обязано найтись место
-   (ниже, «Хранение»). Места нет — названный отказ «предел тождеств операций …
-   исчерпан» С ЭХОМ; ничего не исполнено и не записано, клиенту это
-   окончательный отказ. Место есть — операция исполняется; ответ выдачи целиком
-   (с эхом) ложится в состояние той же фиксацией, что и эффект: у файлового
-   хранилища — одной записью состояния через переименование, у SQL — одной
-   транзакцией, строкой таблицы `operations` (`op = Some` на проводном пути).
-   Ответ уходит после фиксации (правило 1 контракта).
-3. Запись с тем же хешем — возвращается сохранённый ответ байт в байт, ничего не
-   исполняется. У выдачи прежде заново проверяются отзыв, заморозка и срок
-   сохранённого лизинга: отозванному, замороженному, истёкшему — актуальный отказ
-   с эхом, не записываемый (§29.10 `deferred.md`, шаг 5: повтор не воскрешает
-   разрешение). Оттепель возвращает сохранённую выдачу снова.
-4. Запись с другим хешем — отказ «идентификатор операции уже использован другим
-   запросом» с эхом; не исполняется и не записывается.
-5. **Отказ у явного тождества — всегда с эхом, записывается только изменивший
-   состояние; у выведенного — не записывается.** Отказ активации, записавший
-   журнал (предел устройств и выдач, часы, кворум, атрибуты), записывается,
-   чтобы его повтор вернул отказ, а не записал его снова. Отказ, НИЧЕГО не
-   изменивший («файла нет», чужая политика), не записывается: его повтор ничего
-   не повторяет, а запись позволяла заполнить таблицу любому, у кого есть ключ
-   (ревью 2026-09-15). Эхо у него остаётся: без эха клиент не отличил бы его от
-   подделанного в пути и после дошедшего запроса сообщал бы «исход неизвестен»
-   там, где он известен. Подписанные же байты решения законно приходят снова
-   ПОСЛЕ отказа — например, отправленные до регистрации файла, — а отказ
-   распоряжения эффекта не имеет.
+1. Conversation checks — mechanism, key name (K27), proof — precede the table; their failures do not see the identity and carry no echo. Renewal (`Renew`) does not use identity at all: it has no duplicate effect, and renewal records would occupy slots needed by protected grants (below).
+2. No record — first **admit the identity**: if execution may produce a protected grant (a file with a grant limit), space must be available (see “Storage”). No space — explicit “operation identity limit … exhausted” refusal WITH ECHO; nothing executes or is recorded, and this is a final refusal for the client. Space available — execute; the complete grant response (including echo) enters state in the same commit as the effect: one state-file write via rename for file storage; one SQL transaction with an `operations` table row (`op = Some` on the wire path). Respond after commit (contract rule 1).
+3. Record with the same hash — return the saved response byte-for-byte, execute nothing. For a grant, first recheck revocation, freeze, and saved-lease expiry: revoked, frozen, or expired yields a current refusal with echo, not recorded (§29.10 `deferred.md`, step 5: retry does not resurrect permission). Thaw restores the saved grant response.
+4. Record with a different hash — “operation identifier already used by another request,” with echo; neither execution nor recording.
+5. **An explicit-identity refusal always has an echo, but is recorded only if it changed state; a derived-identity refusal is not recorded.** An activation refusal that wrote to the journal (device and grant limits, clocks, quorum, attributes) is recorded so a retry returns the refusal instead of journaling it again. A refusal changing NOTHING (“no such file,” wrong policy) is not recorded: retry duplicates nothing, while recording let anyone with a key fill the table (review of 2026-09-15). Its echo remains: without it the client could not distinguish it from an in-transit forgery and, after a delivered request, would report “outcome unknown” where it is known. Signed decision bytes may legitimately arrive again AFTER refusal — for example, if sent before file registration — and a refused order has no effect.
 
-**Хранение: 24 часа по часам сервера и не больше 4096 записей на сервер.**
-Срок — вдвое больше окна, в котором клиент вправе повторить тем же тождеством
-(12 часов, ниже): запас на расхождение часов клиента и сервера, которые здесь
-не сверяются. Число — потолок состояния: ответ с долей и лизингом — до полутора
-килобайт у гибридного устройства, файл состояния переписывается целиком на
-каждой фиксации, и 4096 записей — единицы мегабайт; законная нагрузка первого
-профиля — сотни активаций в сутки. Записи старше срока убираются при записи
-новой.
+**Storage: 24 hours by the server clock, at most 4096 records per server.** Retention is twice the client's same-identity retry window (12 hours, below), allowing for client/server clock divergence, which is not checked here. The count bounds state size: a response with share and lease is up to one and a half kilobytes for a hybrid device; the state file is fully rewritten on each commit; 4096 records are a few megabytes; legitimate load for the first profile is hundreds of activations daily. Expired records are removed when a new one is written.
 
-**Кто сколько занимает — ревью 2026-09-15.** Первая редакция говорила «живые
-записи не вытесняются никогда; полная таблица — отказ без эха, клиент идёт
-прежним путём». Заполнить таблицу мог любой: доказательство владения проходит с
-ключом, порождённым тут же, и каждый отказ ложился в таблицу. После заливки
-законная активация шла прежним путём, где потерянный ответ и повтор — снова
-вторая выдача. Теперь записи различаются тем, чего стоит их потеря
-(`cc_authority::operations`):
+**Who occupies how much — review of 2026-09-15.** The first revision said “live records are never evicted; a full table yields denial without echo and the client takes the old path.” Anyone could fill it: proof of possession succeeds with a newly generated key, and every refusal entered the table. Once flooded, legitimate activation took the old path, where lost responses and retries again caused a second grant. Records are now distinguished by the cost of losing them (`cc_authority::operations`):
 
-| Запись | Потеря стоит | Доля и пределы | Места нет |
+| Record | Cost of loss | Allocation and limits | No space |
 |---|---|---|---|
-| **защищённая выдача** — выдача по файлу с пределом выдач | повтор тратит предел; на однократном файле — право | 3072 на сервер; 256 на доказанное устройство; на файл — сам предел выдач (каждая запись — выдача, которую он считает) и 1024 | не вытесняется; новое тождество — отказ «предел тождеств операций …» с эхом, ничего не исполнено |
-| **документ автора** (выведенное тождество) | лишнюю запись журнала на повторе тех же байтов, не доступ | 1024 на сервер; 64 на файл | исполняется без записи: отзыв и заморозку таблица не задерживает |
-| **вытесняемое** — отказ, записавший журнал; выдача по файлу без предела выдач | лишнюю запись журнала; номер лизинга на единицу больше. Предел устройств тратит только первое исполнение: повтор выдаётся уже известному устройству | свободное место | уступает место первым, старейшим вперёд |
-| отказ, ничего не изменивший | ничего | не записывается | — |
+| **protected grant** — grant for a file with a grant limit | retry consumes the limit; for a one-time file, the right itself | 3072 per server; 256 per proved device; per file: its grant limit (each record is a grant counted by it) and 1024 | not evicted; a new identity gets “operation identity limit …” with echo; nothing executes |
+| **author document** (derived identity) | extra journal record when identical bytes are retried, not access | 1024 per server; 64 per file | executes without recording: the table does not delay revocation or freeze |
+| **evictable** — refusal that wrote a journal entry; grant for a file without a grant limit | extra journal record; lease number one higher. The device limit is consumed only on first execution: retry grants to an already known device | available space | yields space first, oldest first |
+| refusal changing nothing | nothing | not recorded | — |
 
-Доли складываются в потолок ровно (3072 + 1024 = 4096): защищённой выдаче и
-документу, принятым в своих долях, место находится всегда — вытеснением
-вытесняемого. Класс выдачи берётся по пределу файла В МОМЕНТ подсчёта: автор,
-назначивший предел, делает прежние выдачи защищёнными с этой минуты.
+Allocations sum exactly to the cap (3072 + 1024 = 4096): a protected grant or document admitted within its allocation always finds space by evicting evictable records. Grant class uses the file limit AT COUNTING TIME: an author imposing a limit makes previous grants protected from that moment.
 
-Чего стоит заливка теперь. Отказы и выдачи по файлам без предела места не
-отнимают. Защищённые записи порождает только выдача по файлу с пределом выдач,
-то есть расход этого предела — ущерб, который держатель заголовка наносит файлу и
-без всякой таблицы. Исчерпать долю сервера может тот, кто получает выдачи по
-файлам с суммарным пределом не меньше 3072 (не больше 1024 с одного файла);
-законные активации файлов с пределом получают тогда названный отказ — отказ в
-доступности на сутки, а не вторую выдачу. Долю документов исчерпать может только
-подписант файлов.
+The cost of flooding now: refusals and unlimited-file grants take no reserved space. Only grants for grant-limited files create protected records, consuming that limit — damage a header holder can do even without the table. Exhausting the server allocation requires grants for files with combined limits of at least 3072 (no more than 1024 from one file); legitimate activations of limited files then get the explicit refusal — one day's availability denial, not a second grant. Only a file signer can exhaust the document allocation.
 
-**Клиент.**
+**Client.**
 
-* **`cc activate` и просмотрщик** (`obtain_and_store`): засев из генератора ОС,
-  K28 над телом без поля. ДО отправки — запись ожидающей операции в каталоге
-  ключей (`pending/activate-<file_id>.op`: тождество, тело, момент). Сбой
-  провода — повтор ТЕМ ЖЕ телом новым разговором (новое доказательство, новый
-  MAC), всего три попытки с паузами 1 и 2 с. Итог:
-  * выдача или отказ с эхом — исход окончателен, ожидающая операция стирается
-    (выдача — после записи лизинга на диск);
-  * отказ без эха на ПЕРВЫЙ запрос этого тождества, дошедший до сервера (операция
-    заведена этим процессом, и ни одна прежняя попытка не дошла до записи кадра
-    активации), — тождество сервера прежде не достигало: один запрос прежней
-    формы без поля; сбой провода после него НЕ повторяется — исход неизвестен,
-    код 6, и в тексте назван отказ без эха, из-за которого клиент пошёл прежним
-    путём;
-  * отказ без эха в ЛЮБОМ другом случае — после попытки, чей кадр активации мог
-    дойти, или на ожидающую операцию прежнего процесса — **исход неизвестен**:
-    прежняя попытка могла исполниться, а отказ без эха не заверен (подделан в
-    пути, эхо вырезано, сбой разговора). Ожидающая операция остаётся, код 6,
-    запроса без тождества нет (ревью 2026-09-15: прежде здесь шёл прежний путь —
-    вторая выдача, а сохранённая становилась недостижимой);
-  * попытки кончились — ожидающая операция остаётся; следующий `cc activate` того
-    же файла в течение 12 часов шлёт ТО ЖЕ тело (с прежними показаниями часов) и
-    получает сохранённый исход; позже — операция новая, и об этом сказано.
-  Ожидающая операция помнит отпечаток веления: файл, политику и слот сервера,
-  срок лизинга, механизм и ключ устройства (всё, кроме часов). Запуск с другими
-  параметрами СНАЧАЛА узнаёт исход прежней операции её же телом: выдача
-  принимается с прежними параметрами и названа (новый срок даёт продление, без
-  расхода предела), отказ с эхом — и тогда идёт новая операция с новыми
-  параметрами.
-  Полученный лизинг отмечается в ожидающей операции ДО подъёма планки номера:
-  тот же лизинг, полученный снова после аварии клиента между планкой и записью
-  файла, принимается, а не отвергается как проигранный.
-* **Продление тождества не несёт.** Двойного эффекта у него нет (§5.1), а
-  просмотрщик продлевает каждые несколько минут — тождество каждого продления
-  заполнило бы таблицу за сутки. Сервер тег 9 у продления разбирает и не берёт.
-  Повтор выдачи с истёкшим лизингом отказывает с советом продлить: устройство
-  этой выдачей уже активировано, и продление предела выдач не тратит.
-* **Распоряжения и решения автора** повторяются на сбое провода ТЕМИ ЖЕ байтами
-  (выведенное тождество) — три попытки, как у активации. Ожидающая операция
-  хранится у `cc approve`/`cc decline` (`decide-<file_id>-<номер>`), `cc revoke`,
-  `cc limits`, `cc coauthors`, `cc approvers`, `cc heir --device`,
-  `cc approve-open`: повтор той же команды с теми же параметрами в течение
-  12 часов шлёт прежние байты, и сервер отвечает прежним исходом. Отказ
-  повторённых байтов значит, что они не исполнялись (исполненное записано), —
-  тогда команда подписывает веление заново. Не хранится у `cc alive` и
-  `cc panic` — двойного эффекта у них нет, а прежний момент выписки датировал
-  бы присутствие не тем временем, — и у `cc heir --code`: коды не пишутся на
-  диск, и прежние завещания без них бесполезны.
+* **`cc activate` and viewer** (`obtain_and_store`): seed from the OS generator; K28 over the body without the field. BEFORE sending, write a pending operation in the key directory (`pending/activate-<file_id>.op`: identity, body, time). On wire failure, retry the SAME body in a new conversation (new proof, new MAC), three attempts total with 1 and 2 s pauses. Outcomes:
+  * grant or refusal with echo — final outcome; delete pending operation (for a grant, after writing the lease to disk);
+  * refusal without echo on the FIRST request under this identity to reach the server (created by this process; no earlier attempt reached writing the activation frame) — identity never previously reached the server: send one old-form request without the field; wire failure after that is NOT retried — unknown outcome, code 6, with text naming the no-echo refusal that triggered the old path;
+  * refusal without echo in ANY other case — after an attempt whose activation frame might have arrived, or for a previous process's pending operation — **unknown outcome**: the earlier attempt might have executed, and a no-echo refusal is unauthenticated (in-transit forgery, stripped echo, conversation failure). Keep pending operation, code 6, no request without identity (review of 2026-09-15: previously the old path ran here, issuing twice and making the saved grant unreachable);
+  * attempts exhausted — keep pending operation; the next `cc activate` for the same file within 12 hours sends the SAME body (with old clock readings) and receives the stored outcome; later, it is a new operation and this is stated.
+  The pending operation remembers the command fingerprint: file, policy, server slot, lease duration, device mechanism and key (everything except clocks). A run with different parameters FIRST resolves the prior operation using its own body: accept a grant under the prior parameters and state this (renewal obtains a new duration without consuming the limit); after a refusal with echo, start a new operation with the new parameters.
+  The received lease is marked in the pending operation BEFORE advancing the sequence threshold: the same lease received again after a crash between threshold advance and file write is accepted, not rejected as replayed.
+* **Renewal carries no identity.** It has no duplicate effect (§5.1); the viewer renews every few minutes, so identities for every renewal would fill the table in a day. The server parses tag 9 on renewal but does not use it. Replaying a grant whose lease has expired yields refusal advising renewal: that grant already activated the device, and renewal does not consume the grant limit.
+* **Author orders and decisions** retry the SAME bytes after wire failure (derived identity), three attempts as for activation. Pending operations are retained for `cc approve`/`cc decline` (`decide-<file_id>-<number>`), `cc revoke`, `cc limits`, `cc coauthors`, `cc approvers`, `cc heir --device`, `cc approve-open`: repeating the same command and parameters within 12 hours sends the previous bytes and receives the previous outcome. Refusal of repeated bytes means they did not execute (execution is recorded), so the command signs a fresh order. Not retained for `cc alive` or `cc panic` — no duplicate effect, and the old issue time would date presence incorrectly — or `cc heir --code`: codes are not written to disk, and old bequests without them are useless.
 
-**Совместимость.**
+**Compatibility.**
 
-| Клиент \ сервер | прежний (без таблицы) | с тождеством |
+| Client \ server | old (no table) | with identity |
 |---|---|---|
-| прежний | как было | как было: запрос активации без тождества исполняется без таблицы, повтор — вторая выдача; распоряжения прежнего клиента получают выведенное тождество (те же байты — тот же исход) |
-| новый | отказ разбора «неизвестное критичное поле 9» без эха → запрос прежней формы, повторов нет | тождество |
+| old | unchanged | unchanged: activation without identity executes without the table; retry means a second grant; old-client orders receive derived identity (same bytes, same outcome) |
+| new | parse refusal “unknown critical field 9” without echo → old-form request, no retries | identity |
 
-**Чего это не даёт.**
+**What this does not provide.**
 
-* Эхо не заверено. После запроса, который мог дойти, отказ без эха клиент
-  называет неизвестным исходом и прежним путём не идёт. Но на ПЕРВЫЙ дошедший
-  запрос активный посредник может ответить подделанным отказом без эха, пока
-  сервер исполняет подлинный запрос: клиент сочтёт сервер прежним и пошлёт один
-  запрос без тождества — это вторая выдача и расход предела. Отличить прежний
-  сервер от подделки на незаверенном проводе нечем; цена — атака активного
-  посредника на предел выдач жертвы, не доступ.
-* Доступность под заливкой: исчерпавший долю защищённых выдач (выше) лишает
-  законные активации файлов с пределом выдач места на сутки — они получают
-  названный отказ, не вторую выдачу.
-* Окно: повтор тем же тождеством позже 12 часов у клиента и 24 у сервера —
-  новая операция.
-* Два процесса одного устройства активируют один файл одновременно — две
-  операции и две выдачи, как до решения: ожидающая операция одна на файл.
-* Тождество не переживает потерю каталога ключей клиента; сервер без таблицы
-  (прежняя сборка) идемпотентности не даёт — клиент там не повторяет.
+* Echo is unauthenticated. After a possibly delivered request, the client treats refusal without echo as unknown and does not take the old path. But on the FIRST delivered request, an active intermediary can forge a no-echo refusal while the server executes the authentic request: the client assumes an old server and sends one request without identity — a second grant consuming the limit. An unauthenticated wire cannot distinguish an old server from forgery; the cost is an active-intermediary attack on the victim's grant limit, not access.
+* Availability under flooding: exhausting the protected-grant allocation (above) deprives legitimate activations of grant-limited files of space for a day — explicit refusal, not a second grant.
+* Window: retrying the same identity after 12 hours at the client and 24 at the server becomes a new operation.
+* Two processes on one device activating a file simultaneously mean two operations and two grants, as before: one pending operation per file.
+* Identity does not survive loss of the client's key directory; a server without the table (older build) provides no idempotence — the client does not retry there.
 
-### 9.11. Аттестация ключа устройства — модель доказательства (B6a, 2026-09-16)
+### 9.11. Device-key attestation — proof model (B6a, 2026-09-16)
 
-**Что закрывает.** Ступень привязки `HardwareAttested` (`docs/format.md` §4)
-была недостижима: клиент собирал конверт (`cc_keystore::attest`), проверяющий
-(`cc_authority::attest::verify`) заканчивал любой конверт отказом «проверка не
-написана». Проверка одного сертификата EK ничего не доказывает о КЛЮЧЕ
-УСТРОЙСТВА: сертификат говорит, что где-то есть такой TPM, но не что
-предъявленный ключ живёт в нём. Поэтому доказательство — цепочка, и признаётся
-она только целиком; любое непроверенное звено — `attested = false` с названной
-причиной, а не частичное доверие.
+**What this addresses.** Binding tier `HardwareAttested` (`docs/format.md` §4) was unreachable: the client built an envelope (`cc_keystore::attest`), but the verifier (`cc_authority::attest::verify`) ended every envelope with “verification not implemented.” Checking an EK certificate alone proves nothing about the DEVICE KEY: it establishes that such a TPM exists somewhere, not that the presented key resides in it. Proof is therefore a chain accepted only in full; any unverified link means `attested = false` with a stated reason, not partial trust.
 
-**Звенья, по порядку проверки.**
+**Links, in verification order.**
 
-1. **Доверенный ключ подтверждения (EK).** Две ступени доверия, и называются
-   они раздельно, потому что утверждают разное:
-   * **сертификат вендора** — сертификат EK (X.509, DER) с цепочкой до корня из
-     каталога развёртывания (`TrustAnchors`; пустой каталог — отказ, решение
-     2026-08-24). Утверждает: «этот EK выпущен производителем, которому
-     доверяет развёртывание»;
-   * **закреплённый EK** — открытый EK, записанный администратором при
-     вводе машины в эксплуатацию. Утверждает меньшее: «это тот самый TPM, что
-     был перед администратором», — и ничего о производителе. Нужен там, где
-     вендор сертификата не зашил (как на машине разработки: сертификата EK нет,
-     замер 2026-08-24).
-   Открытый ключ из сертификата обязан совпасть с открытым EK из конверта:
-   сертификат ЧУЖОГО TPM рядом со своим EK — отказ.
-2. **Ключ удостоверителя (AIK) принадлежит этому EK.** Проверяется АКТИВАЦИЕЙ
-   УЧЁТНЫХ ДАННЫХ (TPM2_MakeCredential / TPM2_ActivateCredential): сервер
-   шифрует случайный секрет на EK для имени AIK, и вернуть секрет может только
-   TPM, в котором живут оба. Выбор основан на том, что умеют обе стороны:
-   платформенный провайдер Windows активирует учётные данные свойством
-   `NCRYPT_PCP_TPM12_IDACTIVATION_PROPERTY` (имя историческое, для TPM 2.0 оно
-   же), а `tpm2-tools` — командами `makecredential`/`activatecredential`.
-   Сертификат AIK от стороннего удостоверяющего центра перенёс бы ту же
-   активацию к третьему лицу, не упростив проверку.
-   Форма учётных данных — TPM 2.0, часть 1, «Credential Protection»: семя
-   шифруется на EK (RSA-OAEP-SHA256, метка `"IDENTITY\0"`), симметричный ключ
-   `KDFa(SHA256, семя, "STORAGE", имя AIK, пусто, 128)`, учётные данные —
-   AES-128-CFB с нулевым IV, целостность — HMAC-SHA256 ключом
-   `KDFa(SHA256, семя, "INTEGRITY", пусто, пусто, 256)` над `encIdentity ‖ имя
-   AIK`. Поддерживается EK RSA-2048 (шаблон TCG по умолчанию); EK на кривой —
-   названный отказ, пока его не потребует живая машина.
-3. **Утверждение TPM о ключе устройства.** `TPMS_ATTEST` вида CERTIFY
-   (магия `0xff544347`, вид `0x8017`), подписанный AIK: поле `attested.name` —
-   имя ключа устройства (`nameAlg ‖ SHA-256(TPMT_PUBLIC)`), и `TPMT_PUBLIC`
-   лежит в конверте. Точка кривой из него обязана совпасть с аппаратным ключом,
-   который устройство предъявило (`--device-tpm-key`, отпечаток K27). EK вместо
-   ключа устройства, ключ другого TPM, AIK вместо устройства — отказ по имени.
-4. **Свежесть.** `extraData` утверждения —
-   `SHA-256("CC/v1/attest-qualify" ‖ 0x00 ‖ вызов(32) ‖ device_fpr(32))`, где
-   вызов — одноразовое число сервера в этом разговоре, `device_fpr` — K27
-   аппаратного ключа. Метка своя: `"CC/v1/attest-nonce"` уже занята
-   запечатыванием вызова доказательства владения (§9.4), и смешивать два
-   применения одной метки нельзя (И-12). Утверждение, снятое для другого
-   вызова или другого устройства, — отказ.
-5. **Решение.** Только при всех четырёх звеньях сервер ставит ступень
-   `HardwareAttested`, называя основание (сертификат вендора или закреплённый
-   EK). Политика, требующая аттестации, при неполном или отвергнутом конверте
-   ПОЛУЧАЕТ ОТКАЗ С ПРИЧИНОЙ, а не молчаливое понижение до `Hardware` (B6b).
-   Локальная проверка конверта клиентом (`claim_intact`) доказательством не
-   является и вердикта не меняет.
+1. **Trusted endorsement key (EK).** Two trust levels, named separately because their assertions differ:
+   * **vendor certificate** — EK certificate (X.509, DER) chaining to a root in the deployment directory (`TrustAnchors`; empty directory means refusal, decision of 2026-08-24). Asserts: “this EK was issued by a manufacturer trusted by this deployment”;
+   * **pinned EK** — public EK recorded by an administrator during machine commissioning. Asserts less: “this is the very TPM the administrator had before them,” nothing about its manufacturer. Needed when no vendor certificate was provisioned (as on the development machine: no EK certificate, measured 2026-08-24).
+   The certificate public key must match the envelope public EK: another TPM's certificate beside one's own EK is rejected.
+2. **The attestation identity key (AIK) belongs to this EK.** Verified by CREDENTIAL ACTIVATION (TPM2_MakeCredential / TPM2_ActivateCredential): the server encrypts a random secret to EK for the AIK name; only a TPM holding both can return it. This choice follows both sides' capabilities: the Windows platform provider activates credentials through `NCRYPT_PCP_TPM12_IDACTIVATION_PROPERTY` (historical name, unchanged for TPM 2.0); `tpm2-tools` uses `makecredential`/`activatecredential`. A third-party AIK certificate would merely move the same activation to a third party without simplifying verification.
+   Credential form: TPM 2.0, part 1, “Credential Protection”: seed encrypted to EK (RSA-OAEP-SHA256, label `"IDENTITY\0"`), symmetric key `KDFa(SHA256, seed, "STORAGE", AIK name, empty, 128)`, credential encrypted with AES-128-CFB and zero IV; integrity is HMAC-SHA256 keyed by `KDFa(SHA256, seed, "INTEGRITY", empty, empty, 256)` over `encIdentity ‖ AIK
+   name`. RSA-2048 EK is supported (default TCG template); a curve-based EK gets an explicit refusal until required by a live machine.
+3. **TPM assertion about the device key.** AIK-signed `TPMS_ATTEST` of type CERTIFY (magic `0xff544347`, kind `0x8017`): `attested.name` is the device-key name (`nameAlg ‖ SHA-256(TPMT_PUBLIC)`), and `TPMT_PUBLIC` is in the envelope. Its curve point must match the hardware key presented by the device (`--device-tpm-key`, K27 fingerprint). EK in place of device key, another TPM's key, or AIK in place of device key is rejected by name.
+4. **Freshness.** The assertion's `extraData` is `SHA-256("CC/v1/attest-qualify" ‖ 0x00 ‖ challenge(32) ‖ device_fpr(32))`, where the challenge is the server's one-time number in this conversation, and `device_fpr` is K27 of the hardware key. A separate label: `"CC/v1/attest-nonce"` already seals the proof-of-possession challenge (§9.4); two uses must not share one label (I-12). An assertion for another challenge or device is rejected.
+5. **Decision.** Only with all four links does the server set `HardwareAttested`, stating the basis (vendor certificate or pinned EK). A policy requiring attestation with an incomplete or rejected envelope receives DENIAL WITH A REASON, not silent downgrade to `Hardware` (B6b). The client's local envelope check (`claim_intact`) is not proof and does not change the verdict.
 
-**Проверяющий — ограниченный и строгий.** DER, а не BER (разбор
-`x509-cert`, тело обязано кодироваться обратно в те же байты); алгоритмы
-подписи сертификатов — белый список: `sha256WithRSAEncryption` (RSA
-2048/3072/4096, показатель 65537) и `ecdsa-with-SHA256` на P-256; подписи
-утверждения TPM — RSASSA и ECDSA с SHA-256. RSA-PSS, P-384 и прочее —
-названный отказ, пока их не потребует живая цепочка вендора: проверяющий без
-эталона — это проверяющий без проверки. Срок действия каждого сертификата,
-корня тоже; у промежуточных и корня — `basicConstraints cA=TRUE`,
-`keyCertSign` и `pathLenConstraint`; у сертификата EK — не CA и
-`keyEncipherment` (профиль TCG); критичное расширение, кроме
-`basicConstraints`, `keyUsage` и `subjectAltName`, — отказ; цепочка не длиннее
-четырёх, сертификат не больше 8 КиБ; сертификат, не вошедший в путь,
-неизвестный корень, усечение и лишние байты — отказ. Удостоверитель обязан
-быть ограниченным ключом подписи TPM (`restricted`, `sign`, `fixedTPM`,
-`fixedParent`, `sensitiveDataOrigin`): неограниченный подписал бы и поддельное
-`TPMS_ATTEST`. Ключ устройства — P-256 с `fixedTPM`, `fixedParent`,
-`sensitiveDataOrigin`. Подпись утверждения проверяется над сырыми байтами ДО
-их разбора (как И-5). Сравнения дайджестов, имён и секретов — постоянного
-времени (И-13). Приватных операций проверяющий не делает вовсе; открытые
-(проверка подписи, OAEP-шифрование на EK) — `oc_crypto::rsa`, KDFa и тег
-целостности учётных данных — `oc_crypto::tpm`, ECDSA — `p256`, AES — крейт
-`aes`. Код — `crates/cc-authority/src/attest/`.
+**The verifier is bounded and strict.** DER, not BER (`x509-cert` parsing; the body must re-encode to identical bytes); certificate signature algorithm allowlist: `sha256WithRSAEncryption` (RSA 2048/3072/4096, exponent 65537) and `ecdsa-with-SHA256` on P-256; TPM assertion signatures: RSASSA and ECDSA with SHA-256. RSA-PSS, P-384, and others receive explicit refusals until needed by a live vendor chain: a verifier without a reference has no verification. Check every certificate's validity, including the root; intermediates and root require `basicConstraints cA=TRUE`, `keyCertSign`, and `pathLenConstraint`; EK certificate must not be a CA and must have `keyEncipherment` (TCG profile); critical extensions other than `basicConstraints`, `keyUsage`, and `subjectAltName` are rejected; chain length at most four, certificate size at most 8 KiB; unused certificates, unknown roots, truncation, and extra bytes are rejected. AIK must be a restricted TPM signing key (`restricted`, `sign`, `fixedTPM`, `fixedParent`, `sensitiveDataOrigin`): an unrestricted key could sign a forged `TPMS_ATTEST`. Device key: P-256 with `fixedTPM`, `fixedParent`, `sensitiveDataOrigin`. Verify the assertion signature over raw bytes BEFORE parsing (like I-5). Digest, name, and secret comparisons are constant-time (I-13). The verifier performs no private-key operations; public operations (signature verification, OAEP encryption to EK) use `oc_crypto::rsa`; KDFa and credential integrity tags use `oc_crypto::tpm`; ECDSA uses `p256`; AES uses the `aes` crate. Code: `crates/cc-authority/src/attest/`.
 
-**Эталоны — механика, а не совместимость.** Положительные и отрицательные
-цепочки порождаются воспроизводимо внешним инструментом (`swtpm` +
-`tpm2-tools` + `openssl` в образе стенда, `deploy/local/attest-fixtures/`);
-закрытые ключи тестового удостоверяющего центра в дерево не попадают. Тестовый
-центр назван в субъекте «NOT A VENDOR» и корнем вендора не объявляется нигде.
-Эталоны доказывают, что проверяющий исполняет модель; совместимость с
-конкретными вендорами TPM они не доказывают, и живой прогон на TPM этой машины —
-отдельная ступень (B6b).
+**Fixtures prove mechanics, not compatibility.** Positive and negative chains are reproducibly generated by external tools (`swtpm` + `tpm2-tools` + `openssl` in the test image, `deploy/local/attest-fixtures/`); test CA private keys never enter the tree. The test CA's subject says “NOT A VENDOR” and it is nowhere declared a vendor root. Fixtures prove the verifier implements the model, not compatibility with specific TPM vendors; a live run on this machine's TPM is a separate stage (B6b).
 
-#### 9.11.1. Провод и выдача (B6b, 2026-09-16)
+#### 9.11.1. Wire and issuance (B6b, 2026-09-16)
 
-**Три шага, а не два хода.** Провайдер Windows заводит удостоверителя ВМЕСТЕ с
-утверждением (обёртка `KAST`, замер B6b), а утверждению нужен вызов заранее.
-Поэтому после доказательства владения (§9.4) разговор может пройти три шага,
-каждый под MAC сессии (K25; одна таблица заверяемых видов на обе стороны —
-`oc_protocol::activation::is_session_sealed`):
+**Three steps, not two messages.** The Windows provider creates AIK TOGETHER with the assertion (`KAST` wrapper, B6b measurement), and the assertion needs a challenge in advance. After proof of possession (§9.4), a conversation may therefore take three steps, each under session MAC (K25; one authenticated-kind table for both sides — `oc_protocol::activation::is_session_sealed`):
 
-| Вид | Запрос | Вид | Ответ |
+| Kind | Request | Kind | Response |
 |---|---|---|---|
-| 31 | `AttestOpen` — тела нет | 34 | `AttestNonce` — 32 байта вызова |
-| 32 | `AttestEvidence` — TLV: 1 `TPM2B_PUBLIC` EK, 2 сертификат EK (необяз.), 3 промежуточные (`u16be len ‖ der`, не больше двух, необяз.), 4 `TPM2B_PUBLIC` удостоверителя, 5 `TPMS_ATTEST`, 6 `TPMT_SIGNATURE`, 7 `TPM2B_PUBLIC` ключа устройства | 35 | `AttestCredential` — `TPM2B_ID_OBJECT ‖ TPM2B_ENCRYPTED_SECRET` (раскладка, которую принимает свойство активации провайдера) |
-| 33 | `AttestSecret` — 32 байта открытого секрета | 36 | `Attested` — `u8` основание: 1 сертификат вендора, 2 закреплённый EK |
+| 31 | `AttestOpen` — no body | 34 | `AttestNonce` — 32-byte challenge |
+| 32 | `AttestEvidence` — TLV: 1 EK `TPM2B_PUBLIC`, 2 EK certificate (optional), 3 intermediates (`u16be len ‖ der`, at most two, optional), 4 AIK `TPM2B_PUBLIC`, 5 `TPMS_ATTEST`, 6 `TPMT_SIGNATURE`, 7 device-key `TPM2B_PUBLIC` | 35 | `AttestCredential` — `TPM2B_ID_OBJECT ‖ TPM2B_ENCRYPTED_SECRET` (layout accepted by the provider's activation property) |
+| 33 | `AttestSecret` — 32 bytes of recovered secret | 36 | `Attested` — `u8` basis: 1 vendor certificate, 2 pinned EK |
 
-**Вызов шага 1 ВЫВОДИТСЯ (с 2026-09-20, K30).** Сервер берёт из генератора 32
-байта засева и разворачивает вызов производной K30 с `kind = 1`; в прообраз
-входят засев, показания часов и отпечаток устройства, ДОКАЗАННЫЙ в этом
-разговоре (не тот, что назван в сообщении). Довод — И-1, С-13: при откате
-снапшота генератор повторяется вместе с состоянием сервера, и два разных
-разговора получили бы один вызов, то есть одно `extraData`. Клиенту и
-посреднику ничего не меняется: вызов и раньше приходил 32 байтами, которые
-получатель не вычисляет, а читает. Границы защиты — `docs/format.md`, раздел
-«СВЕЖЕСТЬ СЕРВЕРА ВЫВОДИТСЯ 2026-09-20».
+**Step 1's challenge is DERIVED (since 2026-09-20, K30).** The server draws a 32-byte seed and expands the challenge using K30 with `kind = 1`; the input contains seed, clock reading, and the device fingerprint PROVED in this conversation (not merely named in a message). Rationale: I-1, S-13 — snapshot rollback repeats the generator with server state, so two conversations would receive one challenge and thus one `extraData`. Nothing changes for client or intermediary: the challenge already arrived as 32 bytes read rather than computed by the recipient. Protection boundaries: `docs/format.md`, “SERVER FRESHNESS IS DERIVED 2026-09-20.”
 
-**Три значения шага 2 ВЫВОДЯТСЯ ТОЖЕ (с 2026-09-21).** Секрет учётных данных,
-засев их защиты и засев OAEP (`TPM2_MakeCredential`) брались из генератора
-голыми; теперь это та же производная K30 с назначениями `kind = 3, 4, 5`, засев
-один на три — разводит их номер назначения. На провод это не влияет: учётные
-данные и раньше приезжали байтами, которых получатель не вычисляет. Правило
-И-1 говорит про КАЖДОЕ значение, а не про те, о которых вспомнили; оценка
-риска, без завышения, — `docs/format.md`, раздел «ЭХО ПРИВЯЗАНО К РАЗГОВОРУ
-2026-09-21», подраздел «Оценка (1)».
+**Step 2's three values are ALSO DERIVED (since 2026-09-21).** The credential secret, its protection seed, and OAEP seed (`TPM2_MakeCredential`) formerly came straight from the generator; now they use the same K30 derivation with purposes `kind = 3, 4, 5`, one seed for all three, separated by purpose number. No wire effect: credentials already arrived as bytes the recipient does not compute. I-1 applies to EVERY value, not just those remembered; a measured risk assessment is in `docs/format.md`, “ECHO BOUND TO THE CONVERSATION 2026-09-21,” subsection “Assessment (1).”
 
-`extraData` утверждения — K29 от вызова шага 1 и отпечатка K27 аттестуемой
-точки P-256. Шаги принимаются только по порядку; отказ шага — `Denied` с
-причиной, и разговор НЕ закрывается: аттестация, которая не удалась, не
-отменяет выдачи, которой она не нужна. Аттестовать разговор вправе только
-точку, владение которой в нём доказано: ключ TPM из приветствия или
-аппаратную половину пятого механизма (последние 65 байт открытого ключа
-MLKEM768-P256).
+Assertion `extraData` is K29 of step 1's challenge and K27 of the P-256 point being attested. Steps are accepted only in order; a failed step yields `Denied` with reason and does NOT close the conversation: failed attestation does not cancel a grant that needs none. A conversation may attest only the point whose possession was proved in it: the greeting's TPM key or the hardware component of mechanism five (the last 65 bytes of the MLKEM768-P256 public key).
 
-**Решение о выдаче.** Исход записывается в доказательство разговора. При
-`min_binding = HardwareAttested` у автора или у профиля сервера выдача без
-признанной аттестации — отказ `AttestationRequired` с причиной (вердикт шага
-либо «не пройдена»), а не лизинг, который файл не откроет. Признак
-аттестации едет в лизинге (версия 3, тег 13, §2.3) — и только когда
-аттестованная точка и есть ключ, на который запечатывается доля (механизм 2
-целиком или аппаратная половина механизма 5): иначе аттестация одного ключа
-украсила бы лизинг, чья доля лежит под другим. Требование отдельного действия
-(тег 7 политики) выдачи не останавливает: лизинг без признака откроет
-остальное, а решатель закроет это действие.
+**Issuance decision.** The outcome is stored in the conversation proof. When the author or server profile specifies `min_binding = HardwareAttested`, a grant without accepted attestation is refused as `AttestationRequired` with reason (step verdict or “not completed”), rather than issuing a lease incapable of opening the file. The indicator travels in the lease (version 3, tag 13, §2.3), but only when the attested point is the key sealing the share (mechanism 2 entirely or mechanism 5's hardware component); otherwise one key's attestation would adorn a lease whose share is under another. A per-action requirement (policy tag 7) does not stop issuance: an unmarked lease allows other actions and the evaluator blocks this one.
 
-**Решатель.** `oc_policy::effective_binding`: ступень, которую устройство
-сообщает по своим наблюдениям, выше `Hardware` не поднимается; до
-`HardwareAttested` её поднимает только признак в лизинге, и только у
-аппаратной ступени. Та же функция стоит у проверки при открытии контейнера.
+**Evaluator.** `oc_policy::effective_binding`: the tier reported by the device from its own observations cannot exceed `Hardware`; only a lease indicator raises it to `HardwareAttested`, and only from a hardware tier. The same function is used when opening a container.
 
-**Клиент.** Файл, чья политика требует аттестации, клиент пятого механизма
-аттестует в разговоре выдачи и продления: материал — `cc_keystore::pcp`
-(`KAST` → форма проверяющего, EK из модуля по шаблону TCG L-1), активация —
-загрузкой непрозрачного блоба удостоверителя. Сервер прежней сборки отвечает
-на вид 31 «сообщение не разбирается» и закрывает разговор: при обязательной
-аттестации это названный отказ без запроса лизинга, при частичной — новое
-соединение и заметка человеку. Закрепление: `cc attest-ek --out <файл>` на
-машине, `cca attest enroll <файл>` на сервере; каталог доверия —
-`<каталог состояния>/attest/` (`*.der` корни, `*.ekpub` закреплённые EK),
-читается при запуске приёма.
+**Client.** For a file whose policy requires attestation, a mechanism-five client attests during issuance and renewal: material from `cc_keystore::pcp` (`KAST` → verifier form; EK from the module under TCG L-1 template), activation by loading the opaque AIK blob. An older server answers kind 31 with “message cannot be parsed” and closes the conversation: mandatory attestation yields an explicit refusal without a lease request; partial requirements lead to a new connection and a user notice. Pinning: `cc attest-ek --out <file>` on the machine, `cca attest enroll <file>` on the server; trust directory: `<state directory>/attest/` (`*.der` roots, `*.ekpub` pinned EKs), read when the acceptor starts.
 
-**Живой прогон на этой машине (2026-09-16) — честный отказ.** EK закреплён,
-вызов выдан, утверждение снято, EK принят; удостоверитель провайдера подписывает
-ECDSA-**SHA-1**, и сервер отказал: «ключ удостоверителя: хеш подписи
-удостоверителя не SHA-256». Контроль — тот же получатель, файл с
-`--hardware-binding` — выдан и разрешён. Сверх того активация учётных данных из
-процесса без повышения прав на этой машине не исполнилась (`TPM_E_VALUE` через
-провайдер, `TPM_E_COMMAND_BLOCKED` напрямую; `docs/evidence/local-completion.md`,
-B6b). Принимать ли подпись удостоверителя с SHA-1 — `docs/deferred.md` §30.
+**Live run on this machine (2026-09-16): an honest refusal.** EK pinned, challenge issued, assertion obtained, EK accepted; the provider AIK signs with ECDSA-**SHA-1**, and the server refused: “AIK: attestation key signature hash is not SHA-256.” Control: same recipient, file with `--hardware-binding` — granted and allowed. Furthermore, credential activation from a non-elevated process failed on this machine (`TPM_E_VALUE` via the provider, `TPM_E_COMMAND_BLOCKED` directly; `docs/evidence/local-completion.md`, B6b). Whether to accept SHA-1 AIK signatures: `docs/deferred.md` §30.
 
-### 9.12. Регистрация редакции — решение 2026-09-17 (D1)
+### 9.12. Edition registration — decision of 2026-09-17 (D1)
 
-Правка публикуется только после того, как сервер принял её номер
-(`docs/format.md`, «ПРАВКА ИСПОЛНИМА», п. A). Сервер ведёт на файл одну пару —
-номер и сумму последней принятой редакции; до первой правки это `(0, нули)`.
+An edit is published only after the server accepts its number (`docs/format.md`, “EDITING IS EXECUTABLE,” item A). The server keeps one pair per file: number and digest of the latest accepted edition; before the first edit, `(0, zeros)`.
 
-**Запрос** — `RegisterEdition` (вид 37), тело — заявка
-`oc_format::edit::EditionClaimDoc`, вложенный TLV, все теги критичны:
+**Request** — `RegisterEdition` (kind 37), body: `oc_format::edit::EditionClaimDoc`, nested TLV, all tags critical:
 
-| Тег | Поле | Значение |
+| Tag | Field | Value |
 |---|---|---|
 | 1 | `file_id` | bytes[16] |
-| 2 | `counter` | u64le — номер новой редакции, ≥ 1 |
-| 3 | `base_digest` | bytes[32] — сумма основы; нули у неправленого файла |
-| 4 | `digest` | bytes[32] — сумма новой редакции (п. A) |
-| 5 | `session_head` | bytes[32] — голова сеанса (п. D) |
-| 6 | `certified_by` | сертификат ключа правки (п. B), до 8 КиБ |
-| 7 | `at` | i64le — момент подписи |
-| 8 | `signature` | bytes[256] — RSA-PSS-SHA256 ключом `editor_key` |
+| 2 | `counter` | u64le — new edition number, ≥ 1 |
+| 3 | `base_digest` | bytes[32] — base digest; zeros for an unedited file |
+| 4 | `digest` | bytes[32] — new edition digest (item A) |
+| 5 | `session_head` | bytes[32] — session head (item D) |
+| 6 | `certified_by` | edit-key certificate (item B), up to 8 KiB |
+| 7 | `at` | i64le — signature time |
+| 8 | `signature` | bytes[256] — RSA-PSS-SHA256 using `editor_key` |
 
 ```
 Transcript::new("CC/v1/edition-claim")
-  .field(теги 1–7)
+  .field(tags 1–7)
 ```
 
-**Доказательства владения ключом устройства запрос не требует**, и это решение:
-полномочие даёт сертификат автора (или соавтора) на ключ правки, владение —
-подпись этим ключом. Рукопожатие доказало бы владение ДРУГИМ ключом (ключом
-устройства), к правке отношения не имеющим.
+**The request requires no proof of possession of the device key**, deliberately: the author's (or co-author's) edit-key certificate grants authority; a signature by that key proves possession. A handshake would prove possession of a DIFFERENT key (device key), unrelated to editing.
 
-**Проверки сервера, по порядку:** файл известен, не отозван и не заморожен;
-сертификат выдан автором файла или ключом из состава соавторов, подпись
-сертификата сходится, `file_id` совпадает, срок не истёк **по часам сервера**;
-подпись заявки ключом правки сходится; `at` в пределах допуска перекоса часов
-(как у распоряжений, §9.3); политика файла разрешает `edit`.
+**Server checks, in order:** file known, neither revoked nor frozen; certificate issued by the file author or a member of the co-author set, certificate signature valid, matching `file_id`, unexpired **by server time**; claim signature valid under the edit key; `at` within allowed clock skew (as for orders, §9.3); file policy permits `edit`.
 
-**Решение:**
+**Decision:**
 
-* `counter` и `digest` равны принятым — повтор: ответ `Accepted`, второй записи
-  нет;
-* `counter` = принятый + 1 и `base_digest` = принятая сумма — редакция принята:
-  пара обновлена, в журнал ложится `EditionRegistered` (событие 28) с
-  отпечатком устройства из сертификата, ответ `Accepted`;
-* иначе — **конфликт** (`EditionConflict`, текст «конфликт правки», номер
-  принятой редакции назван): второй редактор, сделавший правку на той же основе,
-  публиковать нечего — он открывает последнюю редакцию и правит её.
+* `counter` and `digest` equal the accepted values — retry: `Accepted`, no second record;
+* `counter` = accepted counter + 1 and `base_digest` = accepted digest — edition accepted: update the pair, journal `EditionRegistered` (event 28) with the certificate's device fingerprint, respond `Accepted`;
+* otherwise **conflict** (`EditionConflict`, text “edit conflict,” accepted edition number stated): a second editor who edited the same base has nothing to publish — they must open the latest edition and edit it.
 
-Повтор тех же байтов опознаётся тождеством документа (§9.10) и получает
-сохранённый ответ.
+Identical-byte retries are recognized by document identity (§9.10) and receive the stored response.
 
-**Клиент** (`cc edit --url`) собирает и подписывает новый файл, пишет его во
-временный рядом с целью, отправляет заявку и только после `Accepted` публикует
-заменой; отказ или обрыв связи — временный файл убирается, прежний цел. Файл,
-который сервер не ведёт, правится с явным `--local` и без регистрации.
+**Client** (`cc edit --url`) assembles and signs the new file, writes a temporary file beside the target, submits the claim, and publishes by replacement only after `Accepted`; refusal or disconnection removes the temporary file, preserving the original. Files unmanaged by the server are edited with explicit `--local`, without registration.
 
-**Голова журнала — отдельным читающим запросом, ДО подписи** (решение
-2026-09-21). Ответ `Accepted` тела не несёт и головы не сообщает, а блок
-редактора подписывается раньше регистрации, — поэтому голова из ответа не
-могла бы попасть в него в принципе. Клиент спрашивает её `JournalView`
-(§9.13, `since = 0`, `upto = 0`) у ТОГО ЖЕ сервера, к которому идёт
-регистрироваться, — нового адресата нет, — и проверяет подпись головы ключами
-`chain::accepted_now` (якорь заголовка плюс принятая цепочка преемства, §9.18).
-Предел ожидания короткий и свой (`cc_cli::edit::HEAD_TIMEOUT`, 5 с): голова
-берётся по возможности и висеть правке из-за неё не за что.
+**Journal head through a separate read request, BEFORE signing** (decision of 2026-09-21). `Accepted` has no body or head, and the editor block is signed before registration, so a response head could not enter it at all. The client requests it via `JournalView` (§9.13, `since = 0`, `upto = 0`) from the SAME server where it will register — no new addressee — and verifies the head signature using `chain::accepted_now` keys (header anchor plus accepted succession chain, §9.18). A short, dedicated deadline (`cc_cli::edit::HEAD_TIMEOUT`, 5 s): the head is best-effort and must not leave editing hanging.
 
-Адрес не назван (`--local`) — запроса нет вовсе: правка без сети в сеть не
-выходит. Сервер не ответил или ответ не принят — `journal_head` остаётся
-пустым, правка идёт дальше, а `cc edit` называет причину словом. Непроверенная
-голова в подписанный блок не кладётся никогда: это сорок байт, которые
-продиктовал ответивший по адресу.
+No address (`--local`) means no request: offline editing does not access the network. No response or rejected response leaves `journal_head` empty; editing continues and `cc edit` states the reason. An unverified head is never put in the signed block: it is forty bytes dictated by whoever answered at the address.
 
-Что голова значит — нижнюю границу времени правки («правка не старше головы
-H»), сверяемую без сети против более позднего чекпойнта; чего не значит —
-что редакция зарегистрирована, и верхней границы (`docs/format.md`, п. E).
+What the head means: a lower bound on edit time (“edit no older than head H”), verifiable offline against a later checkpoint; what it does not mean: edition registration or an upper bound (`docs/format.md`, item E).
 
-**Чего это не даёт.** Читатель сервер не спрашивает: его эталон — журнал
-принятого устройства (§3.1), а полноту истории даёт реестр сервера только тем,
-кто правит через него. Реестр хранится в записи файла (тег 30 состояния сервера) и одинаково в
-обоих хранилищах.
+**What this does not provide.** Readers do not query the server: their reference is the device's accepted-history journal (§3.1); the server registry provides complete history only to those editing through it. The registry is stored in the file record (server-state tag 30), identically in both stores.
 
-### 9.13. Свидетель журнала — решение 2026-09-17 (D3)
+### 9.13. Journal witness — decision of 2026-09-17 (D3)
 
-Подписанная голова журнала (`cca checkpoint`) доказывает только согласие
-сервера с самим собой: переписав журнал, он перепишет и корень. Свидетель —
-ОТДЕЛЬНАЯ сторона со своим ключом Ed25519 и своей памятью, которая пачкой (раз
-в период, а не на каждую запись) спрашивает у сервера вид журнала, проверяет,
-что новая голова продолжает засвидетельствованную, и подписывает её следом за
-сервером. Код — `oc_protocol::witness` (байты и проверки),
-`cc_authority::witness` (память, круг, сеть), `cca witness …` (команды).
+A signed journal head (`cca checkpoint`) proves only server self-consistency: a server rewriting the journal rewrites its root too. A witness is a SEPARATE party with its own Ed25519 key and memory, querying journal views in batches (once per interval, not per entry), checking that the new head extends the witnessed head, and co-signing it after the server. Code: `oc_protocol::witness` (bytes and checks), `cc_authority::witness` (memory, observation cycle, network), `cca witness …` (commands).
 
-**Запрос** — `JournalView` (вид 38), тело ровно 16 байт:
-`u64le since ‖ u64le upto`. `upto = 0` — текущая длина; `since = 0` — без
-доказательства. Рукопожатия и MAC сессии не требует: голова и доказательство
-публичны, а состояние сервера вопрос не меняет (исход разговора — `Read`).
+**Request** — `JournalView` (kind 38), exactly 16 body bytes: `u64le since ‖ u64le upto`. `upto = 0` means current length; `since = 0` means no proof. No handshake or session MAC: head and proof are public, and the query does not change server state (conversation outcome `Read`).
 
-**Ответ** — `LogView` (вид 39, общий для журнала событий и каталога §9.14), тело — вид:
+**Response** — `LogView` (kind 39, shared by the event journal and directory §9.14); body is a view:
 
 ```
-вид = голова(104) ‖ u64le since ‖ путь(32·N),  N ≤ 128
-голова = u64le size ‖ root(32) ‖ подпись сервера(64)
-подпись сервера над Transcript::new("CC/v1/audit-head").u64be(size).fixed(root)
+view = head(104) ‖ u64le since ‖ path(32·N),  N ≤ 128
+head = u64le size ‖ root(32) ‖ server signature(64)
+server signature over Transcript::new("CC/v1/audit-head").u64be(size).fixed(root)
 ```
 
-Раскладка головы та же, что у файла `cca checkpoint --out`. `since = 0` — путь
-пуст; `since > size` — отказ разбора. Сервер отвечает отказом, если журнал пуст,
-`upto` длиннее журнала или `since > upto`. Голову длины `upto` меньше текущей
-сервер подписывает заново — это то же утверждение о той же неизменной
-истории.
+The head layout matches the `cca checkpoint --out` file. `since = 0` means an empty path; `since > size` is a parse rejection. The server refuses if the journal is empty, `upto` exceeds its length, or `since > upto`. A head at `upto` below current length is signed afresh — the same assertion about the same immutable history.
 
-**Корень и доказательство.** Листья — MAC записей (K13), корень —
-`oc_crypto::merkle::root_of(size, MTH)`, где `MTH` — вершина RFC 6962.
-Путь — доказательство согласованности RFC 9162 §2.1.4 с одним отличием:
-проверяющий знает корни, а не вершины, поэтому вершина старого дерева, которую
-RFC пропускает при `since`, равном степени двойки, кладётся первым узлом ВСЕГДА
-в этом случае и сверяется в конце проверки через `root_of` с корнем старой
-головы. Равные длины согласованы только при равных корнях и пустом пути.
+**Root and proof.** Leaves are record MACs (K13); root is `oc_crypto::merkle::root_of(size, MTH)`, with `MTH` the RFC 6962 tree hash. The path is an RFC 9162 §2.1.4 consistency proof with one difference: the verifier knows roots rather than tree hashes, so when `since` is a power of two, the old tree hash omitted by the RFC is ALWAYS included as the first node and checked at verification's end through `root_of` against the old head's root. Equal lengths are consistent only with equal roots and an empty path.
 
-**Засвидетельствованная голова** — 208 байт:
+**Witnessed head** — 208 bytes:
 
 ```
-голова(104) ‖ i64le at ‖ ключ свидетеля(32) ‖ подпись свидетеля(64)
-подпись свидетеля над Transcript::new("CC/v1/witness-cosign")
-    .u8(вид журнала).fixed(ключ сервера).u64be(size).fixed(root).fixed(i64be at)
+head(104) ‖ i64le at ‖ witness key(32) ‖ witness signature(64)
+witness signature over Transcript::new("CC/v1/witness-cosign")
+    .u8(journal kind).fixed(server key).u64be(size).fixed(root).fixed(i64be at)
 ```
 
-Ключ сервера — под подписью: свидетельство относится к журналу конкретного
-сервера. Вид журнала (1 — события, 2 — каталог §9.14) — под подписью: свидетельство
-одного журнала не годится другому; память свидетеля хранит вид
-(`cca witness init --log journal|directory`). `at` — часы свидетеля; у одного свидетеля не убывает.
+The server key is signed: the witness statement concerns a specific server's log. Log kind (1 — events, 2 — directory §9.14) is signed: a witness statement for one log cannot serve another; witness state stores kind (`cca witness init --log journal|directory`). `at` is witness time and never decreases for one witness.
 
-**Круг свидетеля** (`cca witness observe`): спросить вид от
-засвидетельствованной длины; при отказе сервера — голову без доказательства.
-Решение по голове:
+**Witness cycle** (`cca witness observe`): request a view from the witnessed length; if refused, request a head without proof. Decision:
 
-| Голова | Решение |
+| Head | Decision |
 |---|---|
-| первая (памяти нет) | подписана **без сверки** — сверять не с чем |
-| та же | подписана заново с новым `at` — свидетель жив |
-| длиннее, доказательство сошлось | подписана |
-| короче | **откат**: не подписана, улика |
-| та же длина, другой корень; или доказательство не сошлось | **развилка**: не подписана, улика |
-| длиннее без доказательства; доказательство не от той длины | не подписана, улики нет |
-| подпись не того сервера | не подписана |
+| first (no remembered head) | signed **without comparison** — nothing to compare against |
+| unchanged | signed again with new `at` — witness alive |
+| longer, proof valid | signed |
+| shorter | **rollback**: not signed, evidence |
+| same length, different root; or invalid proof | **fork**: not signed, evidence |
+| longer without proof; proof starts at wrong length | not signed, no evidence |
+| signature by wrong server | not signed |
 
-Улика (`evidence/<вид>-<момент>-<длина>.bin`) — засвидетельствованная голова и
-вид, который её опровергает; обе головы подписаны сервером. Память свидетеля
-при отказе не меняется. Памяти нет — круг отказывает: заводит её только
-`cca witness init`, и потерю нельзя спутать с началом. `init --from <голова>`
-начинает память с головы, сохранённой вне свидетеля (подпись сервера сверяется;
-с `--from-witness` — и подпись прежнего свидетеля).
+Evidence (`evidence/<kind>-<time>-<length>.bin`) is the witnessed head and a view contradicting it; both heads bear server signatures. Rejection does not change witness state. No state means the cycle refuses: only `cca witness init` creates it, so loss cannot be confused with a fresh start. `init --from <head>` initializes from a head stored outside the witness (server signature checked; with `--from-witness`, the former witness signature too).
 
-**Проверяющий** (`cca witness check`) держит засвидетельствованную голову и
-ключи сервера и свидетеля:
+**Verifier** (`cca witness check`) holds a witnessed head and server/witness keys:
 
-* подписи сервера и свидетеля; свидетель с другим ключом не принимается —
-  так выглядят и подмена, и потеря свидетеля;
-* `--max-age` — свидетельство старше предела: сервер мог удерживать новые
-  записи от свидетеля, или свидетель потерян;
-* `--head` — своя голова от сервера: той же длины сверяется без сети; разной —
-  доказательством от сервера (`--from`). Не сошлось — развилка (split view);
-  сервер, подписывающий для одной длины разные корни, называется двумя
-  головами — улика, проверяемая без сервера; сервер, не доказывающий голову,
-  которую сам подписал, — откат или развилка;
-* `--needs <номер> [--proof <файл>]` — запись с этим номером
-  засвидетельствована (`cca proof <номер> --size <длина>` строит
-  доказательство включения к голове этой длины). Запись за пределом —
-  «не засвидетельствована»: дольше периода свидетеля это удержание.
+* server and witness signatures; a witness with a different key is rejected — this represents both substitution and witness loss;
+* `--max-age` — statement older than the limit: the server may be withholding new records, or the witness may be lost;
+* `--head` — its own server head: equal length is checked offline; different lengths need a server proof (`--from`). Mismatch means a fork (split view); a server signing different roots at the same length is exposed by two heads — evidence verifiable without the server; a server failing to prove a head it signed indicates rollback or a fork;
+* `--needs <number> [--proof <file>]` — the numbered entry is witnessed (`cca proof <number> --size <length>` builds its inclusion proof at that head length). An entry beyond the boundary is “not witnessed”: beyond the witness interval, this is withholding.
 
-Коды выхода `cca witness`: 0 — сошлось, 3 — улика (откат, развилка, чужая
-подпись), 4 — не проверено (нет связи, нет доказательства), 5 — не
-засвидетельствовано или устарело, 2 — прочий отказ.
+`cca witness` exit codes: 0 — verified; 3 — evidence (rollback, fork, wrong signature); 4 — unverified (no connection, no proof); 5 — unwitnessed or stale; 2 — other failure.
 
-**Чего это не даёт.** Независимости оператора: свидетель у того же оператора
-подписывает то, что ему показали, и откатывается вместе с ним — стенд держит
-его в отдельном контейнере на том же Docker, и это доказывает разделение
-процессов и памяти, не организаций. Публичного времени: `at` — часы
-свидетеля. Полноты: сервер, не пускающий свидетеля, виден лишь по возрасту
-свидетельства. Содержания записи: лист — MAC на ключе сервера, и доказательство
-включения говорит «запись с таким MAC стоит здесь», а не что в ней. Публичная
-публикация голов (анкоринг) отложена.
+**What this does not provide.** Operator independence: a witness run by the same operator signs what it is shown and rolls back with that operator — the test bench puts it in a separate container on the same Docker, proving process and memory separation, not organizational separation. Public time: `at` is the witness clock. Completeness: a server blocking the witness is visible only through statement age. Record contents: a leaf is a MAC under the server key, and inclusion proves “a record with this MAC is here,” not its contents. Public head publication (anchoring) is deferred.
 
-### 9.14. Каталог ключей организации — решение 2026-09-17 (D4)
+### 9.14. Organization key directory — decision of 2026-09-17 (D4)
 
-Каталог — второй журнал сервера: записи «ключ X — участника Y организации T»
-по версиям. Пишет его только оператор (`cca directory add|withdraw`), читают
-клиенты и монитор по проводу без рукопожатия. Код — `oc_protocol::directory`
-(байты и проверка), `cc_authority::directory` (правила и дерево),
-`cc_cli::directory` (сверка у клиента).
+The directory is the server's second log: versioned records “key X belongs to member Y of organization T.” Only the operator writes (`cca directory add|withdraw`); clients and the monitor read over the wire without a handshake. Code: `oc_protocol::directory` (bytes and verification), `cc_authority::directory` (rules and tree), `cc_cli::directory` (client checks).
 
-**Запись** — TLV, все девять тегов критичны, обязательны и идут подряд:
+**Record** — TLV, all nine tags critical, required, consecutive:
 
-| Тег | Поле | Значение |
+| Tag | Field | Value |
 |---|---|---|
-| 1 | `tenant` | организация: `[a-z0-9._-]`, 1–64 байта |
-| 2 | `name` | участник: текст, до 128 знаков, без опасных на экране |
-| 3 | `kem` | байт механизма (1, 2, 4, 5) |
-| 4 | `public` | ключ устройства, длина по механизму |
-| 5 | `fpr` | K27 от `(kem, public)` — **пересчитывается и сверяется** при разборе |
+| 1 | `tenant` | organization: `[a-z0-9._-]`, 1–64 bytes |
+| 2 | `name` | member: text, up to 128 characters, no characters unsafe for display |
+| 3 | `kem` | mechanism byte (1, 2, 4, 5) |
+| 4 | `public` | device key, mechanism-dependent length |
+| 5 | `fpr` | K27 of `(kem, public)` — **recomputed and checked** during parsing |
 | 6 | `version` | u64le, ≥ 1 |
-| 7 | `state` | 0 — действует, 1 — снят |
-| 8 | `origin` | происхождение: текст до 512 знаков |
-| 9 | `at` | i64le — момент записи |
+| 7 | `state` | 0 — active, 1 — withdrawn |
+| 8 | `origin` | provenance: text up to 512 characters |
+| 9 | `at` | i64le — record time |
 
-Разбор каноничен: запись, чьи поля кодируются в другие байты, отвергается —
-иначе у одной записи было бы два листа. Предел записи — 8 КиБ.
+Parsing is canonical: a record whose fields re-encode differently is rejected — otherwise one record would have two leaves. Record limit: 8 KiB.
 
-**Журнал каталога.** Лист — `SHA-256(Transcript::new("CC/v1/directory-entry")
-.tail(запись))`; дерево и корень — как у журнала событий (§9.13); голова
-подписывается ключом сервера над `Transcript::new("CC/v1/directory-head")
-.u64be(size).fixed(root)`. Свидетель тот же (§9.13) с видом журнала
-`Directory`; вид журнала входит и в подпись свидетеля
-(`Transcript::new("CC/v1/witness-cosign").u8(вид)…`: 1 — журнал событий,
-2 — каталог), поэтому свидетельство одного журнала не годится другому.
+**Directory log.** Leaf: `SHA-256(Transcript::new("CC/v1/directory-entry")
+.tail(record))`; tree and root as for the event journal (§9.13); head signed by the server key over `Transcript::new("CC/v1/directory-head")
+.u64be(size).fixed(root)`. The same witness (§9.13) uses log kind `Directory`; log kind also enters the witness signature (`Transcript::new("CC/v1/witness-cosign").u8(kind)…`: 1 — event journal, 2 — directory), preventing a witness statement for one log from serving the other.
 
-**Правила сервера** (проверяются при записи и при КАЖДОМ чтении хранилища):
-версии участника подряд с единицы; первая версия не снимает ключ; снятие
-называет действующий ключ; действующий ключ в организации — у одного
-участника.
+**Server rules** (checked on writes and EVERY store read): consecutive member versions starting at one; first version cannot withdraw a key; withdrawal names the active key; an active key belongs to one member within an organization.
 
-**Запросы** без рукопожатия; ответы — `LogView` (вид 39) или отказ:
+**Requests** without handshake; responses `LogView` (kind 39) or refusal:
 
-| Вид | Запрос | Тело | Ответ |
+| Kind | Request | Body | Response |
 |---|---|---|---|
-| 40 | `DirectoryView` | `u64le since ‖ u64le upto` | `LogView` — как у §9.13 |
-| 41 | `DirectoryLookup` | `u8 длина ‖ организация ‖ u16le длина ‖ участник ‖ u64le size` | `DirectoryEntry` (42) |
-| 43 | `DirectoryRecords` | `u64le from ‖ u32le count`, `1 ≤ count ≤ 256` | `DirectoryRecords` (44): `(u32le длина ‖ запись)*` |
+| 40 | `DirectoryView` | `u64le since ‖ u64le upto` | `LogView` — as in §9.13 |
+| 41 | `DirectoryLookup` | `u8 length ‖ organization ‖ u16le length ‖ participant ‖ u64le size` | `DirectoryEntry` (42) |
+| 43 | `DirectoryRecords` | `u64le from ‖ u32le count`, `1 ≤ count ≤ 256` | `DirectoryRecords` (44): `(u32le length ‖ record)*` |
 
-`DirectoryEntry` — `голова(104) ‖ u64le index ‖ u32le длина ‖ запись ‖
-путь(32·N)`, `N ≤ 64`: последняя запись участника среди первых `size` записей
-(`size = 0` — текущий каталог) и доказательство её включения в голову этой
-длины. «Записи нет» — отказ с текстом «записи каталога нет…»: **отсутствие не
-доказывается**, полноту проверяет монитор.
+`DirectoryEntry` is `head(104) ‖ u64le index ‖ u32le length ‖ record ‖
+path(32·N)`, `N ≤ 64`: the member's latest record among the first `size` records (`size = 0` means current directory) and its inclusion proof in a head of that length. “No record” is a refusal saying “no directory record…”: **absence is not proved**; the monitor checks completeness.
 
-**Клиент** сверяет ответ с четырьмя вещами и называет основание:
+**Client** compares the response against four things and states its basis:
 
-* подпись головы — ключом сервера из заголовка файла (у одобрения) или
-  названным (`cc directory lookup --server-key`); запись — о том участнике и
-  той организации, о которых спрашивали; включение — в эту голову;
-* память (`directory-seen`): голова каталога не короче виденной и продолжает
-  её (доказательство от сервера); версия участника не меньше виденной; та же
-  версия — тот же ключ; «записи нет» о виденном участнике — сокрытие;
-* свидетельство (`--cosigned`, свидетель закреплён `cc directory witness`):
-  голова сервера продолжает засвидетельствованную, и запись в
-  засвидетельствованной голове ТА ЖЕ — тогда основание «доказано»; более
-  старая — «новая версия ещё не засвидетельствована»; более новая — сокрытие;
-* ручная сверка (`verified-devices`): другой ключ под тем же именем —
-  конфликт; каталог ручные сверки не создаёт и не меняет.
+* head signature — server key from the file header (for approval) or explicitly supplied (`cc directory lookup --server-key`); record for the requested member and organization; inclusion in this head;
+* memory (`directory-seen`): directory head no shorter than previously seen and extends it (server proof); member version no lower than seen; same version means same key; “no record” for a previously seen member means concealment;
+* witness statement (`--cosigned`, witness pinned by `cc directory witness`): server head extends the witnessed head, and the record in the witnessed head is THE SAME — then basis “proved”; an older record means “new version not yet witnessed”; a newer one means concealment;
+* manual verification (`verified-devices`): a different key under the same name means conflict; the directory neither creates nor modifies manual verifications.
 
-Основания: **доказано**, **в каталоге** (без свидетельства), **ключ снят**,
-**записи нет**, **конфликт** (код выхода 4).
+Bases: **proved**, **in directory** (without a witness statement), **key withdrawn**, **no record**, **conflict** (exit code 4).
 
-**Одобрение по каталогу** (`cc approve … --directory T/Y --cosigned F`) —
-самостоятельное основание, не сочетаемое с `--fpr` и `--unverified`:
-выдаётся только при «доказано», ключ из записи сверяется с очередью так же,
-как названный `--fpr`, и в память ручных сверок НЕ записывается. Пакетное
-одобрение (`--manifest … --directory T`) требует пары из списка как прежде, а
-каталог только отсекает противоречия: другой ключ под тем же именем, снятый
-ключ, конфликт.
+**Directory-based approval** (`cc approve … --directory T/Y --cosigned F`) is an independent basis, incompatible with `--fpr` and `--unverified`: granted only for “proved”; the record key is compared against the queue just like a supplied `--fpr`, and is NOT written to manual-verification memory. Batch approval (`--manifest … --directory T`) still requires the listed pair; the directory only excludes contradictions: a different key under the same name, withdrawn key, conflict.
 
-**Монитор** (`cca directory audit`) читает каталог целиком до
-засвидетельствованной длины, пересобирает правила и корень и сверяет корень с
-головой: недостача записей — удержание, другой корень — развилка.
+**Monitor** (`cca directory audit`) reads the entire directory to the witnessed length, reconstructs rules and root, and compares with the head: missing records mean withholding; a different root means a fork.
 
-**Хранение.** Файл состояния — тег 12 (поток записей); PostgreSQL — таблица
-`directory_records` (миграция 6), у runtime только `SELECT` и `INSERT`;
-каталог, ставший короче записанного, — отказ фиксации.
+**Storage.** State file: tag 12 (record stream); PostgreSQL: `directory_records` table (migration 6), runtime has only `SELECT` and `INSERT`; a directory shorter than the stored one causes commit refusal.
 
-**Чего это не даёт.** Имя участника — слово оператора: доказанная запись
-доказывает, что все видят один каталог, а не кто стоит за ключом. Отсутствие
-записи — слово сервера. Независимость свидетеля от оператора — не свойство
-кода (§9.13).
+**What this does not provide.** A member name is the operator's assertion: a proved record shows everyone sees one directory, not who stands behind the key. Record absence is the server's assertion. Witness independence from the operator is not a code property (§9.13).
 
-### 9.15. Пакет восстановления и ключи состояния — решение 2026-09-17 (E2, B5)
+### 9.15. Recovery package and state keys — decision of 2026-09-17 (E2, B5)
 
-**Задача.** Сервер, восстановленный из резерва, обязан либо обслуживать теми
-же ключами ту же историю, либо не подняться и назвать, чего не хватает.
-До E2 две вещи этого не держали: состояние не знало, какими ключами его
-обслуживали, и смешанный резерв (ключ подписи от этого сервера, ключ
-запечатывания — от другого) поднимал сервер, отказывающий на каждой
-активации криптографической ошибкой; а резерв ключей проверялся одним
-пересчётом ключа подписи (`deploy/managed/restore-keys.sh`).
+**Task.** A server restored from backup must either serve the same history with the same keys or refuse to start and state what is missing. Before E2, two things failed this: state did not know its serving keys, and a mixed backup (this server's signing key, another's sealing key) started a server that refused every activation with a cryptographic error; key backups were checked only by recomputing the signing key (`deploy/managed/restore-keys.sh`).
 
-**Ключи состояния.** Файл состояния несёт тег 13: `ключ запечатывания(32) ‖
-ключ подписи лизингов(32)` — публичные половины. Чтение, по которому сервер
-отвечает, сверяет их с ключами каталога до присваивания
-(`StoreError::KeysMismatch`, приём не поднимается, строка называет ключ).
-Состояние без тега — прежней сборки; тег дописывается первой записью.
-Черновое чтение ради вопроса «записана ли операция» (`FileStore::seen`) ключей
-не сверяет: оно ничего не подписывает и никому не отвечает. PostgreSQL:
-`SqlStore::open` сверяет `authorities.sealing_public` с ключом каталога.
+**State keys.** State file tag 13: `sealing key(32) ‖
+lease signing key(32)` — public halves. Reads used for server responses compare these with directory keys before assigning state (`StoreError::KeysMismatch`, acceptor does not start, message names the key). State without this tag is from an older build; the first write adds it. A preliminary read asking “was the operation recorded?” (`FileStore::seen`) does not check keys: it signs nothing and answers nobody. PostgreSQL: `SqlStore::open` compares `authorities.sealing_public` with the directory key.
 
-**Пакет** (`cca recovery pack --out D`) — каталог:
+**Package** (`cca recovery pack --out D`) — directory:
 
-| Часть | Содержание |
+| Part | Contents |
 |---|---|
-| `sealing.key`, `lease-sign.key` | ключи как лежат: завёрнутые DPAPI — завёрнутыми |
-| `authority.pub` | публичные половины |
-| `authority-state.bin` | состояние (только файловое хранилище), прочитанное один раз |
-| `attest/*` | якоря аттестации, если заведены |
-| `manifest.bin` | манифест, пишется последним |
-
-Манифест — `подпись(64) ‖ TLV`: версия (1), ключ подписи (2), ключ
-запечатывания (3), момент (4), версия программы (5), хранилище 1 — файл,
-2 — база (6), отпечаток состояния (7, только у файла), подписанная голова
-журнала 104 байта (8), защита ключей текстом (9), части потоком
-`u16le длина ‖ имя ‖ SHA-256` (10). Подпись — ключом подписи лизингов над
-`CC/v1/recovery-manifest ‖ тело`. Имя части — путь внутри пакета: без `..`,
-`.`, пустых звеньев, `\` и `:`; иначе манифест не разбирается. Кодек —
-`cc_authority::recovery`. Тело ограничено 64 KiB; вместе с 64-байтовой
-подписью файл манифеста не может быть больше 64 KiB + 64 байта. Проверяющий
-читает не более предела плюс один байт и отказывает большему файлу до разбора.
-
-Подпись манифеста — самосогласованность: ключ проверки лежит в нём же.
-Доверие даёт сверка с `authority.pub`, известным авторам
-(`--expect-authority`); без неё проверка печатает «ВНИМАНИЕ» с ключом.
-Свидетель отката в пакет не кладётся: старый пакет принёс бы старого
-свидетеля.
-
-**Проверка** (`cca recovery verify D [--expect-authority P] [--witness W]`)
-называет каждую часть строкой «ГОДНО / ОТКАЗ / ВНИМАНИЕ»: манифест и его
-подпись; ключи против `authority.pub`; наличие обязательных частей; отпечаток
-каждой части; открываются ли ключи на этой машине и те ли они, что в
-манифесте («смешанный резерв»); читается ли состояние этими ключами и
-совпадает ли его журнал с головой манифеста; продолжает ли пакет свидетеля
-(«пакет отстал»). Код выхода ненулевой при любом отказе. База: проверяются
-только ключи; саму базу — `cca store verify` после её восстановления.
-
-**Восстановление** (`cca recovery restore D --home H …`) повторяет проверку,
-отказывает при любом отказе и в непустой каталог, сверяет отпечаток каждой
-части ещё раз при копировании и печатает запуск со свидетелем вне пакета.
-Запуск восстановленного каталога проходит три сверки подряд: ключи с
-состоянием (тег 13), журнал с сохранённой головой, журнал со свидетелем.
-
-**Чего это не даёт.** Переносимости ключей: завёрнутый DPAPI ключ на другой
-машине и под другой учётной записью не открывается, и проверка это называет;
-`CC_KEY_STORAGE=portable` на Windows всё равно заворачивает, если платформа
-умеет (`deferred.md` §26.1). Защиты пакета от того, кто его держит: в нём
-ключи сервера. Полноты истории после снятия: пакет — нижняя граница, и
-новее его знает только свидетель.
-
-### 9.16. Управление сервером: привязка, намерения и квитанции — решение 2026-09-18 (E2, B2)
-
-**Задача.** До B2 адреса сервера, профиль сохранности, состав управляющих,
-допуск авторов и прекращение обслуживания менялись ЛОКАЛЬНО, командой на машине
-сервера: полномочие давал доступ к файловой системе, следа не оставалось, а
-клиент узнавал об изменении только по поведению. Теперь у изменения есть
-подписанное намерение, подписанная привязка с номером ревизии и подписанная
-квитанция, а у клиента — способ заметить откат.
-
-**Привязка** (`oc_protocol::control::Binding`) — `подпись(64) ‖ TLV`: версия (1),
-организация (2), стабильное тождество 16 байт (3), эпоха (4), ревизия (5), ключ
-подписи лизингов (6), ключ запечатывания (7), адреса потоком
-`u16le длина ‖ адрес`, 1–8 (8), отпечатки TLS по 32 байта по возрастанию, до 8
-(9), профиль сохранности 0/1/2 — local/mirrored/witnessed (10), режим
-восстановления (11), состояние обслуживания 0–3 (12), состав управляющих по
-возрастанию, до 16 (13), порог (14, ноль только при пустом составе), операция,
-породившая ревизию (15), отпечаток предыдущей ревизии (16, нули только у
-ревизии 0), выпущена (17), действует до (18). Подпись — ключом подписи лизингов
-над `CC/v1/authority-binding ‖ тело`.
-
-**Проверяется заранее известным ключом.** Клиент берёт якорь из ЗАГОЛОВКА
-контейнера (ключ подписи лизингов, закреплённый автором под своей подписью) и
-проверяет им; поле ключа внутри обязано совпасть с якорем. Документ, называющий
-себя доверенным, доверия не создаёт.
-
-**Память ревизии у клиента.** Подпись не отличает свежую привязку от старой:
-обе подлинные. Клиент помнит последнюю виденную (`<каталог>/bindings/<ключ>.bin`)
-и сравнивает (`oc_protocol::control::continuity`): та же — `Same`, следующая со
-ссылкой на виденную — `Newer`, меньшая — **ОТКАТ**, та же с другими байтами или
-соседняя без ссылки — **РАЗВИЛКА**. Откат и развилка — улики (код выхода 4);
-истёкший срок и адрес, не названный в привязке, — отказ правил (код 5).
-
-**Намерение** (`ControlRequest`) — `u8 n ‖ (ключ ‖ подпись)·n ‖ TLV`, подписи по
-возрастанию ключа и все над ОДНИМ телом (`CC/v1/control-request`): версия (1),
-организация (2), тождество сервера (3), эпоха (4), тождество операции 16 байт
-(5), область = 1 (6), ожидаемая ревизия (7), выпущено (8), действует до (9, не
-дольше суток), вид (10), содержание (11). Виды содержания: адреса и отпечатки
-(1), профиль сохранности (2), состав и порог (3), режим восстановления (4),
-прекращение обслуживания `Stopped`/`ArchiveOnly` с причиной (5), допуск (6) и
-снятие (7) ключа автора. Вид 45 провода несёт намерение, вид 46 — квитанцию,
-47 — вопрос о привязке, 48 — саму привязку.
-
-**Что проверяет сервер и в каком порядке.** Область (организация, тождество,
-эпоха) — первой: намерение чужой области не исполняется и НЕ оставляет следа в
-памяти тождеств. Затем свежесть по сроку намерения. Затем повтор: то же
-тождество и то же тело — сохранённая квитанция, то же тождество и другое тело —
-`IdConflict`. Затем ожидаемая ревизия: не совпала — `StaleRevision`. Затем
-полномочие: подписи из состава ТЕКУЩЕЙ ревизии, числом не меньше порога —
-поэтому состав меняет прежний состав, а не новый сам себя. Только после этого
-привязка получает ревизию +1 со ссылкой на предыдущую, и всё это ложится в
-состояние ДО ответа.
-
-**Квитанция** (`Receipt`) — `подпись(64) ‖ TLV` (`CC/v1/operation-receipt`):
-отпечаток тела намерения, тождество операции, исход (исполнено, отвергнуто,
-ждёт подтверждения реплики, тождество занято, чужая ревизия), ревизия после
-операции, отпечаток зафиксированной привязки, эпоха, достигнутая сохранность,
-причина, момент. Отказ тоже получает квитанцию: молчание неотличимо от потери
-ответа. Не выписывается она лишь там, где выписывать не на что — намерение не
-разбирается, подпись не сходится, область чужая.
-
-**Барьер повтора.** Квитанции хранятся не вечно (256 последних), а ревизия
-растёт навсегда: намерение, чей номер ревизии уже пройден, не станет исполнимым
-никогда. Поэтому компактация памяти квитанций не оживляет старые намерения
-(V11).
-
-**Прекращение обслуживания** (P16). `Stopped` и `ArchiveOnly` закрывают
-регистрацию (обе двери), просьбу о доступе и любую выдачу лизинга
-(`Denied::NotServing`). Отзыв, отзывная, положение файла, журнал и привязка
-работают: прекращение обслуживания — не сокрытие истории, и автор обязан
-сохранить возможность отозвать выданное раньше. Ранее выданные лизинги живут до
-своего срока, и клиент говорит это прямо.
-
-**Локальный путь.** `cca control init|set` меняет привязку на машине сервера:
-полномочие — доступ к каталогу, и это не послабление (у добравшегося до ключей и
-так есть всё). Ревизию он двигает наравне с намерением по проводу — иначе
-местная правка была бы невидима клиенту.
-
-**Сервер без привязки и сервер прежней сборки.** Оба отвечают отказом на вопрос
-о привязке, и клиент передаёт их слова как есть: «привязка не заведена» и
-«неизвестный вид сообщения» — разные новости, и сведение их к одному «нет»
-позволило бы старому серверу выглядеть сервером без требований.
-
-**Чего это не даёт.** Доказательства, что сервер не показывает разным клиентам
-разные привязки: для этого нужен общий свидетель, как у журнала (§9.13); здесь
-ловится лишь то, что видно одному клиенту по его памяти. Ни профиль
-сохранности, ни режим восстановления сами себя не исполняют — это объявление
-сервера о себе; исполняет их реплика (B4) и пакет восстановления (§9.15).
-
-### 9.17. Реплика состояния: толчок и подтверждение — решение 2026-09-18 (E2, B4)
-
-**Задача.** Профиль сохранности из привязки (§9.16) сам себя не исполняет.
-`local` — успех после устойчивой записи сервера, и это то, что было всегда.
-`mirrored` — копия уходит реплике ПОСЛЕ успеха, у хвоста ненулевой RPO.
-`witnessed` — успех не отдаётся, пока реплика не подтвердила ИМЕННО эти байты.
-
-**Толчок** (`oc_protocol::replica::Push`) — `подпись(64) ‖ TLV`: версия (1),
-тождество сервера (2), эпоха (3), номер фиксации (4), отпечаток предыдущего
-снимка (5), отпечаток снимка (6), признак «снимок целиком» (7), момент (8),
-байты состояния (9, не длиннее 2 МиБ). Подпись — ключом подписи лизингов над
-`CC/v1/replica-push ‖ тело`. Принимающий сверяет отпечаток с байтами: подпись
-покрывает отпечаток, и снимок, ему не отвечающий, не принимается.
-
-**Подтверждение** (`Ack`) — `подпись(64) ‖ TLV`: версия, тождество сервера,
-эпоха, номер фиксации, отпечаток снимка, ключ реплики, момент; подпись ключом
-РЕПЛИКИ над `CC/v1/replica-ack ‖ тело`. Ключ реплики сервер знает заранее
-(флаг запуска), и поле внутри обязано с ним совпасть.
-
-**Непрерывность.** Реплика принимает только продолжение своей истории: номер
-на единицу больше и отпечаток предыдущего совпал. Разрыв — `SnapshotRequired`
-(сервер повторяет тем же снимком с признаком «целиком»), тот же номер с другим
-отпечатком — `HistoryConflict` (улика: две истории одного сервера), чужое
-тождество — `OtherScope`. Снимок «целиком» историю назад не отматывает.
-
-**Порядок записи у реплики** — снимок, затем курсор. Обрыв между ними
-оставляет курсор на прежнем номере, и сервер пошлёт тот же снимок заново:
-худший исход здесь повтор, а не потерянное подтверждение.
-
-**Курсор сервера** (`<каталог>/replica-cursor.bin`) — номер последней фиксации,
-её отпечаток и номер последней подтверждённой. Лежит ОТДЕЛЬНО от состояния:
-внутри состояния он описывал бы сам себя. Номер растёт только при смене
-отпечатка состояния — разговор, ничего не изменивший, копии не порождает.
-
-**Что делает сервер в каждом профиле.** `local` — ничего. `mirrored` — толкает
-снимок после записи и НЕ ждёт: неподтверждённый хвост виден по курсору.
-`witnessed` — толкает и ждёт подтверждения; не получив его, отвечает отказом
-«ждёт подтверждения реплики» вместо готового ответа. Само изменение при этом
-уже записано устойчиво, и повтор того же намерения (или той же операции по
-K28) вернёт сохранённый исход, как только подтверждение придёт.
-
-**Чего это не даёт.** Другой машины: реплика в соседнем процессе или контейнере
-переживает падение сервера — и только его; ни диск, ни машина, ни администратор
-этим не покрыты. Границу называют и сервер, и реплика, и `cca replica status`.
-
-**Команды.** `cca replica init --dir <каталог> --authority <authority.pub>
---authority-id <hex32>` заводит каталог реплики и её ключ; `cca replica serve
---dir … --listen …` принимает снимки (один разговор — один снимок, без сессий и
-фоновых потоков); `cca replica status --dir …` печатает, что подтверждено.
-Приём сервера берёт реплику флагами `--replica <адрес> --replica-key <hex64>`;
-без обоих флагов профиль `witnessed` не поднимается вовсе.
-
-### 9.18. Преемство authority: цепочка передач — решение 2026-09-18 (E2, B7)
-
-**Задача.** Автор закрепил в заголовке ключ подписи лизингов ОДНОГО сервера.
-Сервер может переехать: сменить ключи, адрес, оператора. Старый контейнер об
-этом не знает, и лизинг нового сервера его ключом не проверяется. Нужен способ
-сказать «теперь выдаёт вот этот» так, чтобы произвольный новый сервер
-доверенным НЕ становился.
-
-**Сертификат передачи** (`oc_protocol::control::Transfer`) —
-`u8 n ‖ (ключ ‖ подпись)·n ‖ TLV`, подписи по возрастанию ключа над
-`CC/v1/authority-transfer ‖ тело`: версия (1), тождество сервера (2, при
-передаче НЕ меняется), эпоха «из» (3), эпоха «в» (4, ровно +1), ключ подписи
-лизингов прежней эпохи (5), точка перехода (6), судьба прежних лизингов
-(7: 0 — действуют до срока, 1 — не принимаются, если выданы после перехода),
-выпущен (8), действует до (9), подписанная привязка НОВОЙ эпохи (10).
-
-**Кто вправе передать.** Состав управляющих ПРЕЖНЕЙ эпохи, числом не меньше её
-порога (`Binding::roster`, `threshold`). Привязка преемника подписана его
-собственным ключом, и само по себе это не значит ничего: значение ей даёт
-подпись состава под сертификатом, который несёт её байты целиком.
-
-**Цепочка** — файл: привязка эпохи 0 и сертификаты подряд, каждый
-`u32le длина ‖ документ`. Проверка (`verify_chain`) начинается с якоря —
-ключа из заголовка контейнера — и на каждом шаге требует: то же тождество
-сервера, эпоха сертификата равна действующей, названный прежний ключ совпал,
-срок не истёк, подписей состава не меньше порога, привязка преемника
-соответствует эпохе из сертификата. Ни один документ цепочки не назначает себе
-доверие сам.
-
-**Берётся файлом, а не у сервера, и это решение.** Корень доверия нужен именно
-тогда, когда прежнего сервера уже нет: `cc authority <файл.cc> --chain <файл>`
-проверяет цепочку и запоминает её в `<каталог>/chains/<ключ>.bin`.
-
-**У файла цепочки есть предел.** Он читается при КАЖДОЙ неудавшейся проверке
-лизинга и лежит в каталоге настроек — то есть там, куда пишет всё, работающее
-под этой учётной записью. Размер сверяется до чтения, предел выведен из правил
-цепочки (шестнадцать передач, каждая с привязкой внутри) и составляет один
-мебибайт; тот же предел стоит на разборе, потому что проверять цепочку зовут и
-с байтами, пришедшими не из файла.
-
-**Цепочка проверяется ДО всякого адреса, и адрес преемника берётся из неё.**
-Порядок здесь смысловой, а не случайный: `cc authority` вообще-то требует
-названного человеком адреса, и спроси он его раньше цепочки — назвать пришлось
-бы адрес мёртвой эпохи, единственный, который знает файл. Поэтому ветвь
-`--chain` стоит перед разрешением адреса и возвращается из команды сама. Приняв
-цепочку, клиент запоминает первый адрес действующей эпохи как названный для
-этого автора: адрес из проверенной цепочки доверен ровно настолько же,
-насколько ключ из неё, и без этого шага у принявшего остался бы верный ключ и
-никакой дороги к тому, кто им подписывает. Это и есть подъём без прежнего DNS:
-чужой клиент, ни разу не говоривший ни с одним из серверов, получает
-действующую эпоху и её адрес из одного файла.
-
-**Лизинги.** Проверка лизинга (`cc_cli::lease::verify_with_chain`, к которой
-сводится и `verify_for`) сначала пробует ключ из заголовка — обычный путь для
-файла без переезда. Если он не подошёл и есть проверенная цепочка, берутся
-ключи, которые она разрешает: действующей эпохи, промежуточных и якорь. Если
-подошёл, но цепочка говорит «прежние лизинги после перехода не принимать», а
-лизинг выдан позже точки перехода, — отказ `AfterTransition`: так отсекается
-прежний писатель, поднятый из резерва рядом с преемником (V12).
-
-**Вход сюда один — и для открытия, и для приёма выдачи.** `cc unprotect`,
-просмотрщик и брокер спрашивают о доверии к серверу то же самое, что
-`cc activate` и продление, и до 2026-09-21 отвечали по-разному: приём выдачи
-звал проверку ОДНИМ ключом из заголовка, мимо цепочки, и после честной передачи
-сервера документ у получателя не открывался вовсе. Круг доверия от сведения
-путей не изменился — изменилось то, что он один: лизинг, подписанный ключом,
-которого нет ни в заголовке, ни в принятой цепочке, отвергается на обоих
-входах, а отказ на том и другом называет лечение — `cc authority <файл.cc>
---chain <файл цепочки>`.
-
-**Привязка.** Тем же правилом читается привязка сервера (§9.16), и ключ здесь
-не один: пока передач нет — якорь контейнера, а когда есть проверенная цепочка
-— ВСЕ, кого она разрешает (`cc_cli::chain::accepted_now`, порядок тот же, что у
-лизингов: действующая эпоха, прежние, якорь). Один ключ не годится ни в какую
-сторону, потому что честны ОБА сервера. Проверка одним якорем объявила бы
-подделкой преемника, подписавшего привязку своим ключом. Проверка одним ключом
-действующей эпохи объявила бы подделкой прежний сервер — а он обязан ответить
-«полномочия переданы, спрашивайте у преемника» ровно тем, кто о переезде ещё не
-знает и потому пришёл к нему. «Не наша подпись» становится уликой только после
-того, как перебраны все разрешённые ключи.
-
-Доверие от этого не слабее: цепочка проверяется кворумом от якоря ЭТОГО файла
-при каждом чтении, и ключи берутся из неё, а не со слов сервера. Память о
-привязках ведётся по ПОДОШЕДШЕМУ ключу: у каждой эпохи своя история ревизий, и
-сравнивать их между собой нечего — это и означает `Continuity::Unrelated`.
-
-Итоговую строку клиент говорит по тому, какой ключ подошёл: «проверена ключом
-сервера из этого файла» (передач нет), «ключом действующей эпохи, названным
-цепочкой преемства от якоря этого файла» (отвечает преемник) и «ключом ПРЕЖНЕЙ
-эпохи: цепочка называет действующей эпоху N» (отвечает прежний). Сказать второе
-там, где верно третье, было бы хуже молчания: человек решил бы, что говорит с
-тем, кто выдаёт.
-
-**Прежний сервер.** `cca control apply-transfer <сертификат>` проверяет
-сертификат тем же правилом (наша эпоха, наш ключ, наш кворум) и ставит
-состояние `Transferred`: сервер перестаёт регистрировать и выдавать, оставляя
-отзыв, отзывную, положение и журнал.
-
-**Отзыв переезд переживает и дороги к серверу не требует.** Отзывная — документ:
-`cca revoke` кладёт её файлом, её пересылают любым каналом и кладут рядом с
-контейнером как `<контейнер>.revoked`. Читатель отказывает по ней, даже если в
-кеше лежит действующий лизинг и ни одного сервера не поднято. Независимость
-здесь именно от АДРЕСА.
-
-**Подписывает отзывную ТОТ СЕРВЕР, КОТОРЫЙ ОТЗЫВАЕТ, и после передачи это
-может быть преемник.** Формулировка, стоявшая здесь до 2026-09-21 —
-«подписывает отзывную по-прежнему прежняя эпоха», — опиралась на то, что
-преемник старых файлов не обслуживает; `adopt-sealing` (§31 `deferred.md`) это
-отменил, и обслуживает. Отзывать вправе оба: у прежней эпохи отзыв, отзывная,
-положение и журнал остаются после `apply-transfer`, а преемник, взявший файл на
-обслуживание, отзывает его своим ключом (`State::revocation_for` подписывает
-ключом подписи лизингов ТЕКУЩЕЙ эпохи).
-
-Поэтому отзывная проверяется ТЕМ ЖЕ КРУГОМ КЛЮЧЕЙ, ЧТО И ЛИЗИНГ
-(`cc_cli::revoked::verify_with_chain`): ключом из заголовка, а на его неудаче —
-ключами эпох, которые называет принятая цепочка. До 2026-09-21 круг был один
-ключ из заголовка, и отзывная преемника не принималась вовсе — отказ шёл в
-ОТКРЫТУЮ сторону: отозванный автором файл оставался у получателя открытым до
-истечения кешированной лицензии, и ни одной ошибки при этом не печаталось.
-
-**Запрет перехода к отзывной НЕ применяется, и это решение, а не упущение.** У
-лизинга ключ прежней эпохи после точки перехода отвергается
-(`OldLeases::RejectAfterTransition`), потому что лизинг ОТКРЫВАЕТ и смещённый
-оператор продолжал бы выдавать доступ. Отзывная только закрывает, и тот же
-запрет развернулся бы здесь в сторону «открыть»: передача сервера стала бы
-способом СНЯТЬ отзыв — передай полномочия себе же в новую эпоху, и все прежние
-отзывы перестанут приниматься. Отзыв окончателен, в том числе для смены эпохи.
-Сравнивать к тому же нечем: у отзывной нет момента выдачи, а `at` — момент
-отзыва по часам сервера, «для журнала и отчётов, а не для сравнения».
-
-**Чего это не даёт.** Ключа запечатывания САМО ПО СЕБЕ: цепочка говорит лишь,
-чья подпись действительна, а доля A уже выпущенных файлов запечатана на прежний
-ключ. Утверждение, стоявшее здесь до 2026-09-21 — «преемник без него не выдаст
-ни одной доли, значит переезд это либо перенос ключей, либо перевыпуск», —
-устарело: ключ переносят одной командой, `cca control adopt-sealing --key`, и
-после неё преемник открывает слот предшественника и выдаёт долю
-(`crates/cc-authority/tests/succession_sealing.rs`). Ценой остаётся то, что
-перенос надо СДЕЛАТЬ: без него `apply-transfer` называет вслух, сколько файлов
-останется без долей, и лечение.
-
-Старый клиент, не знающий о цепочке, преемника не примет — ни его лизинга, ни
-его отзывной. Для лизинга это отказ в закрытую сторону, и он называет лечение;
-для отзывной — в открытую, и поэтому клиент, нашедший рядом отзывную,
-подписанную неизвестным этому файлу сервером, ГОВОРИТ об этом человеку и
-называет ту же команду. Открывать он при этом не перестаёт: различить
-настоящую отзывную преемника и подделку изнутри нечем, а закрывать по
-непроверенной подписи значило бы отдать чужие документы любому, кто положил
-файл в соседнюю папку.
-
-### 9.19. Окно готовности и три восстановления — решение 2026-09-18 (E2, B6)
-
-**Задача.** Раздача НЕОБРАТИМА: отозвать файл можно, вернуть разосланное —
-нельзя. Перед раздачей автору нужен один ответ, а окон у него было три:
-`cc inspect` разбирает файл, `cc authority` спрашивает привязку сервера,
-`cc standing` — что стоит на файле. Каждое отвечало на свой вопрос, складывал
-их человек, и складывал ровно до первой спешки.
-
-**`cc ready <файл.cc> [--url <адрес>]`** складывает те же три ответа и выносит
-вердикт. Ничего нового она не узнаёт и своего протокола не имеет: это
-`Binding`, `Standing` и разбор заголовка — те же сообщения, что у трёх команд.
-
-**Три исхода, и только три.**
-
-* `МОЖНО РАЗДАВАТЬ` — файл сервером известен, сервер обслуживает, отзыва и
-  заморозки нет, получатель в файле есть. Код выхода 0.
-* `РАЗДАВАТЬ НЕЛЬЗЯ` — узнанная причина: сервер не знает файла, файл отозван,
-  выдачи заморожены кнопкой паники, сервер прекратил обслуживание или передал
-  полномочия, ключ подписи не тот, получателей в файле нет. Код 5.
-* `НЕ ЗНАЮ` — спросить не у кого: адрес не назван или сервер не ответил.
-  Код 6.
-
-Третий исход и есть смысл команды. Вердикт СМЕЩЁН В ЗАПРЕТ, как И-10:
-непроверенное не считается проверенным, и молчания, которое читалось бы как
-согласие, здесь нет ни в одной ветви. Различаются два молчания: сервер,
-ответивший отказом, даёт «нельзя», сервер, не ответивший вовсе, — «не знаю»;
-разбирается это по коду отказа, а не по тексту.
-
-**Запомненная цепочка преемства показывается здесь же.** Если для якоря этого
-файла цепочка принята (`cc authority --chain`), окно готовности печатает
-действующую эпоху, её адреса и момент перехода, а когда опрошенный адрес не
-принадлежит действующей эпохе — говорит об этом отдельной строкой. Спрашивают
-окно ровно тогда, когда что-то не так; если полномочия переехали, человеку
-нужен адрес ДЕЙСТВУЮЩЕЙ эпохи, а не объяснение, почему молчит прежняя.
-Печатается при этом проверенное: цепочка проверена от якоря файла при приёме,
-а не при показе.
-
-**Три восстановления, которые нельзя смешивать.** Там, где службы не стало,
-человек спрашивает «что делать», и ответов ТРИ. Они не взаимозаменяемы:
-
-1. **Спасти содержимое** — открыть файл без сервера: слотом устройства автора,
-   одобрением, кворумом соавторов или завещанием наследнику. Службу это не
-   поднимает.
-2. **Восстановить службу** — поднять сервер из пакета восстановления (§9.15),
-   из реплики (§9.17) или передать полномочия преемнику (§9.18). Файл тому,
-   кому нечем открывать, это не откроет.
-3. **Выпустить новый файл** — перевыпуск автором из исходника. Уже разосланное
-   от этого не меняется и продолжает жить своей жизнью.
-
-Развилка печатается там, где службы не стало: `cc ready` при недоступном или
-прекратившем сервере и `cca recovery restore` после подъёма. Смешать их —
-значит дать человеку делать первое попавшееся из трёх, а первое попавшееся
-здесь чаще всего не то.
-
-## 10. Запрос доступа: документы и их байты
-
-Раздел записан 2026-08-27 и закрывает провал: документы запроса доступа
-существовали в коде с Ф-14, а нормативного описания у них не было ВОВСЕ. По
-закону репозитория при расхождении побеждает спека — а побеждать было нечему.
-Провал не безобидный: правило набора символов записки исполняют ОБА конца
-провода, клиент и сервер, и обновляются они порознь. Правило, живущее только в
-коде одной стороны, — это правило, о котором вторая сторона не знает.
-
-### 10.1. Зачем документы и кто их подписывает
-
-Умолчание системы — **запрос доступа, а не бесшовность**: получатель, которого
-при упаковке не называли, слота в контейнере не имеет и открыть файл не может.
-Вместо отказа он видит возможность попросить, а автор — одобрить или отклонить.
-
-Документов три, и направление у каждого своё:
-
-| Документ | Кто составляет | Кому | Подпись |
+| `sealing.key`, `lease-sign.key` | keys as stored: DPAPI-wrapped remain wrapped |
+| `authority.pub` | public halves |
+| `authority-state.bin` | state (file store only), read once |
+| `attest/*` | attestation anchors, if configured |
+| `manifest.bin` | manifest, written last |
+
+Manifest: `signature(64) ‖ TLV`: version (1), signing key (2), sealing key (3), time (4), program version (5), store 1 — file, 2 — database (6), state digest (7, file only), signed 104-byte journal head (8), key protection as text (9), parts as a stream `u16le length ‖ name ‖ SHA-256` (10). Signature: lease-signing key over `CC/v1/recovery-manifest ‖ body`. Part name is a path inside the package: no `..`, `.`, empty components, `\`, or `:`; otherwise manifest parsing fails. Codec: `cc_authority::recovery`. Body limited to 64 KiB; with the 64-byte signature, manifest file cannot exceed 64 KiB + 64 bytes. The verifier reads at most the limit plus one byte and rejects larger files before parsing.
+
+A manifest signature proves self-consistency: its verification key is inside it. Trust comes from comparison with the `authority.pub` known to authors (`--expect-authority`); without this, verification prints “WARNING” with the key. A rollback witness is not packaged: an old package would bring an old witness.
+
+**Verification** (`cca recovery verify D [--expect-authority P] [--witness W]`) reports each part as “PASS / FAIL / WARNING”: manifest and signature; keys versus `authority.pub`; mandatory parts present; each part's digest; whether keys open on this machine and match the manifest (“mixed backup”); whether state reads under those keys and its journal matches the manifest head; whether the package extends the witness (“package behind”). Any failure yields nonzero exit status. Database: only keys are checked; the database itself uses `cca store verify` after restoration.
+
+**Restoration** (`cca recovery restore D --home H …`) repeats verification, refuses any failure or a nonempty destination, rechecks every part's digest while copying, and prints a launch command with an outside-package witness. Starting the restored directory performs three comparisons: keys against state (tag 13), journal against saved head, journal against witness.
+
+**What this does not provide.** Key portability: a DPAPI-wrapped key does not open on another machine or under another account, which verification states; on Windows `CC_KEY_STORAGE=portable` still wraps if the platform supports it (`deferred.md` §26.1). Package protection from its holder: it contains server keys. Complete history after capture: the package is a lower bound; only the witness knows newer history.
+
+### 9.16. Server control: binding, intents, and receipts — decision of 2026-09-18 (E2, B2)
+
+**Task.** Before B2, server addresses, durability profile, controller roster, author admission, and service termination changed LOCALLY through a command on the server machine: filesystem access conferred authority, no trace remained, and clients learned of changes only through behavior. Changes now have a signed intent, a signed binding with a revision number, and a signed receipt; clients have a way to detect rollback.
+
+**Binding** (`oc_protocol::control::Binding`) — `signature(64) ‖ TLV`: version (1), organization (2), stable 16-byte identity (3), epoch (4), revision (5), lease-signing key (6), sealing key (7), addresses as a `u16le length ‖ address` stream, 1–8 (8), ascending 32-byte TLS fingerprints, up to 8 (9), durability profile 0/1/2 — local/mirrored/witnessed (10), recovery mode (11), service state 0–3 (12), ascending controller roster, up to 16 (13), threshold (14, zero only for an empty roster), operation that created the revision (15), previous-revision digest (16, zeros only for revision 0), issued (17), valid until (18). Lease-signing-key signature over `CC/v1/authority-binding ‖ body`.
+
+**Verified with a previously known key.** The client takes its anchor from the container HEADER (lease-signing key pinned under the author's signature) and verifies with it; the embedded key field must match the anchor. A document calling itself trusted does not create trust.
+
+**Client revision memory.** A signature cannot distinguish a fresh binding from an old one: both are authentic. The client remembers the latest seen (`<directory>/bindings/<key>.bin`) and compares (`oc_protocol::control::continuity`): identical — `Same`; next revision referring to the remembered one — `Newer`; lower — **ROLLBACK**; same revision with different bytes or adjacent revision without the link — **FORK**. Rollback and fork are evidence (exit code 4); expiry and an address absent from the binding are rule refusals (code 5).
+
+**Intent** (`ControlRequest`) — `u8 n ‖ (key ‖ signature)·n ‖ TLV`, signatures in ascending key order, all over ONE body (`CC/v1/control-request`): version (1), organization (2), authority identity (3), epoch (4), 16-byte operation identity (5), scope = 1 (6), expected revision (7), issued (8), valid until (9, no longer than one day), kind (10), payload (11). Payload kinds: addresses and fingerprints (1), durability profile (2), roster and threshold (3), recovery mode (4), service termination `Stopped`/`ArchiveOnly` with reason (5), author-key admission (6), and removal (7). Wire kind 45 carries intent, 46 a receipt, 47 a binding query, 48 the binding itself.
+
+**Server checks and order.** Scope (organization, identity, epoch) first: another scope's intent neither executes nor leaves a trace in identity memory. Then freshness by intent validity. Then replay: same identity and same body — stored receipt; same identity and different body — `IdConflict`. Then expected revision: mismatch — `StaleRevision`. Then authority: signatures from the CURRENT revision's roster, at least the threshold count — the old roster changes the roster; the new one does not appoint itself. Only then does the binding receive revision +1 linked to its predecessor, all persisted BEFORE responding.
+
+**Receipt** (`Receipt`) — `signature(64) ‖ TLV` (`CC/v1/operation-receipt`): intent-body digest, operation identity, outcome (executed, rejected, awaiting replica confirmation, identity occupied, wrong revision), post-operation revision, committed-binding digest, epoch, achieved durability, reason, time. Refusal gets a receipt too: silence is indistinguishable from response loss. None is issued only when there is nothing valid to receipt — unparseable intent, invalid signature, foreign scope.
+
+**Replay barrier.** Receipts are not retained forever (last 256), but revision grows forever: an intent whose revision has already passed never becomes executable again. Compacting receipt memory therefore does not revive old intents (V11).
+
+**Service termination** (P16). `Stopped` and `ArchiveOnly` block registration (both entry points), access requests, and every lease grant (`Denied::NotServing`). Revocation, revocation notices, file status, journal, and binding remain available: stopping service must not hide history; authors must retain the ability to revoke earlier grants. Previously issued leases last until their expiry, which the client states explicitly.
+
+**Local path.** `cca control init|set` modifies the binding on the server machine: directory access confers authority; this is no weakening (someone with access to the keys already has everything). It advances revisions like a wire intent — otherwise local edits would be invisible to clients.
+
+**Server without a binding versus an older server.** Both refuse binding queries; the client relays their exact messages: “binding not initialized” and “unknown message kind” mean different things, and collapsing them into “none” would let an old server look like one without requirements.
+
+**What this does not provide.** Proof that the server does not show different clients different bindings: that needs a shared witness like the journal (§9.13); here only differences visible within one client's memory are caught. Neither durability profile nor recovery mode enforces itself — each is the server's declaration; enforcement comes from the replica (B4) and recovery package (§9.15).
+
+### 9.17. State replica: push and acknowledgment — decision of 2026-09-18 (E2, B4)
+
+**Task.** A binding's durability profile (§9.16) does not enforce itself. `local` means success after the server's durable write, as always. `mirrored` sends a copy to a replica AFTER success; the tail has nonzero RPO. `witnessed` withholds success until the replica confirms EXACTLY these bytes.
+
+**Push** (`oc_protocol::replica::Push`) — `signature(64) ‖ TLV`: version (1), authority identity (2), epoch (3), commit number (4), previous-snapshot digest (5), snapshot digest (6), “full snapshot” flag (7), time (8), state bytes (9, at most 2 MiB). Lease-signing-key signature over `CC/v1/replica-push ‖ body`. The receiver compares digest against bytes: the signature covers the digest, and a nonmatching snapshot is rejected.
+
+**Acknowledgment** (`Ack`) — `signature(64) ‖ TLV`: version, authority identity, epoch, commit number, snapshot digest, replica key, time; REPLICA-key signature over `CC/v1/replica-ack ‖ body`. The server knows the replica key beforehand (startup flag); the embedded field must match it.
+
+**Continuity.** A replica accepts only an extension of its history: number exactly one higher and matching previous digest. A gap gives `SnapshotRequired` (server resends the same snapshot with “full” set); same number with a different digest gives `HistoryConflict` (evidence: two histories of one server); foreign identity gives `OtherScope`. A “full” snapshot cannot rewind history.
+
+**Replica write order** — snapshot, then cursor. Interruption leaves the cursor at the previous number; the server resends the same snapshot: worst case is repetition, not a lost acknowledgment.
+
+**Server cursor** (`<directory>/replica-cursor.bin`) — latest commit number, its digest, and latest acknowledged number. Stored SEPARATELY from state: inside state it would describe itself. The number advances only when the state digest changes — a conversation changing nothing produces no copy.
+
+**Server behavior per profile.** `local`: nothing. `mirrored`: push snapshot after writing, DO NOT wait; cursor exposes the unacknowledged tail. `witnessed`: push and await acknowledgment; without it, return “awaiting replica confirmation” instead of the prepared response. The change itself is already durable; retrying the same intent (or K28 operation) returns the saved outcome once acknowledgment arrives.
+
+**What this does not provide.** Another machine: a replica in a neighboring process or container survives server-process failure, and only that; disk, machine, and administrator are not covered. Server, replica, and `cca replica status` state this boundary.
+
+**Commands.** `cca replica init --dir <directory> --authority <authority.pub>
+--authority-id <hex32>` initializes the replica directory and key; `cca replica serve
+--dir … --listen …` receives snapshots (one conversation per snapshot, no sessions or background threads); `cca replica status --dir …` prints what has been acknowledged. Server acceptor flags: `--replica <address> --replica-key <hex64>`; without both, profile `witnessed` refuses to start.
+
+### 9.18. Authority succession: transfer chain — decision of 2026-09-18 (E2, B7)
+
+**Task.** The author pinned ONE server's lease-signing key in the header. A server may move: change keys, address, operator. The old container knows nothing of this, and cannot verify a new server's lease under its key. A way is needed to say “this party now issues leases” WITHOUT making an arbitrary new server trusted.
+
+**Transfer certificate** (`oc_protocol::control::Transfer`) — `u8 n ‖ (key ‖ signature)·n ‖ TLV`, signatures in ascending key order over `CC/v1/authority-transfer ‖ body`: version (1), authority identity (2, UNCHANGED across transfer), “from” epoch (3), “to” epoch (4, exactly +1), previous epoch's lease-signing key (5), transition point (6), old-lease treatment (7: 0 — valid until expiry, 1 — reject if issued after transition), issued (8), valid until (9), signed NEW-epoch binding (10).
+
+**Who may transfer.** The PREVIOUS epoch's controller roster, with signatures meeting its threshold (`Binding::roster`, `threshold`). The successor binding is signed by its own key, which alone means nothing: authority comes from roster signatures on the certificate carrying all its bytes.
+
+**Chain** — a file containing the epoch 0 binding followed by certificates, each `u32le length ‖ document`. Verification (`verify_chain`) starts at the anchor — the container-header key — and at every step requires: same authority identity, certificate epoch equal to the current epoch, matching named previous key, unexpired validity, roster signatures meeting threshold, and successor binding matching the certificate's epoch. No chain document grants itself trust.
+
+**Obtained as a file, not from the server, deliberately.** The trust root is needed precisely when the former server is gone: `cc authority <file.cc> --chain <file>` verifies and remembers the chain in `<directory>/chains/<key>.bin`.
+
+**The chain file is bounded.** It is read on EVERY failed lease verification and resides in the settings directory, writable by everything running under that account. Size is checked before reading; the limit derives from chain rules (sixteen transfers, each containing a binding) and is one mebibyte. Parsing enforces the same limit because chain verification also receives bytes from sources other than files.
+
+**The chain is verified BEFORE any address; the successor address comes from it.** This order is semantic: `cc authority` normally requires a user-specified address; resolving it before the chain would demand the dead epoch's address, the only one the file knows. Therefore the `--chain` branch precedes address resolution and returns directly. Upon accepting the chain, the client remembers the current epoch's first address as the chosen address for this author: a verified-chain address is as trustworthy as its key; without this step the client would have a correct key but no route to its signer. This is recovery without the old DNS: a fresh client that has never contacted any server obtains the current epoch and its address from one file.
+
+**Leases.** Lease verification (`cc_cli::lease::verify_with_chain`, also used by `verify_for`) first tries the header key — the usual path for an unmoved file. If it fails and a verified chain exists, use the keys it permits: current epoch, intermediate epochs, anchor. If verification succeeds but the chain says “reject old leases after transition” and the lease was issued later than the transition point, reject as `AfterTransition`: this blocks the former writer restored from backup beside the successor (V12).
+
+**One entry point, for opening and receiving grants alike.** `cc unprotect`, viewer, and broker ask the same server-trust question as `cc activate` and renewal; until 2026-09-21 they answered differently: grant reception verified with ONE header key, bypassing the chain, so after an honest authority transfer recipients could not open the document at all. Unifying these paths did not change the trust set; it made it one set: a lease signed by a key absent from both the header and accepted chain is rejected at both entry points, each naming the remedy — `cc authority <file.cc>
+--chain <chain file>`.
+
+**Binding.** The server binding (§9.16) follows the same rule, with more than one key: before transfers, the container anchor; with a verified chain, ALL permitted keys (`cc_cli::chain::accepted_now`, same order as leases: current epoch, previous epochs, anchor). A single key fails in either direction because BOTH servers are honest. Anchor-only verification would call the successor's self-signed binding a forgery. Current-key-only verification would call the former server a forgery — yet it must answer “authority transferred, ask the successor” precisely to clients unaware of the move who still contact it. “Not our signature” becomes evidence only after every allowed key has been tried.
+
+Trust is no weaker: the chain is quorum-verified from THIS file's anchor on every read, and keys come from it, not server claims. Binding memory is keyed by the MATCHING key: each epoch has its own revision history, so there is nothing to compare across epochs — the meaning of `Continuity::Unrelated`.
+
+The client's final message reflects which key matched: “verified with this file's server key” (no transfers); “with the current epoch key named by the succession chain from this file's anchor” (successor response); or “with a PREVIOUS epoch key: the chain names epoch N as current” (former server response). Saying the second when the third is true would be worse than silence: the user would think they were talking to the issuer.
+
+**Former server.** `cca control apply-transfer <certificate>` verifies by the same rule (our epoch, our key, our quorum) and sets `Transferred`: registration and issuance stop; revocation, revocation notices, status, and journal remain.
+
+**Revocation survives migration and needs no route to the server.** A revocation notice is a document: `cca revoke` writes it to a file, transferable through any channel and placed beside the container as `<container>.revoked`. A reader denies on it even with an active cached lease and no running server. The independence is specifically from the ADDRESS.
+
+**The server PERFORMING REVOCATION signs the notice; after transfer, that may be the successor.** Until 2026-09-21, this said “the previous epoch still signs revocation notices,” relying on the successor not serving old files; `adopt-sealing` (§31 `deferred.md`) changed that, and it now does. Both may revoke: the previous epoch retains revocation, notices, status, and journal after `apply-transfer`; a successor that adopted the file revokes with its own key (`State::revocation_for` signs with the CURRENT epoch's lease-signing key).
+
+A notice therefore uses THE SAME KEY SET AS A LEASE (`cc_cli::revoked::verify_with_chain`): first the header key; on failure, epoch keys named by the accepted chain. Until 2026-09-21, that set contained only the header key; successor notices were never accepted — failure was OPEN: an author-revoked file remained open to its recipient until the cached license expired, without printing any error.
+
+**The transition cutoff does NOT apply to revocation notices, deliberately.** For leases, an old-epoch key after transition is rejected (`OldLeases::RejectAfterTransition`), because leases OPEN files and a displaced operator could keep issuing access. Notices only close; the same cutoff would favor opening: transferring authority would become a way to REMOVE revocation — transfer to oneself in a new epoch, and all old notices stop being accepted. Revocation is final even across epoch changes. There is no appropriate time to compare either: a notice has no issue time, and `at` is the revocation time by server clock, “for journal and reports, not comparison.”
+
+**What this does not provide.** The sealing key BY ITSELF: the chain only says whose signature is valid; share A of previously issued files is sealed to the former key. The pre-2026-09-21 assertion — “without it the successor cannot issue any share, so migration means either moving keys or reissuing files” — became outdated: the key is transferred by one command, `cca control adopt-sealing --key`, after which the successor opens its predecessor's slot and issues the share (`crates/cc-authority/tests/succession_sealing.rs`). The remaining cost is that the transfer must be PERFORMED: without it, `apply-transfer` explicitly states how many files will remain without shares and the remedy.
+
+An old client unaware of the chain accepts neither successor leases nor notices. For a lease this fails closed and names the remedy; for a notice it fails open. A client finding an adjacent notice signed by a server unknown to this file therefore TELLS the user and names the same command. It does not stop opening: internally there is no way to distinguish an authentic successor notice from a forgery; closing on an unverified signature would put other people's documents under the control of anyone able to place a file in a neighboring folder.
+
+### 9.19. Readiness view and three kinds of recovery — decision of 2026-09-18 (E2, B6)
+
+**Task.** Distribution is IRREVERSIBLE: a file may be revoked, but distributed copies cannot be taken back. Before distribution, an author needs one answer but had three views: `cc inspect` parses the file, `cc authority` queries the server binding, and `cc standing` checks the file's standing. Each answered its own question; a human combined them, until the first rush.
+
+**`cc ready <file.cc> [--url <address>]`** combines those same three answers into a verdict. It learns nothing new and has no protocol of its own: `Binding`, `Standing`, and header parsing — the same messages as those three commands.
+
+**Three outcomes, and only three.**
+
+* `МОЖНО РАЗДАВАТЬ` — READY TO DISTRIBUTE: server knows the file, is serving, no revocation or freeze, file has a recipient. Exit code 0.
+* `РАЗДАВАТЬ НЕЛЬЗЯ` — MUST NOT DISTRIBUTE: known reason — server does not know the file, file revoked, grants frozen by panic button, server stopped serving or transferred authority, wrong signing key, no recipients in file. Code 5.
+* `НЕ ЗНАЮ` — UNKNOWN: nobody available to ask — no address specified or server did not answer. Code 6.
+
+The third outcome is the point of the command. Its verdict BIASES TOWARDS DENIAL, like I-10: unverified does not count as verified; no branch permits silence to mean consent. Two silences are distinguished: a server returning refusal means “must not”; a server not responding means “unknown,” distinguished by refusal code, not text.
+
+**The remembered succession chain appears here too.** If a chain was accepted for this file's anchor (`cc authority --chain`), the readiness view prints the current epoch, its addresses, and transition time; if the queried address is not in the current epoch, a separate line states this. Users consult readiness precisely when something is wrong; if authority moved, they need the CURRENT epoch's address, not an explanation of why the former one is silent. The displayed data is verified: the chain was checked from the file anchor upon acceptance, not upon display.
+
+**Three kinds of recovery that must not be confused.** When service disappears, “what do I do?” has THREE noninterchangeable answers:
+
+1. **Recover content** — open without the server: via the author's device slot, approval, co-author quorum, or bequest to an heir. This does not restore service.
+2. **Restore service** — start the server from a recovery package (§9.15), a replica (§9.17), or transfer authority to a successor (§9.18). This does not open a file for someone lacking an opening mechanism.
+3. **Issue a new file** — the author reissues from the source. Already distributed copies remain unchanged and continue their own lifecycle.
+
+This choice is printed where service is gone: `cc ready` for an unavailable or stopped server, and `cca recovery restore` after startup. Confusing the three makes a user try whichever comes first; here that is usually the wrong one.
+## 10. Access requests: documents and their bytes
+
+This section was written on 2026-08-27 to close a gap: access-request documents had existed in code since F-14, yet had NO normative description whatsoever. Under repository law, the specification wins in a disagreement—but there was nothing to win. The gap was not harmless: BOTH ends of the wire, client and server, enforce the note character-set rule, and they update independently. A rule living only in one side's code is a rule the other side does not know about.
+
+### 10.1. Why the documents exist and who signs them
+
+The system defaults to **requesting access, not seamless access**: a recipient not named during packaging has no slot in the container and cannot open the file. Instead of a rejection, they see an opportunity to ask, and the author an opportunity to approve or deny.
+
+There are three documents, each with its own direction:
+
+| Document | Prepared by | Addressed to | Signature |
 |---|---|---|---|
-| `AskAccess` | получатель | серверу | **нет** |
-| `Pending` | сервер | автору | **нет** |
-| `Decision` | автор | серверу, затем получателю | **есть**, ключом автора |
+| `AskAccess` | recipient | server | **none** |
+| `Pending` | server | author | **none** |
+| `Decision` | author | server, then recipient | **present**, using the author's key |
 
-Подпись стоит ровно там, где нужна: доступ выдаёт автор, и только его решение
-обязано быть неподделываемым. У просьбы подписи нет намеренно — просителя при
-упаковке не называли, и проверять его подпись было бы нечем. Очередь защищает
-не проверка личности, а потолок (§10.6) и сверка отпечатка (§10.8).
+The signature is exactly where it is needed: the author grants access, and only their decision must be unforgeable. The request is deliberately unsigned—the requester was not named during packaging, and there would be no key against which to verify their signature. The queue is protected by a ceiling (§10.6) and fingerprint comparison (§10.8), rather than identity verification.
 
-### 10.2. Общая раскладка
+### 10.2. Common layout
 
-Все три документа — TLV того же вида, что заголовок контейнера: тег `u16`,
-длина `u32`, значение. Поля идут **строго по возрастанию тега** (И-7), из чего
-бесплатно следует невозможность дубликатов и перестановок. Все ЗАНЯТЫЕ теги
-≤ `0x7FFF`, то есть критичны: незнакомый тег в этом диапазоне — отказ.
+All three documents use the same TLV form as the container header: a `u16` tag, a `u32` length, and a value. Fields appear in **strictly increasing tag order** (I-7), which also rules out duplicates and permutations. All ASSIGNED tags are ≤ `0x7FFF` and thus critical: an unknown tag in this range causes rejection.
 
-Незнакомый тег > `0x7FFF` пропускается — общее правило §0.1 (решение
-2026-09-21) — у просьбы и у записи очереди. У РЕШЕНИЯ автора (§10.5) правило не
-действует: его подпись проверяется по телу, собранному заново
-(`access::decision_body`), и пропуск сделал бы подписанный документ ковким.
-Довод целиком — в §0.1 и в самом разборщике.
+An unknown tag > `0x7FFF` is skipped—the general rule in §0.1 (decision of 2026-09-21)—in requests and queue entries. The rule does not apply to the author's DECISION (§10.5): its signature is verified over a reconstructed body (`access::decision_body`), and skipping would make the signed document malleable. The full reasoning is in §0.1 and the parser itself.
 
-Предел размера документа — `MAX_DOCUMENT` = `MAX_HEADER_LEN` = 1 МиБ.
+The document size limit is `MAX_DOCUMENT` = `MAX_HEADER_LEN` = 1 MiB.
 
-Реестр тегов (общий для трёх документов; номера не переиспользуются):
+Tag registry (shared by all three documents; numbers are not reused):
 
-| Тег | Имя | Тип | Длина |
+| Tag | Name | Type | Length |
 |---|---|---|---|
-| 1 | `file_id` | байты | ровно 16 |
-| 2 | `device_fpr` | байты | ровно 32 |
-| 3 | `device_public` | байты | задаётся `device_kem`, см. §10.8 |
-| 4 | `device_kem` | `u8` | ровно 1 |
-| 5 | `note` | UTF-8 | не более 256 **байт**, набор символов — §10.7 |
-| 6 | `seq` | `u64` LE | ровно 8 |
-| 7 | `at` | `i64` LE | ровно 8 |
-| 8 | `approve` | `u8` (0 или 1) | ровно 1 |
-| 9 | `enc` | байты | эфемерный ключ Seal |
-| 10 | `nonce` | байты | ровно 24 |
-| 11 | `ct` | байты | доля B под AEAD |
-| 12 | `author_key` | байты | ровно 32 |
-| 13 | `signature` | байты | ровно 64 |
+| 1 | `file_id` | bytes | exactly 16 |
+| 2 | `device_fpr` | bytes | exactly 32 |
+| 3 | `device_public` | bytes | determined by `device_kem`, see §10.8 |
+| 4 | `device_kem` | `u8` | exactly 1 |
+| 5 | `note` | UTF-8 | at most 256 **bytes**, character set in §10.7 |
+| 6 | `seq` | `u64` LE | exactly 8 |
+| 7 | `at` | `i64` LE | exactly 8 |
+| 8 | `approve` | `u8` (0 or 1) | exactly 1 |
+| 9 | `enc` | bytes | Seal ephemeral key |
+| 10 | `nonce` | bytes | exactly 24 |
+| 11 | `ct` | bytes | share B under AEAD |
+| 12 | `author_key` | bytes | exactly 32 |
+| 13 | `signature` | bytes | exactly 64 |
 
-### 10.3. `AskAccess` — просьба получателя
+### 10.3. `AskAccess`—the recipient's request
 
-Поля: `file_id`(1), `device_fpr`(2), `device_public`(3), `device_kem`(4),
-`note`(5). Все обязательны.
+Fields: `file_id`(1), `device_fpr`(2), `device_public`(3), `device_kem`(4), `note`(5). All are required.
 
-### 10.4. `Pending` — просьба, как её видит автор
+### 10.4. `Pending`—the request as seen by the author
 
-Поля `AskAccess` плюс `seq`(6) и `at`(7). Оба добавляет **сервер**, и оба —
-его собственные: `seq` — место в очереди, `at` — момент по часам СЕРВЕРА.
-Время, названное просителем, ничем не подтверждено, и в документ оно не входит.
+The `AskAccess` fields plus `seq`(6) and `at`(7). Both are added by the **server**, and both are its own: `seq` is the position in the queue, and `at` is a timestamp from the SERVER's clock. A time supplied by the requester is unsubstantiated and is not included in the document.
 
-### 10.5. `Decision` — решение автора
+### 10.5. `Decision`—the author's decision
 
-Тело: `file_id`(1), `device_fpr`(2), `seq`(6), `approve`(8), затем — **только
-при одобрении** — `enc`(9), `nonce`(10), `ct`(11), и всегда `author_key`(12).
-Полный документ = тело, к которому приписан TLV с `signature`(13).
+Body: `file_id`(1), `device_fpr`(2), `seq`(6), `approve`(8), then—**only for approval**—`enc`(9), `nonce`(10), `ct`(11), and always `author_key`(12). The complete document is the body with a `signature`(13) TLV appended.
 
-Одобрение без доли и отказ с долей отвергаются оба: первое — разрешение,
-которое нечем исполнить, второе — доля, выданная вопреки решению.
+Both approval without a share and denial with a share are rejected: the former is permission that cannot be exercised, and the latter is a share delivered contrary to the decision.
 
-**`approve` — ровно `0` или `1`; любой другой байт отвергается на разборе
-(2026-09-20).** До этого дня читалось «байт не ноль», и значение `5` означало
-одобрение наравне с единицей — два представления одного смысла там, где
-каноничность (И-7) требует одного. Тем же днём и по тому же доводу ужесточён
-признак `snapshot` у толчка реплики (§9.17).
+**`approve` is exactly `0` or `1`; any other byte is rejected during parsing (2026-09-20).** Previously it was read as “a nonzero byte,” and `5` meant approval just as one did—two representations of one meaning where canonicality (I-7) requires one. On the same day and for the same reason, the `snapshot` flag in a replica push (§9.17) was tightened as well.
 
-**Подписывается тело целиком**, транскриптом с меткой `"CC/v1/grant"`; поле
-`signature` в подпись не входит и стоять обязано последним (возрастание тега это
-и обеспечивает). Проверка — `verify_strict` (И-6).
+**The entire body is signed**, using a transcript with label `"CC/v1/grant"`; the `signature` field is excluded from the signature and must appear last (increasing tag order ensures this). Verification uses `verify_strict` (I-6).
 
-Ключ проверки берётся **из заголовка контейнера получателя**, где его закрепил
-автор под своей подписью, а НЕ из поля `author_key` принесённого документа.
-`author_key` несётся затем, чтобы подпись было чем проверить тому, кто файла ещё
-не видел, а не затем, чтобы ему верили: взять ключ из проверяемого документа
-значило бы спросить у проверяемого, верить ли ему.
+The verification key is taken **from the recipient's container header**, where the author pinned it under their signature, NOT from the supplied document's `author_key` field. `author_key` is carried so that someone who has not yet seen the file can verify the signature, not so that it can be trusted: taking the key from the document being verified would mean asking the subject of verification whether to trust it.
 
-### 10.6. Пределы
+### 10.6. Limits
 
-* `MAX_NOTE` = **256 байт** (не символов: русская записка вмещает вдвое меньше
-  букв, чем латинская, и это верно — по проводу едут байты);
-* `MAX_WAITING_PER_FILE` = **256** нерешённых просьб на файл — потолок того,
-  что сервер помнит. Повторная просьба того же устройства места не занимает и
-  в потолок не упирается — иначе противник, забивший очередь, отнимал бы у
-  законного получателя право попросить снова;
-* `MAX_PENDING_PER_FILE` = **16** — окно: ответ на `Requests` несёт первые
-  шестнадцать нерешённых по номеру, не больше, и клиент больший ответ
-  отвергает. Решённая просьба уходит из окна, и в него встаёт следующая.
-  До 2026-09-16 окно и потолок совпадали (16), и семнадцатый проситель
-  получал «очередь полна» — на рассылке ста адресатам это восемьдесят четыре
-  отказа (`docs/plan.md`, Ф-22 п.3). Форма ответа от разведения не менялась;
-* `MAX_DOCUMENT` = 1 МиБ.
+* `MAX_NOTE` = **256 bytes** (not characters: a Russian note fits half as many letters as a Latin one, correctly so—bytes travel over the wire);
+* `MAX_WAITING_PER_FILE` = **256** unresolved requests per file—the ceiling on what the server remembers. A repeated request from the same device takes no additional space and does not hit the ceiling; otherwise, an adversary who filled the queue would deprive a legitimate recipient of the right to ask again;
+* `MAX_PENDING_PER_FILE` = **16**—the window: a `Requests` response carries the first sixteen unresolved requests by sequence number, no more, and the client rejects a larger response. A resolved request leaves the window and the next one enters. Until 2026-09-16, the window and ceiling were the same (16), and the seventeenth requester received “queue full”—eighty-four rejections in a mailing to a hundred recipients (`docs/plan.md`, F-22 item 3). Separating them did not change the response format;
+* `MAX_DOCUMENT` = 1 MiB.
 
-### 10.7. Набор символов записки — НОРМАТИВНО
+### 10.7. Note character set—NORMATIVE
 
-Записка — фраза от человека человеку, и пишут её на своём языке. Поэтому
-сужения до печатного US-ASCII, нормативного для адресов сервера
-(`docs/format.md`, «Адреса сервера»), здесь **нет и быть не должно**: у адреса
-есть проводная форма, ASCII по построению (нелатинские имена ходят punycode), а
-у записки её нет.
+A note is a phrase from one person to another, written in their own language. Therefore the restriction to printable US-ASCII that is normative for server addresses (`docs/format.md`, “Server addresses”) **does not and must not apply here**: an address has a wire representation that is ASCII by construction (non-Latin names use punycode), whereas a note does not.
 
-Отвергаются **категории**, а не алфавиты. Ниже — нормативный список; реализация
-обязана совпадать с ним и живёт в `oc_format::text`.
+**Categories**, not alphabets, are rejected. The following list is normative; the implementation must match it and lives in `oc_format::text`.
 
-1. **Управляющие символы** — категория `Cc` целиком, включая `\n` и `\r`.
-   Перевод строки запрещён НАРАВНЕ с прочими: записка печатается пунктом
-   перечня просьб, и перевод строки выводит текст из пункта наружу — записка,
-   внутри которой стоят «№ 2» и «устройство:», дорисовывает в очередь просьбу,
-   которой нет.
-2. **Метки и переключатели направления** — двенадцать точек: U+061C, U+200E,
-   U+200F, U+202A…U+202E, U+2066…U+2069. Двенадцать, а не девять: набор Trojan
-   Source (встраивания, PDF, override, изоляции) не включает сами МЕТКИ
-   направления, а они переставляют текст так же.
-3. **Невидимые форматирующие без орфографической роли** — U+00AD, U+180E,
-   U+200B, U+2060, U+FEFF. Порядок они не меняют, они не показываются вовсе, и
-   потому две разные записки печатаются неотличимо.
-4. **Разделители строки и абзаца** — U+2028, U+2029. Отдельным пунктом потому,
-   что их категории `Zl` и `Zp`, а не `Cc`: проверка на управляющие символы их
-   НЕ ловит.
-5. **Теговые символы** — U+E0000…U+E007F, невидимая копия ASCII. Цена названа
-   вслух: последовательности флагов отдельных регионов через эту проверку не
-   пройдут.
+1. **Control characters**—the entire `Cc` category, including `\n` and `\r`. A newline is forbidden JUST LIKE the others: the note is printed as an item in a list of requests, and a newline moves text outside that item—a note containing “No. 2” and “device:” draws a request into the queue that does not exist.
+2. **Direction marks and switches**—twelve code points: U+061C, U+200E, U+200F, U+202A…U+202E, U+2066…U+2069. Twelve, not nine: the Trojan Source set (embeddings, PDF, overrides, isolates) does not include direction MARKS themselves, although they reorder text too.
+3. **Invisible formatting characters without an orthographic role**—U+00AD, U+180E, U+200B, U+2060, U+FEFF. They do not reorder text; they are not displayed at all, making two different notes appear identical.
+4. **Line and paragraph separators**—U+2028, U+2029. Listed separately because their categories are `Zl` and `Zp`, not `Cc`: the control-character check does NOT catch them.
+5. **Tag characters**—U+E0000…U+E007F, an invisible copy of ASCII. The cost is explicit: sequences for certain regional flags will not pass this check.
 
-**U+200C и U+200D (ZWNJ и ZWJ) РАЗРЕШЕНЫ.** Они невидимы, но орфографически
-обязательны в персидском, арабском и деванагари и склеивают составные эмодзи.
-Запретить их значило бы повторить ошибку сужения до ASCII на уровень глубже.
+**U+200C and U+200D (ZWNJ and ZWJ) ARE ALLOWED.** They are invisible but orthographically required in Persian, Arabic, and Devanagari, and join composite emoji. Banning them would repeat the mistake of restricting text to ASCII one level deeper.
 
-Комбинирующие знаки не ограничиваются: это письменность половины мира. Против
-«залго» работает предел ДЛИНЫ, а не запрет категории.
+Combining marks are unrestricted: they are part of the writing systems of half the world. The LENGTH limit addresses “zalgo,” rather than a category ban.
 
-Правило исполняется и на записи, и на **разборе** — то есть и сервером тоже.
-Реакция разная: разбор документ ОТВЕРГАЕТ (`FormatError::BadNoteChar` с кодом
-символа, но без самого символа — напечатать его значило бы пропустить на экран
-тем путём, который проверка и закрывает), показ ЗАМЕНЯЕТ символ точкой.
-Множество у обеих сторон одно.
+The rule is enforced during both writing and **parsing**—and therefore by the server too. The responses differ: parsing REJECTS the document (`FormatError::BadNoteChar` with the character's code point but not the character itself—printing it would let it reach the screen by precisely the path the check closes), while display REPLACES the character with a dot. Both sides use the same set.
 
-### 10.8. Что обязан проверить каждый
+### 10.8. What each party must check
 
-**Сервер, приняв просьбу:**
+**The server, upon receiving a request:**
 
-* `device_fpr` **равен** `device_fpr(device_kem, device_public)` по K27
-  (`docs/format.md`, «Отпечаток устройства для всех механизмов») константным
-  временем, длина ключа — по механизму; иначе — отказ «отпечаток не сходится с
-  ключом». До 2026-09-09 здесь стояло «`device_kem` = 1, иначе отказ»: связь
-  отпечатка с ключом была задана только для X25519. Довод остался тем же,
-  сузился только способ: пропусти сервер несогласованную тройку — и чужой
-  прислал бы отпечаток жертвы со своим ключом, автор сверил бы отпечаток
-  вторым каналом и увидел правильный, а доля уехала бы запечатанной на ключ
-  постороннего;
-* файл зарегистрирован и не отозван;
-* потолок очереди (§10.6), причём повтор проверяется РАНЬШЕ потолка.
+* `device_fpr` **equals** `device_fpr(device_kem, device_public)` under K27 (`docs/format.md`, “Device fingerprint for all mechanisms”), compared in constant time; the key length matches the mechanism. Otherwise reject with “fingerprint does not match key.” Until 2026-09-09 this said “`device_kem` = 1, otherwise reject”: the fingerprint-to-key binding was defined only for X25519. The reasoning stayed the same; only the method had been narrower: if the server accepted an inconsistent triple, an outsider could send the victim's fingerprint with their own key, the author would verify the fingerprint through a second channel and see the correct one, and the share would leave sealed to the outsider's key;
+* the file is registered and not revoked;
+* the queue ceiling (§10.6), checking for a repeat BEFORE the ceiling.
 
-**Проситель, составляя просьбу (этап 4 Ф-12, 2026-09-14):** механизм — по силе
-файла (авторский слот), не по слоту получателя: классический файл — X25519,
-X-Wing — X-Wing, аппаратный гибрид — только пятый; без ключа в TPM — отказ, а
-не просьба слабее файла. Печатает человеку ТО имя, под которым просьба ушла:
-для гибрида — имя по K27, не классический ключ.
+**The requester, preparing a request (F-12 stage 4, 2026-09-14):** choose the mechanism by the file's strength (the author slot), not the recipient slot: a classical file uses X25519, X-Wing uses X-Wing, a hardware hybrid uses only the fifth mechanism; without a TPM key, reject instead of making a request weaker than the file. Print for the person the EXACT identity under which the request was sent: for a hybrid, the K27 identity, not the classical key.
 
-**Автор, одобряя:** сверяет `device_fpr == device_fpr(device_kem, device_public)`
-сам, до ворот сверки и до открытия слота, и ещё раз перед запечатыванием. Сверка
-человеком вторым каналом остаётся: она сверяет ИМЯ, а программа — что имя
-называет присланный ключ. P-256 (`kem_id = 2`) отвергается: развернуть такую
-долю получателю нечем.
+**The author, approving:** independently checks `device_fpr == device_fpr(device_kem, device_public)` before the verification gate and before opening the slot, and again before sealing. Human verification over a second channel remains: it verifies the IDENTITY, while the program verifies that the identity names the supplied key. P-256 (`kem_id = 2`) is rejected: the recipient has no way to unwrap such a share.
 
-**Получатель, забирая решение:** спрашивает каждым своим именем (классическое,
-K27 от X-Wing, K27 от MLKEM768-P256 при ключе в TPM) в отдельном разговоре с
-доказательством этого имени; сервер отдаёт решение только под доказанным
-(§9.4, `Collect`). Одобрение под любым именем сильнее отказа под любым другим;
-номера решений разных имён не сравниваются — порядок между очередью и
-завещанием задаёт сервер (§11.5: завещание первым).
+**The recipient, collecting a decision:** queries under each of their identities (classical, K27 for X-Wing, K27 for MLKEM768-P256 with a TPM key) in a separate conversation proving that identity; the server releases a decision only under the proven identity (§9.4, `Collect`). Approval under any identity takes precedence over denial under any other; decision numbers across identities are not compared—the server defines the order between the queue and a bequest (§11.5: bequest first).
 
-**Автор, получив очередь:** сверить **отпечаток** вторым каналом с тем, кто
-просил, и назвать его в `--fpr`. Номер в очереди составляет сервер, и под тем же
-номером к моменту одобрения может стоять уже другой проситель. Записка —
-подсказка, а не удостоверение: её текст выбрал посторонний.
+**The author, receiving the queue:** verifies the **fingerprint** with the requester over a second channel and specifies it in `--fpr`. The server assigns the queue number, and a different requester may already occupy that number by the time approval occurs. The note is a hint, not a credential: its text was chosen by an outsider.
 
-**Получатель, забрав решение:** подпись — `verify_strict` ключом из заголовка
-СВОЕГО файла; `file_id` — свой; `device_fpr` — одно из СВОИХ имён, сверенное
-со всеми константным временем без раннего выхода; доля разворачивается
-механизмом совпавшего имени с тем же именем в `info` — не перебором механизмов
-и без отката на другой при неудаче. Решение, подписанное не тем ключом, — это подмена, а не
-чужой файл: открывать нельзя.
+**The recipient, having collected a decision:** verifies the signature with `verify_strict` using the key in THEIR OWN file's header; `file_id` must be their own; `device_fpr` must be one of THEIR OWN identities, compared against all of them in constant time without early exit; the share is unwrapped using the matched identity's mechanism and the same identity in `info`—without iterating through mechanisms or falling back to another on failure. A decision signed by the wrong key is substitution, not someone else's file: it must not be opened.
 
-### 10.9. Чего этот механизм НЕ даёт
+### 10.9. What this mechanism does NOT provide
 
-* **Доказательства владения у просьбы нет и быть не может.** Просителя при
-  упаковке не называли; предъявить ему нечего. Просьбу вправе прислать кто
-  угодно, добравшийся до адреса.
-* **Одобрение необратимо.** Выданную долю не отозвать: она уже у получателя.
-  Закрыть доступ можно только отзывом файла на сервере — тот перестанет выдавать
-  вторую долю, и файл не откроется.
-* **Приватности метаданных нет.** Постороннему в трубе видно, кто на какой файл
-  просит доступ. Содержимого и доли B не видно: доля запечатана на ключ
-  устройства, и сам сервер её не открывает.
+* **A request has no proof of possession and cannot have one.** The requester was not named during packaging; they have nothing to present. Anyone who reaches the address may submit a request.
+* **Approval is irreversible.** A delivered share cannot be recalled: the recipient already has it. Access can be closed only by revoking the file on the server—the server then stops releasing the second share, and the file cannot be opened.
+* **There is no metadata privacy.** An outsider on the channel can see who requests access to which file. Neither the contents nor share B are visible: the share is sealed to the device key, and even the server does not open it.
 
-## 11. Наследник и признак жизни: решение 2026-09-04
+## 11. Heir and sign of life: decision of 2026-09-04
 
-Здесь описана **мёртвая рука**. Кворум и соавторы, которым оставлены номера
-видов 3–6 и теги 7–10, описаны следующим разделом.
+This section describes the **dead man's switch**. Quorum and coauthors, for which kind numbers 3–6 and tags 7–10 are reserved, are described in the next section.
 
-### 11.1. Распоряжение перестало быть парой
+### 11.1. Orders are no longer a pair
 
-До 2026-09-04 `oc_protocol::order` знал два вида: регистрацию и отзыв. Видов стало
-четыре, и появилась вещь, которой у пары не было, — **состав полей, зависящий от
-вида**: у регистрации свои пределы, у наследника свой срок и завещание, у
-признака жизни свой ключ автора.
+Until 2026-09-04, `oc_protocol::order` knew two kinds: registration and revocation. There are now four, introducing something the pair did not have—a **set of fields dependent on the kind**: registration has its limits, the heir has a timeout and bequest, and a sign of life has its author key.
 
-Состав проверяется **одной функцией в обе стороны** (`order::check`), и это не
-стилевое предпочтение. Разойдись проверка записи с проверкой разбора хоть на
-одно поле — и появится распоряжение, которое мы отказываемся выписать, но всё же
-исполним, придя оно со стороны. Ровно ту же оговорку раньше несла пара
-«пределы у отзыва»; теперь она одна на все виды.
+The field set is checked by **one function in both directions** (`order::check`), and this is not a stylistic preference. If writing and parsing validation diverged by even one field, an order would exist that we refuse to issue yet still execute when it arrives from outside. Previously the “limits on revocation” pair carried exactly the same caveat; now there is one for every kind.
 
-### 11.2. Реестр видов и тегов
+### 11.2. Kind and tag registry
 
-Виды (`kind`, тег 3, ровно 1 байт):
+Kinds (`kind`, tag 3, exactly 1 byte):
 
-| Номер | Вид | Что делает |
+| Number | Kind | Effect |
 |---|---|---|
-| 1 | `Register` | занять файл на сервере с названными пределами |
-| 2 | `Revoke` | отозвать доступ к файлу |
-| 3–6 | — | **оставлены за кворумом**: пределы, состав соавторов, состав одобряющих, голос за устройство |
-| 7 | `Alive` | автор здесь: отодвинуть срок тишины |
-| 8 | `SetHeir` | назначить наследника, закрыть по тишине или снять и то и другое |
+| 1 | `Register` | reserve a file on the server with the specified limits |
+| 2 | `Revoke` | revoke access to a file |
+| 3–6 | — | **reserved for quorum**: limits, coauthor membership, approver membership, device vote |
+| 7 | `Alive` | author is present: postpone the silence deadline |
+| 8 | `SetHeir` | appoint an heir, close after silence, or remove both |
 
-Теги тела (все ЗАНЯТЫЕ номера критичны, идут по возрастанию, номера не
-переиспользуются). Диапазон `0x8000`–`0xFFFF` не занят ни одним полем и
-отведён под необязательные: незнакомый тег оттуда пропускается (§0.1).
+Body tags (all ASSIGNED numbers are critical, appear in increasing order, and are not reused). The `0x8000`–`0xFFFF` range has no assigned fields and is reserved for optional ones: unknown tags in it are skipped (§0.1).
 
-| Тег | Имя | Тип | У какого вида |
+| Tag | Name | Type | Applicable kinds |
 |---|---|---|---|
-| 1 | `version` | `u16` LE | у всех, значение 1 |
-| 2 | `file_id` | байты, ровно 16 | у всех; нулевой — «все файлы этого ключа», только у `Alive` |
-| 3 | `kind` | `u8` | у всех |
-| 4 | `at` | `i64` LE | у всех |
-| 5 | `max_devices` | `u32` LE | только `Register`, необязателен |
-| 6 | `max_grants` | `u32` LE | только `Register`, необязателен |
-| 7–10 | — | — | **оставлены за кворумом** |
-| 11 | `silence_seconds` | `u64` LE | обязателен у `SetHeir{Open, Close}`, запрещён иначе |
-| 12 | `heir_mode` | `u8` | обязателен у `SetHeir`, запрещён иначе |
-| 13 | `bequest` | байты | обязателен у `SetHeir{Open}`, запрещён иначе |
-| 14 | `author_key` | байты, ровно 32 | обязателен у `Alive` с нулевым `file_id`, запрещён иначе |
-
-`heir_mode`: `0` — снять наследника и срок вовсе, `1` — открыть наследнику
-завещание, `2` — закрыть файл всем. Ноль — **значение, а не отсутствие поля**:
-«снять» есть распоряжение, которое сервер обязан исполнить и записать, и
-отличать его от «поле забыли» надо на разборе, а не догадкой.
-
-### 11.3. Почему наследник назначается завещанием, а не слотом
-
-Слот пришлось бы вписывать в заголовок, то есть **переупаковывать файл**: а
-переупаковка меняет `file_id` и подпись, и уже разосланные копии наследника не
-получат. Слот получателя в версии 1 к тому же один и у файлов с партнёром занят.
-
-Завещание переупаковки не требует. У автора в слоте `AuthorDevice` лежат ОБЕ
-доли, поэтому запечатать долю B на ключ устройства наследника он может в любой
-день после выпуска файла — ничего в контейнере не трогая.
-
-**Сторона приёма не меняется вовсе.** Завещание — обычный `Decision` (§10.5) с
-зарезервированным номером `HEIR_SEQ = u64::MAX`; получатель номер не сверяет
-(`cc_cli::granted::accept_against`), и это не упущение, а причина, по которой
-завещание вообще возможно без правки клиента. Номер сверяет **сервер** — и по
-нему отличает завещание от очередного решения, не заводя второго вида документа.
-Сквозная очередь решений начинается с нуля и растёт, поэтому наибольшее
-возможное число ей недостижимо: занять его завещанием значит не отнять у очереди
-ни одного номера.
-
-Завещание едет **готовыми байтами**, и разбирающая сторона обязана вернуть их
-как есть: подпись автора покрывает решение целиком, и всякая пересборка с ней
-разойдётся.
-
-### 11.4. Что проверяется в завещании при разборе
-
-Разборщик распоряжения проверяет ВЛОЖЕННОЕ решение, а не только его наличие
-(И-9: непроверенные байты не покидают крейт):
-
-* оно разбирается как `Decision`;
-* его `file_id` совпадает с `file_id` распоряжения;
-* его `seq` равен `HEIR_SEQ`;
-* оно одобряет (`approve = 1`) и несёт долю B.
-
-Первое из четырёх — не гигиена, а необходимость: подпись автора одинаково верна
-и на его же решении о ДРУГОМ файле, поэтому по подписи чужое завещание от нужного
-неотличимо, и сверять надо содержимое. Подпись самого решения проверяет сервер
-при приёме — ключом, записанным у файла.
-
-### 11.5. Что делает сервер
-
-**Признаком жизни служит любое РАСПОРЯЖЕНИЕ автора**, а не только `Alive`:
-отзыв, смена пределов, смена состава, назначение наследника. У всех у них есть
-момент выписки, все проходят проверку на свежесть, и потому каждое ДАТИРУЕТ
-присутствие. Отметка — одна функция `touch_alive`, и ставится она **всем файлам
-этого ключа сразу**.
-
-**Решение по просьбе (`Decision`) признаком жизни НЕ служит**, и первая редакция
-этого абзаца утверждала обратное. Решение не несёт момента выписки вовсе —
-проверить его на свежесть нечем. Значит решение, подписанное автором когда угодно
-и придержанное, покупало бы полный срок молчания в день, когда его наконец
-донесут; подписанных и неотправленных решений у автора может накопиться сколько
-угодно. Исправлено по находке состязательного ревью 2026-09-04. Молчание есть свойство АВТОРА,
-а не файла: человек, зашедший одобрить один документ, не умер в отношении
-остальных. Считай сервер тишину по файлу — наследник получал бы редко
-используемые документы при живом авторе.
-
-Отметка идёт только **вперёд**. Назад её двигать нельзя: меньшее значение
-удлиняет тишину, то есть приближает необратимое, — а вызывающие приносят своё
-представление о времени, и одно из них однажды окажется отставшим.
-
-**Событие оценивается лениво, при обращении к файлу.** Будильника на файл нет и
-не будет: будильник обязан пережить всё, что переживает сервер — перезапуск,
-перенос на другую машину, восстановление копии, — а ленивая оценка переживает
-это по построению, потому что состояния у неё нет вовсе, есть сравнение двух
-чисел, которые и так хранятся.
-
-Цена названа вслух: событие «наступает» не в свой момент, а при первом обращении
-после него. Для наследника это ровно то, что нужно — он и обращается; для журнала
-это значит, что время записи есть время ЗАМЕЧАНИЯ события, а не наступления.
-
-**Без точки отсчёта событие не наступает.** Файл, у которого сервер ни разу не
-видел автора, не открывается наследнику и не закрывается по тишине. Умолчание
-выбрано так, чтобы недостающее поле сохраняло положение вещей: обе перемены
-необратимы, и совершать их по отсутствующему значению нельзя ни в ту сторону, ни
-в другую. Назначение наследника само по себе есть признак жизни, поэтому у
-назначенного наследника точка отсчёта есть всегда.
-
-**Срок короче суток отвергается** (`MIN_SILENCE_SECONDS`). Это не придирка к
-вкусу автора, а защита от опечатки в единицах: «30» вместо «30d» означало бы
-тридцать секунд, и наследник получил бы файл через полминуты после назначения.
-
-**События журнала**: `HeirSet` (16), `HeirReleased` (17), `ClosedBySilence` (18).
-Номера 11–15 оставлены за кворумом. Назначение, смена режима и снятие — ОДНО
-событие: запись журнала несёт файл, устройство, эпоху и время, места под «что
-именно» в ней нет, а расширять её значило бы менять транскрипт MAC и длину
-извещения, то есть ломать журналы, уже подписанные прежней сборкой. Что назначено,
-видно в положении файла; журнал отвечает «автор трогал наследника тогда-то».
-Освобождение и закрытие, наоборот, разведены: «файл достался наследнику» и «файл
-закрыт навсегда» — противоположные ответы на вопрос «что произошло».
-
-**Закрытие по тишине проверяется в выдаче** — после доказательства владения и до
-всяких пределов. После доказательства потому, что до него не расходуется ни один
-предел и не пишется ни одной записи в журнал; до пределов потому, что закрытый
-файл не выдаётся вовсе, и жаловаться на исчерпанный предел там, где выдачи не
-будет, значило бы называть не ту причину. Проверяется и при продлении: отзыв
-режима действует не позже следующего продления.
-
-**Повтор перехваченного распоряжения ничего не меняет.** Свежести для этого
-мало: провод открытый, а `SetHeir`, `SetLimits` и оба состава задают СОСТОЯНИЕ, а
-не приращение — перехвативший назначение наследника посылал бы его снова после
-снятия, и наследник возвращался бы. Сервер помнит хеши исполненных распоряжений
-двойной допуск перекоса часов (ровно столько, сколько распоряжение вообще может
-быть принято) и повтор пропускает МОЛЧА, ничего не меняя: отказ был бы хуже —
-клиент, не получивший ответа, повторяет запрос сам.
-
-**И под кворумом тоже — решение 2026-09-05 после ревью Ф-21 (Н-1, Н-2).** Первая
-редакция помнила повторы только на единоличном пути, где они и были найдены;
-кворумный путь не помнил ничего — исполненное предложение удалялось, и те же N
-перехваченных подписей заводили его заново и исполняли второй раз. Под кворумом
-помнится **отпечаток намерения**, не тело: тела у подписавших разные по
-построению, а воскрешает состояние именно намерение. Цена названа: то же
-намерение, законно поданное заново в те же десять минут, пройдёт молча как
-повтор. Память о повторах теперь **переживает перезапуск** (тег 22 состояния
-сервера, пишется только пока непуста): «упавший сервер» противнику дешевле подписи
-автора, а перезапуск внутри окна стирал память.
-
-**Признак жизни под кворумом (Н-3, Н-4).** Подпись АВТОРА под предложением —
-хоть первая, хоть последняя — датирует присутствие, как и всякое его
-распоряжение (§11.5); подпись соавтора — нет. Назначение наследника само по себе
-присутствия автора НЕ датирует: первая редакция ставила отметку независимо от
-того, кто подписал, и состав без автора мог отодвигать тишину бесконечно,
-переназначая тот же режим. Файлу, у которого автора ещё не видели, назначение
-даёт лишь ТОЧКУ ОТСЧЁТА — иначе событие не наступило бы никогда.
-
-**Наследник ходит той же дверью, что все.** `Collect` отвечает завещанием, когда
-оно освобождено и адресовано этому отпечатку; до срока — тем же «доступа пока
-нет», что видит любой ожидающий. Знать о своём особом положении наследнику не
-требуется.
-
-Завещание при этом спрашивается ПЕРВЫМ, раньше очереди решений, и это не
-предпочтение, а порядок номеров: `HEIR_SEQ` есть наибольший возможный номер, то
-есть новейшее решение автора из всех существующих. Правило «новейшее решение
-выигрывает» действует и для обычной очереди — устройство, которому однажды
-отказали, вправе попросить снова, и второе решение автора обязано доехать.
-
-**Состояние сервера** хранит наследника тегом 18 (вложенный TLV: режим, срок,
-отпечаток и завещание у открывающего, момент замечания) и `last_alive` — тегом
-19. Оба пишутся, **только когда непусты**: сервер, ни разу не назначавший
-наследника, читается прежней сборкой как раньше. Тронутый — не читается, и
-оговорка та же, что у списка допущенных авторов.
-
-### 11.6. Границы, названные вслух
-
-* **Освобождённое завещание не отозвать.** Оно уже у наследника — то же
-  свойство, что у выданной доли B (§10.9).
-* **Тишина измеряется часами сервера.** Их перевод вперёд освобождает завещание
-  раньше срока. Состояние сервера и так вне периметра — цена та же, что у
-  отзыва.
-* **Присутствие на другом сервере не считается.** Признак жизни отмечается там,
-  куда пришёл.
-* **Регулярный `Alive` раскрывает серверу ритм присутствия автора.** Это
-  метаданные, как и всё прочее на сервере (§4).
-
-### 11.7. Наследников бывает несколько — решение 2026-09-05
-
-Тег 13 несёт не одно решение, а ПОТОК: `u32le длина ‖ Decision`, повторяясь до
-шестнадцати раз. Один наследник — поток из одной записи, и особого случая для
-него нет.
-
-**Номер тега не сожжён, и это стоит объяснить.** И-7 запрещает переиспользовать
-номер под ДРУГИМ смыслом. Смысл здесь тот же и всегда был им — «кому и что
-достаётся после тишины», — а выражен точнее. Сжигать номер было бы не
-осторожностью, а суеверием: ни один сервер с назначенным наследником не выпущен,
-и документы протокола, кроме лизинга, не заморожены (§0).
-
-**В состоянии сервера номер СОЖЖЁН, и там это верно.** Тег 3 внутри записи
-наследника нёс один отпечаток; поток занял тег 4. Разница с предыдущим абзацем в
-том, что прежняя сборка прочла бы поток под номером 3 КАК ОТПЕЧАТОК и не заметила
-бы этого — тридцать два первых байта потока выглядят отпечатком не хуже
-настоящего.
-
-Проверки те же и на каждое завещание: тот же файл, `HEIR_SEQ`, одобрение, доля.
-Сверх них две:
-
-* **повтор отпечатка отвергается** — два решения одному устройству означали бы,
-  что сервер должен выбрать между ними, а выбирать ему нечем;
-* **одно негодное завещание портит весь список** — принять его частью значило бы
-  исполнить распоряжение не так, как автор подписал.
-
-Подпись КАЖДОГО проверяется отдельно ключом автора: разборщик сверил содержимое
-(И-9), но ключа он не знает, а одна годная подпись в списке ничего не говорит об
-остальных.
-
-**Каждому своё.** `Collect` отдаёт наследнику решение, запечатанное на ЕГО ключ;
-чужое ему бесполезно — открыть его нечем. Прочие получатели доступ сохраняют:
-наследование есть «ещё один получатель», а не «смена владельца»
-(`docs/deferred.md` §18).
-
-**Событие освобождения — по-прежнему одно на файл, а не по наследнику.** Событий
-столько, сколько случилось, а случилось одно: автор замолчал. В запись журнала
-уезжает первый отпечаток из списка — не выбор из равных, а единственное, что
-запись умеет нести; расширять её значило бы менять транскрипт MAC и длину
-извещения. Кто назначен на самом деле, видно в положении файла.
-
-### 11.7.1. Наследник по КОДУ — решение 2026-09-05
-
-Автор не всегда может назвать наследника ключом. Нотариус, душеприказчик, «тот,
-кто придёт с этим конвертом» — люди, чьего устройства автор при жизни не знает, а
-код передать может.
-
-**Код выводит ПАРУ КЛЮЧЕЙ, а не долю.** Здесь конструкция расходится со слотом
-`RecipientClaim`, и разойтись обязана. Слот выводит долю B прямо из кода, и там
-это верно: доля получателя может быть какой угодно, лишь бы обе стороны вывели
-одну. У наследника доля ФИКСИРОВАНА — это доля B данного файла, лежащая в слоте
-автора, — и вывести её из произвольного кода нельзя: вывод даёт то, что даёт.
-
-Поэтому из кода выводится приватный ключ X25519 (производная K22, метка
-`"CC/v1/claim-device"`, `salt = file_id`), а завещание запечатывается на его
-открытый ключ обычным `seal` — тем же, каким автор печатает долю на любое
-устройство.
-
-**Прямое следствие: сервер и провод не меняются вовсе.** Ни нового вида запроса,
-ни нового поля, ни новой ветки. Для сервера отпечаток, выведенный из кода, —
-такой же отпечаток, как всякий другой; наследник по коду приветствует,
-доказывает владение и забирает решение теми же сообщениями, что обычное
-устройство. О коде не знает ни сервер, ни формат контейнера; знают двое — автор и
-тот, кому автор код отдал.
-
-Здесь **исправлена посылка плана**. Ф-21 п. 9 предполагал, что завещание
-запечатывается под код «тем же способом, каким это делает слот `RecipientClaim`»,
-а отпечатком служит обязательство кода, — и отсюда выводил новый вид `Claim` на
-проводе. Посылка неверна: слот не запечатывает ничего (`enc` и `nonce` нулевые,
-`ct` пуст), и способа, на который план ссылался, не существует. Вид на проводе
-поэтому не заведён.
-
-**`salt = file_id` в выводе пары.** Один и тот же код, выданный дважды, в разных
-файлах даёт разные пары. Иначе утечка кода стоила бы всех файлов, куда автор
-вписал тот же код, — а он его повторит: коды раздают людям, а не файлам.
-
-**Метка отдельная и обязана быть отдельной.** С меткой `"CC/v1/slot-b-claim"` над
-тем же `ikm` вывод дал бы приватный ключ, равный доле слота: код, открывающий
-один файл, выдал бы ключ, которым адресован другой.
-
-**Код порождается командой и чужого не берёт.** `cc heir <файл> --code` пишется
-БЕЗ значения; принесённый человеком код отвергается с объяснением. Причина — И-4:
-обязательство проверяется оффлайн, поэтому придуманный «на память» код
-перебирается без единого обращения к серверу, и слабый код равен открытому файлу.
-
-**Чего конструкция не даёт.** Отозвать выданный код нельзя иначе, чем сняв
-наследника целиком (`cc heir --off`) до наступления события: кода в контейнере
-нет, отзывать нечего. Утёкший код равен утёкшему ключу устройства — и это ровно
-та цена, за которую он берётся: код можно передать человеку, ключ устройства
-нельзя.
-
-**Код нужен и после получения.** `cc claim` кладёт на диск САМО РЕШЕНИЕ
-(`<file_id>.bequest`), а не развёрнутую долю: доля — секрет, и на диске ей делать
-нечего. Открывается решение выведенной парой, то есть кодом, при каждом открытии
-файла.
-
-**Код принимает и просмотрщик — решение 2026-09-05, и оно закрыло дыру старше
-наследника.** До него код принимал только `cc unprotect`, а это путь ЭКСПОРТА:
-он пишет открытый текст на диск и спрашивает у правил разрешение на экспорт.
-Файл с одним лишь правом просмотра, адресованный кодом, не мог открыть никто —
-ни получатель по слоту `RecipientClaim`, ни наследник по коду.
-
-Окно «доступа пока нет» предлагает поле кода везде, где доли ещё нет (включая
-отказ автора: наследнику он мог отказать как устройству). Код проверяется тремя
-дверями по возрастанию цены: обязательство слота; завещание на диске; завещание
-у сервера — тем же рукопожатием, что у устройства. Ответ сервера «пока нет» окно
-передаёт словами и НЕ различает «чужой код» и «срок не вышел»: различие было бы
-оракулом «код к этому файлу».
-
-Новому процессу просмотрщика код едет **по stdin** (`ccview <файл> --code-stdin`),
-и только так. Аргументом он был бы виден в списке процессов, переменной
-окружения — в снимке окружения любого потомка, файлом — на диске. У флага нет
-значения намеренно. Порядок дверей за долей у просмотрщика и у `cc unprotect`
-один — библиотечная `granted::share_for`, — потому что две копии одного порядка
-расходятся в сторону «разрешено».
-
-**Лицензию наследник получает СВОИМ устройством, и правила файла к нему
-применяются целиком** (ревью Ф-21, Р-2, названо как граница). Код даёт долю B;
-долю A и лицензию выдаёт сервер обычной активацией устройства наследника — той
-же, что любому получателю. Значит кворум одобряющих, предел устройств и закрытие
-по тишине действуют и на него: одобряющим придётся голосовать за отпечаток МАШИНЫ
-наследника, которого автор при назначении не знал (он виден в журнале сервера
-записью «выдача задержана кворумом»). Окно в этом случае говорит «лицензия не
-получена» и оставляет кнопку повторить; обойти кворум кодом нельзя, и это не
-недоработка — иначе код был бы способом обойти правило двух человек.
-
-**Второе открытие ведёт в то же окно** (ревью Ф-21, Р-1, исправлено в тот же
-день). Лицензия и доля сервера после первого открытия лежат в кеше, и сеанс шёл
-веткой кеша: кода нет, слота для устройства нет — и человек получал код возврата
-в консоль, которой у двойного щелчка нет. Теперь «лицензия есть, доли нет, кода
-не дали» — состояние `NeedsCode`: окно открывается с полем кода. Туда же ведёт
-лежащее на диске завещание.
-
-**Отказ устройству не заслоняет завещание по коду** (ревью Ф-21, находка Н-1,
-исправлена в тот же день). Отказ автора лежит в кеше просьбы наравне с
-одобрением, и первая редакция `share_for` останавливалась на первом ответе
-устройства — в том числе на отказе. Наследник, которому автор при жизни отказал
-как устройству, а после оставил завещание на код, документ не открывал — ровно в
-том сценарии, который этот раздел обещает. Теперь дверь устройства даёт долю
-только при одобрении; отказ по ней означает «смотри завещание», а не «доли нет».
-Проба — `crates/cc-cli/tests/share_doors.rs`.
-
-**Остатки, названные ревью и оставленные сознательно.** Поле кода в окне —
-`egui::TextEdit`, и его история отмены держит копии набираемого текста до конца
-процесса; `Zeroizing` их не покрывает, маскировка `.password(true)` касается
-только отрисовки. Строка кода, прочитанная новым процессом со stdin, остаётся в
-буфере стандартного ввода процесса. Оба остатка — в процессе, который и так
-держит открытый текст документа, и смягчены затирающим аллокатором для
-освобождаемых блоков. Один файл `.bequest` на `file_id`: два кода одного файла
-на одной машине стирают друг друга, открытие первым снова требует сервера.
-
-### 11.11. Порядок между распоряжениями — решение 2026-09-06
-
-Подпись и свежесть проверяются у КАЖДОГО распоряжения, а порядок МЕЖДУ ними не
-проверялся ничем: `order.at` шёл на свежесть и на память повторов, но ни разу не
-сравнивался с уже применённым состоянием. Память повторов помнит ХЕШ ТЕЛА и
-отбивает те же байты; распоряжение, ПЕРЕХВАЧЕННОЕ и не доставленное, ей
-неизвестно, и доставленное позже более нового оно откатывало состояние назад.
-
-**Правило одно на все виды.** Распоряжение СТАРШЕ последней принятой команды
-того же вида ничего не меняет — молча, ни события, ни отказа, как всякий повтор.
-
-**Барьер поднимает команда, ИСПОЛНЕННАЯ БЕЗ ОТКАЗА** — в том числе та, что
-ничего не изменила: подтверждение уже стоящего состояния поднимает его наравне с
-переменой, иначе дверь остаётся открытой придержанной команде (найдено на
-заморозке, §11.9). Отвергнутая проверками — НЕ поднимает. Прежде отметка
-ставилась до разбора случаев, и собственная опечатка автора (негодный срок
-предложения) запирала его же годное распоряжение, подписанное минутой раньше:
-оно проходило молча, автор видел успех, а состав не вставал.
-
-**Проверка стоит НА ДВЕРИ, а не в исполнении.** Под кворумом соавторов
-предложение опознаётся НАМЕРЕНИЕМ, а исполняет его та подпись, что добрала
-кворум, — и её момент всегда свежий. Барьер, стоявший в исполнении, кворумный
-путь пропускал целиком: придержанная подпись автора входила в копилку как ни в
-чём не бывало, а добирала кворум честная свежая подпись соавтора — и решение,
-отменённое автором позже, возвращалось РУКАМИ ВТОРОГО ЧЕЛОВЕКА. Правило двух
-человек при этом нарушено: под велением стоит подпись, которую автор опроверг.
-Той же формы был С-1 в ревью Ф-21 — память о повторах стояла на единоличном пути
-и не стояла на кворумном; вторая находка на той же границе.
-
-**Исполнение ОЧИЩАЕТ копилку своего вида.** Двери для этого мало: подпись автора
-под предложением честна и свежа в свой момент и входит в копилку законно, а
-исполненное позже веление того же вида делает её беспредметной — досланная
-подпись соавтора добрала бы кворум под тем, что уже отменено. Довод тот же, каким
-смена состава соавторов выбрасывает предложения прежнего состава: они собраны под
-положение вещей, которого больше нет.
-
-**По ВИДУ, а не на файл целиком.** Виды независимы и приходят вперемешку; общий
-барьер запирал бы состав, подписанный раньше соседних пределов. Хранится тег 25
-состояния сервера: `вид(1) ‖ i64le момент`, повторяясь, пишется только когда
-непуст.
-
-**У голоса одобряющего барьер свой** — по паре «устройство, одобряющий», и
-хранится он подписанным моментом в записи голоса (81 байт вместо 73; форма 73
-читается как прежде, а подписанный момент берётся от момента приёма ПЛЮС допуск
-перекоса часов — верхняя граница того, что вообще могло быть принято в этот
-момент. Равным приёму его брать нельзя: перекос допускается в обе стороны, и
-часы одобряющего вправе идти впереди серверных, а тогда барьер выйдет ниже
-настоящего. Цена названа: честный голос, подписанный в те же пять минут после
-подъёма на новой сборке, пройдёт молча и потребует повтора). Без этого придержанное «за»,
-доставленное после отзыва, возвращало доступ НАВСЕГДА: голоса не истекают.
-
-**Равные секунды решаются по видам, и решения обратны.** У голоса побеждает
-ОТКАЗ: различить «повтор» и «передумал в ту же секунду» сервер не может, а
-безопасное направление здесь — не выдавать (И-10); повторное «за» в ту же секунду
-одобряющему ничего не стоит. У оттепели побеждает ОТТЕПЕЛЬ, и по обратной
-причине: сервер отвечает «сделано», и правило «побеждает заморозка» показывало бы
-автору успех при стоящей заморозке (§11.9).
-
-У пяти видов состояния — отзыв, наследник, пределы, оба состава — равное
-проходит, и побеждает ДОСТАВЛЕННОЕ ПОЗЖЕ. Здесь тела РАЗНЫЕ: это два разных
-веления автора, подписанных в одну секунду, а не повтор одного, и выбрать между
-ними «безопасное» нечем — у составов и пределов направления ужесточения нет,
-меньший предел строже для получателя и слабее для автора. Цена та же
-односекундная, что у оттепели, и противник ею распоряжается лишь в пределах того,
-что автор сам подписал за эту секунду. Отзыва она не касается: он необратим, и
-вернуть отозванный файл не может никакое распоряжение.
-
-**Порядковый номер в распоряжении отвергнут.** Он был бы новым тегом реестра
-`order.rs` и правкой `docs/format.md`, то есть решением о формате. Правило по
-подписанному времени провода не трогает вовсе.
-
-**Окно атаки уже, чем кажется.** Свежесть требует доставки в ±300 с от
-подписанного момента: автор или одобряющий должен передумать в те же пять минут.
-Так реальные отмены и выглядят — «нажал и спохватился».
-
-### 11.10. Окно автора держит СЕРВЕР — решение 2026-09-06
-
-`issue()` отказывает вне окна `Validity::Window`: `Denied::NotYetValid { starts_at }`
-до начала, `Denied::Expired { ended_at }` после конца. Стоит рядом с отзывом и
-заморозкой и по той же причине: закрытый файл не выдаётся вовсе, и называть
-пределы там, где выдачи не будет, значило бы назвать не ту причину. Проверяется и
-при продлении, поэтому окно, кончившееся посреди сеанса, закрывает документ на
-ближайшем (Ф-18).
-
-**Зачем, если окно и так проверяет клиент.** Затем, что до этого решения слово
-автора «не раньше девяти утра понедельника» держал ОДИН решатель на машине
-получателя — по часам, которые получатель переводит. Сервер, чьи часы получателю
-недоступны, об окне не знал вовсе и выдавал лицензию вместе со второй половиной
-ключа хоть за месяц до срока. По сквозному принципу копилки идей это делало
-эмбарго **трением клиента**, а не **гарантией сервера**, и для файла, разосланного
-до премьеры, разница решающая: пропатченный клиент открывал его когда угодно.
-
-**`FromFirstOpen` сервер не проверяет и не может.** Срок отсчитывается от события
-на машине получателя, которого сервер не видит: открытие происходит без него.
-Судить о нём отсюда нельзя, а запрет «на всякий случай» закрыл бы файл навсегда.
-Держит его клиент, и это разница по существу, а не недоделка.
-
-**Чего это по-прежнему не даёт.** Уже выданное не отзывается — свойство формата.
-Получатель, добывший долю внутри окна, держит её и после `not_after`; закрывает
-его клиент и отказ сервера в продлении. Момент в отказе назван секундами эпохи:
-человеку его показывает клиент, а не провод.
-
-**Адрес сервера — «хост:порт», без схемы.** Адрес идёт прямо в `connect`, который
-схем не понимает: `http://хост:порт` читается как имя хоста целиком и даёт «этот
-хост неизвестен» при живом сервере. Отвергается в `servers::check_address` — тех
-же воротах, через которые идут `--url` у `cc protect`, запоминание за ключом
-автора и чтение хранилища. До правки неудачная команда успевала запомнить
-нерабочий адрес поверх рабочего, и дальше молчали продление и подписка, то есть
-отзыв переставал доходить быстро (ревью медиа-пилота 2026-09-06).
-
-### 11.9. Кнопка паники — решение 2026-09-05
-
-Распоряжение `Freeze` (вид 9): остановить выдачи по **всем файлам ключа** одним
-действием — либо пустить их снова. Тег 16 `FROZEN` (`u8`: 1 заморозить, 0
-снять) обязателен; `file_id` **нулевой обязательно**, ключ подписавшего — тегом
-14, как у признака жизни: инцидент есть свойство автора, а не документа, и
-останавливать документы по одному значило бы дать противнику время. Заморозка
-одного файла — это отзыв, и у него свой вид.
-
-**Что останавливается.** `issue()` отказывает `Denied::Frozen` сразу за
-проверкой отзыва и по той же причине: закрытый файл не выдаётся вовсе, и жаловаться
-на пределы или кворум там, где выдачи не будет, значило бы называть не ту причину.
-Проверяется и при продлении: открытый документ закроется на ближайшем (Ф-18), не
-позже окна без сети. Решения автора (`Collect`) не останавливаются: доля B без
-доли A бесполезна, а выдачу A заморозка и держит.
-
-
-**Новый файл НАСЛЕДУЕТ панику.** Заморозка — свойство автора, а хранится у файла:
-иначе момент перемены негде было бы пережить перезапуску. Отсюда брался разрыв —
-запись, заведённая регистрацией, была незамороженной, и документ, упакованный
-ПОСЛЕ паники, выдавался, пока всё остальное стоит. Направление ошибки
-небезопасное: автор нажал «остановить всё», получил подтверждение, а следующий же
-упакованный документ уходит получателям — и узнать об этом ему неоткуда, положение
-каждого файла по отдельности говорит правду. Регистрация берёт состояние и МОМЕНТ
-у других файлов того же ключа. Момент — потому что оттепель, подписанная до этой
-регистрации, иначе не разморозила бы новый файл: барьер стоял бы ниже неё, и файл
-остался бы замороженным навсегда. Найдено оценкой 2026-09-06.
-
-**Чего заморозка не делает.** Не отзывает выданного и не растит эпоху: она
-обратима, отзыв — нет. Навсегда закрывает только `Revoke`.
-
-**Мимо кворума — намеренно.** Заморозка — безопасное направление (И-10), и
-задерживать её ради подписей соавторов значило бы дать противнику время, которого
-у него не должно быть. Оттепель возвращает лишь то, что автор единолично же и
-остановил; правило двух человек она не обходит — оно про администрирование файла,
-а не про присутствие автора.
-
-**Повтор перехваченной оттепели не размораживает.** Направления идут по ЧАСАМ
-АВТОРА: у файла хранится момент последней ПРИНЯТОЙ команды о заморозке
-(`frozen_at`), и распоряжение СТАРШЕ его ничего не меняет — ни события, ни
-отказа, как всякий повтор. Иначе перехваченное `--off` снимало бы заморозку когда
-угодно в окне свежести — ровно тогда, когда автор её только поставил. Момент
-поднимает и подтверждение уже стоящего состояния, а не только перемена: стой он
-на перемене — придержанная оттепель проходила бы после повторной заморозки
-(внешнее ревью 2026-09-06, поправлено в тот же день). Равное по секунде
-проходит: автор вправе передумать в ту же секунду, а окно повтора в одну секунду
-— названная цена; оттепель, подписанная в ту же секунду, что и прежняя,
-байт в байт та же, и различить их сервер не может по построению. Момент
-переживает перезапуск (теги 23 и 24 состояния сервера).
-
-**Журнал:** `Frozen` (20) и `Thawed` (21) — по записи на каждый файл ключа, а не
-одна на автора: журнал ведётся по файлам, и читатель, подписанный на один из них,
-обязан увидеть, что с ним случилось. Записываются только перемены.
-
-**Положение файла** несёт тег 17 `frozen`, только когда так. Признак жизни
-ставится: автор только что говорил.
-
-Команда — `cc panic [<файл.cc>] [--url] [--off]`; в столе — кнопка на вкладке
-«Сервер» в два нажатия.
-
-### 11.8. Срок предложения — настройка файла — решение 2026-09-05
-
-Тег 15 распоряжения `SetCoauthors`: сколько живёт предложение, не набравшее
-подписей. Необязателен; отсутствие означает «умолчание сервера» — **трое суток**,
-— а не ноль. Ноль отвергается: снять срок нельзя, можно лишь сменить, иначе
-предложение копилось бы вечно и всплывало через месяц уже неуместным.
-
-Нижняя граница — сутки, та же и по той же причине, что у срока тишины: опечатка в
-единицах. «3» вместо «3d» означало бы три секунды.
-
-Смена состава БЕЗ названного срока оставляет прежний, а не сбрасывает к
-умолчанию: сменить состав и сменить срок — разные намерения.
-
-**Сгоревшее предложение не показывается и не переживает сохранение по часам**
-(ревью Ф-21, Н-5). Чистка шла только при новой подписи; положение файла и файл
-состояния часов не знали, и стол автора показывал предложение, сгоревшее недели
-назад, как живое. Теперь `Standing` фильтрует по сроку файла, а сохранение по
-часам сервера убирает сгоревшие до сборки байтов. Отказа «предложение просрочено»
-нет и не было достижимого: сгоревшее убирается, и поздняя подпись заводит новое —
-она первая под ним, и это честное положение вещей.
-
-**Недособранных предложений на файл — не более 64** (Н-6). Отпечаток намерения
-обнуляет только момент и ключ, так что `SetLimits` с разными пределами — 2³²
-разных намерений; один ключ соавтора наполнял состояние, память и каждый ответ
-`Standing` без предела, тогда как у голосов предел был. Предел — на новые
-предложения; подпись под уже заведённым проходит и при полном столе, иначе полный
-стол запирал бы кворум.
-
-У состава ОДОБРЯЮЩИХ срока нет и быть не может: предложений у них не бывает,
-протухать нечему. Голос действует, пока его не отозвали.
-
-## 12. Кворум: одобряющие и соавторы — решение 2026-09-04
-
-Кворумов **два**, и они держат разные вещи. Одобряющие держат ОТКРЫТИЕ: сервер не
-выдаёт долю A, пока не наберётся M голосов из N. Соавторы держат
-АДМИНИСТРИРОВАНИЕ: отзыв, пределы, составы и наследник исполняются после M
-подписей из состава. Ни один из них не касается ключевой схемы — доли по-прежнему
-две, `KEK = HKDF(A‖B)` тот же самый.
-
-### 12.1. Реестр видов, тегов и событий
-
-Виды распоряжений (`kind`, к перечисленным в §11.2):
-
-| Номер | Вид | Что делает |
+| 1 | `version` | `u16` LE | all, value 1 |
+| 2 | `file_id` | bytes, exactly 16 | all; zero means “all files belonging to this key,” only for `Alive` |
+| 3 | `kind` | `u8` | all |
+| 4 | `at` | `i64` LE | all |
+| 5 | `max_devices` | `u32` LE | only `Register`, optional |
+| 6 | `max_grants` | `u32` LE | only `Register`, optional |
+| 7–10 | — | — | **reserved for quorum** |
+| 11 | `silence_seconds` | `u64` LE | required for `SetHeir{Open, Close}`, forbidden otherwise |
+| 12 | `heir_mode` | `u8` | required for `SetHeir`, forbidden otherwise |
+| 13 | `bequest` | bytes | required for `SetHeir{Open}`, forbidden otherwise |
+| 14 | `author_key` | bytes, exactly 32 | required for `Alive` with zero `file_id`, forbidden otherwise |
+
+`heir_mode`: `0`—remove the heir and timeout entirely, `1`—release the bequest to the heir, `2`—close the file to everyone. Zero is **a value, not an absent field**: “remove” is an order the server must execute and record, and it must be distinguished from “the field was forgotten” during parsing, not by guesswork.
+
+### 11.3. Why an heir is appointed through a bequest rather than a slot
+
+A slot would have to be inserted into the header, meaning **repackaging the file**: repackaging changes `file_id` and the signature, and copies already distributed would not acquire the heir. Version 1 also has only one recipient slot, already occupied for files with a partner.
+
+A bequest requires no repackaging. The author's `AuthorDevice` slot contains BOTH shares, so the author can seal share B to the heir's device key on any day after the file is released, without touching the container.
+
+**The receiving side does not change at all.** A bequest is an ordinary `Decision` (§10.5) with reserved number `HEIR_SEQ = u64::MAX`; the recipient does not check the number (`cc_cli::granted::accept_against`), which is not an omission but the reason a bequest is possible without changing the client. The **server** checks the number and uses it to distinguish a bequest from an ordinary decision without introducing a second document kind. The global decision queue starts at zero and grows, so the largest possible number is unreachable for it: reserving it for a bequest takes no number away from the queue.
+
+A bequest travels as **ready-made bytes**, and the parsing side must return them unchanged: the author's signature covers the entire decision, and any reconstruction would disagree with it.
+
+### 11.4. What parsing checks in a bequest
+
+The order parser checks the NESTED decision, not just its presence (I-9: unverified bytes do not leave the crate):
+
+* it parses as a `Decision`;
+* its `file_id` matches the order's `file_id`;
+* its `seq` equals `HEIR_SEQ`;
+* it approves (`approve = 1`) and carries share B.
+
+The first of the four is a necessity, not housekeeping: the author's signature is equally valid on their decision about ANOTHER file, so a signature cannot distinguish an unrelated bequest from the required one; its contents must be checked. The server verifies the decision's own signature upon receipt, using the key recorded for the file.
+
+### 11.5. What the server does
+
+**Any ORDER from the author is a sign of life**, not just `Alive`: revocation, changing limits, changing membership, appointing an heir. Each has an issue timestamp and passes freshness validation, so each DATES the author's presence. One function, `touch_alive`, records the mark, and does so for **all files belonging to this key at once**.
+
+**A decision on a request (`Decision`) is NOT a sign of life**, contrary to the first version of this paragraph. A decision carries no issue timestamp at all, so freshness cannot be checked. An approval signed at any time and withheld would buy a full silence period on the day it finally arrived; an author may accumulate any number of signed but unsent decisions. Corrected following an adversarial review finding on 2026-09-04. Silence is a property of the AUTHOR, not the file: someone who came to approve one document is not dead with respect to the others. If the server measured silence per file, an heir would receive rarely used documents while the author was alive.
+
+The mark moves only **forward**. It must never move backward: a smaller value lengthens the silence and thus brings the irreversible event closer, while callers bring their own view of time, and one of those views will eventually lag.
+
+**The event is evaluated lazily when the file is accessed.** There is and will be no alarm per file: an alarm must survive everything the server survives—restart, migration to another machine, restoring a backup—whereas lazy evaluation survives these by construction because it has no state at all, only a comparison of two already stored numbers.
+
+The cost is explicit: the event “occurs” at the first access after its deadline, not at the deadline itself. This is exactly what the heir needs—they make the access; for the log it means the recorded time is when the event was NOTICED, not when it occurred.
+
+**Without a reference point, the event does not occur.** A file whose author the server has never seen is neither opened to an heir nor closed due to silence. The default preserves the status quo when a field is missing: both changes are irreversible, and an absent value must not trigger either direction. Appointing an heir is itself a sign of life, so an appointed heir always has a reference point.
+
+**A timeout shorter than one day is rejected** (`MIN_SILENCE_SECONDS`). This is protection against a typo in units, not a judgment of the author's preferences: “30” instead of “30d” would mean thirty seconds, and the heir would receive the file half a minute after appointment.
+
+**Log events**: `HeirSet` (16), `HeirReleased` (17), `ClosedBySilence` (18). Numbers 11–15 are reserved for quorum. Appointment, mode change, and removal are ONE event: a log entry carries file, device, epoch, and time, with no space for “what exactly”; extending it would change the MAC transcript and notification length, breaking logs already signed by an older build. The file's standing shows what is configured; the log answers “the author changed the heir configuration at this time.” Release and closure, conversely, are separate: “the file passed to the heir” and “the file is closed forever” are opposite answers to “what happened.”
+
+**Closure due to silence is checked during issuance**—after proof of possession and before any limits. After proof because no limit is consumed and no log entry written before it; before limits because a closed file is never issued, and complaining about an exhausted limit where issuance will not happen would name the wrong reason. It is checked during renewal too: revocation by this mode takes effect no later than the next renewal.
+
+**Replaying an intercepted order changes nothing.** Freshness is insufficient: the wire is open, and `SetHeir`, `SetLimits`, and both membership kinds specify STATE, not an increment—someone intercepting an heir appointment could resend it after removal and restore the heir. The server remembers hashes of executed orders for twice the allowed clock skew (exactly as long as an order can possibly be accepted) and SILENTLY skips a replay, changing nothing: rejection would be worse—a client that receives no response retries the request itself.
+
+**Under quorum too—decision of 2026-09-05 following the F-21 review (N-1, N-2).** The first version remembered replays only on the unilateral path where they had been found; the quorum path remembered nothing—an executed proposal was deleted, and the same N intercepted signatures recreated and executed it again. Under quorum, the **intent fingerprint**, not the body, is remembered: signers' bodies differ by construction, while the intent is what resurrects state. The cost is explicit: the same intent legitimately resubmitted within the same ten minutes silently passes as a replay. Replay memory now **survives restart** (server-state tag 22, written only while nonempty): crashing a server costs an adversary less than an author's signature, and a restart within the window used to erase this memory.
+
+**Signs of life under quorum (N-3, N-4).** The AUTHOR's signature on a proposal—whether first or last—dates their presence just like any of their orders (§11.5); a coauthor's signature does not. Appointing an heir does NOT itself date the author's presence: the first version set the mark regardless of who signed, and a membership excluding the author could postpone silence indefinitely by reappointing the same mode. For a file whose author has not yet been seen, appointment supplies only a REFERENCE POINT; otherwise the event would never occur.
+
+**The heir uses the same door as everyone else.** `Collect` returns the bequest when it has been released and is addressed to this fingerprint; before the deadline, it returns the same “no access yet” seen by anyone waiting. The heir need not know of their special status.
+
+The bequest is queried FIRST, ahead of the decision queue. This is number ordering, not a preference: `HEIR_SEQ` is the largest possible number, hence the newest author decision of all. “Newest decision wins” also applies to the ordinary queue—a device once denied may ask again, and the author's second decision must reach it.
+
+**Server state** stores the heir under tag 18 (nested TLV: mode, timeout, fingerprint and bequest for the opening mode, time noticed), and `last_alive` under tag 19. Both are written **only when nonempty**: a server that has never appointed an heir is read by an older build as before. Once touched, it is not readable, with the same caveat as the allowed-authors list.
+
+### 11.6. Explicit boundaries
+
+* **A released bequest cannot be recalled.** The heir already has it—the same property as a delivered share B (§10.9).
+* **Silence is measured by the server's clock.** Moving it forward releases the bequest early. Server state is already outside the perimeter—the same cost as revocation.
+* **Presence on another server does not count.** A sign of life is recorded where it arrives.
+* **Regular `Alive` messages disclose the rhythm of the author's presence to the server.** This is metadata, like everything else on the server (§4).
+
+### 11.7. There can be several heirs—decision of 2026-09-05
+
+Tag 13 carries a STREAM rather than one decision: `u32le length ‖ Decision`, repeated up to sixteen times. A single heir is a one-entry stream, with no special case.
+
+**The tag number is not retired, and this deserves an explanation.** I-7 forbids reusing a number for a DIFFERENT meaning. The meaning here is, and always was, the same—“who receives what after silence”—now expressed more precisely. Retiring the number would be superstition, not caution: no server with an appointed heir has been released, and protocol documents other than leases are not frozen (§0).
+
+**In server state, the number IS retired, correctly so.** Tag 3 inside the heir record carried a single fingerprint; the stream occupies tag 4. The difference from the previous paragraph is that an older build would read a stream under number 3 AS A FINGERPRINT and fail to notice—the first thirty-two bytes of the stream look just as much like a fingerprint as a real one.
+
+The checks are the same for every bequest: same file, `HEIR_SEQ`, approval, share. Two more apply:
+
+* **a repeated fingerprint is rejected**—two decisions for one device would require the server to choose between them, with no basis for choosing;
+* **one invalid bequest invalidates the whole list**—accepting a subset would execute an order differently from what the author signed.
+
+EACH signature is verified separately using the author's key: the parser checked the contents (I-9), but does not know the key, and one valid signature in a list says nothing about the others.
+
+**To each their own.** `Collect` gives an heir the decision sealed to THEIR key; someone else's is useless because they cannot open it. Other recipients retain access: inheritance means “one more recipient,” not “a change of owner” (`docs/deferred.md` §18).
+
+**The release event remains one per file, not per heir.** There are as many events as actually occurred, and only one occurred: the author fell silent. The first fingerprint in the list goes into the log entry—not a choice between equals, but the only thing the entry can carry; extending it would change the MAC transcript and notification length. The file's standing shows who is actually appointed.
+
+### 11.7.1. Heir by CODE—decision of 2026-09-05
+
+The author cannot always name an heir by key. A notary, an executor, “whoever comes with this envelope”—these are people whose device the author does not know during their lifetime, but to whom a code can be handed.
+
+**The code derives a KEY PAIR, not a share.** Here the construction diverges from the `RecipientClaim` slot, and must do so. The slot derives share B directly from the code, correctly in that setting: the recipient share may be arbitrary, provided both sides derive the same one. For the heir, the share is FIXED—it is this file's share B, stored in the author slot—and cannot be derived from an arbitrary code: derivation yields what it yields.
+
+The code therefore derives an X25519 private key (derivative K22, label `"CC/v1/claim-device"`, `salt = file_id`), and the bequest is sealed to its public key with ordinary `seal`—the same operation the author uses to seal a share to any device.
+
+**Direct consequence: neither server nor wire changes at all.** No new request kind, field, or branch. To the server, a code-derived fingerprint is just another fingerprint; an heir using a code greets, proves possession, and collects a decision with the same messages as an ordinary device. Neither server nor container format knows about the code; only two parties know—the author and the person to whom the author gave it.
+
+This **corrects a premise of the plan**. F-21 item 9 assumed that a bequest would be sealed under a code “in the same way as the `RecipientClaim` slot,” with the code commitment serving as fingerprint, and inferred a new wire kind `Claim`. The premise is false: the slot seals nothing (`enc` and `nonce` are zero, `ct` is empty), and the method the plan referred to does not exist. No wire kind was therefore introduced.
+
+**`salt = file_id` in key-pair derivation.** The same code issued twice yields different pairs for different files. Otherwise a leaked code would cost every file for which the author reused it—and reuse will happen: codes are given to people, not files.
+
+**The label is separate and must remain separate.** With label `"CC/v1/slot-b-claim"` over the same `ikm`, derivation would produce a private key equal to the slot share: a code opening one file would reveal the key to which another is addressed.
+
+**The command generates the code and accepts no externally supplied one.** `cc heir <file> --code` is written WITHOUT a value; a human-supplied code is rejected with an explanation. The reason is I-4: the commitment can be checked offline, so a code invented “to remember” can be brute-forced without any server request, and a weak code is equivalent to an open file.
+
+**What the construction does not provide.** An issued code can be revoked only by removing the heir entirely (`cc heir --off`) before the event occurs: the container contains no code, so there is nothing to revoke. A leaked code is equivalent to a leaked device key—exactly the cost for which it is accepted: a code can be handed to a person, a device key cannot.
+
+**The code is needed after collection too.** `cc claim` writes THE DECISION ITSELF to disk (`<file_id>.bequest`), not the unwrapped share: the share is secret and does not belong on disk. The derived pair, hence the code, opens the decision each time the file is opened.
+
+**The viewer also accepts the code—decision of 2026-09-05, closing a hole older than heirs.** Previously only `cc unprotect` accepted codes, and that is an EXPORT path: it writes plaintext to disk and asks the policy for export permission. Nobody could open a view-only file addressed by code—neither a recipient using the `RecipientClaim` slot nor an heir using a code.
+
+The “no access yet” window offers a code field wherever the share is still absent (including an author's denial: the author may have denied the heir as a device). The code is checked through three doors in increasing cost order: slot commitment; bequest on disk; bequest from the server—with the same handshake as a device. The window reports the server's “not yet” response in words and does NOT distinguish “wrong code” from “deadline not reached”: that distinction would be an oracle for “this code belongs to this file.”
+
+The code travels to a new viewer process **through stdin** (`ccview <file> --code-stdin`), and only that way. As an argument it would be visible in the process list; as an environment variable, in any descendant's environment snapshot; as a file, on disk. The flag deliberately has no value. The viewer and `cc unprotect` use the same door order to obtain the share—the library's `granted::share_for`—because two copies of one ordering drift toward “allowed.”
+
+**The heir obtains a license using THEIR OWN device, and the file's rules apply in full** (F-21 review, R-2, stated as a boundary). The code supplies share B; the server supplies share A and the license through ordinary activation of the heir's device, just as for any recipient. Thus the approver quorum, device limit, and closure due to silence also apply: approvers must vote for the heir's MACHINE fingerprint, unknown to the author at appointment (visible in the server log as “issuance held for quorum”). In this case the window says “license not obtained” and leaves a retry button; a code cannot bypass quorum, and that is not unfinished work—otherwise it would bypass the two-person rule.
+
+**Opening a second time leads to the same window** (F-21 review, R-1, fixed the same day). After the first opening, the license and server share are cached, and the session took the cache branch: no code, no device slot—and the person received an exit code in a console that double-clicking does not provide. Now “license present, share absent, no code supplied” is the `NeedsCode` state: the window opens with a code field. A bequest stored on disk leads there as well.
+
+**Device denial does not hide a code-based bequest** (F-21 review, finding N-1, fixed the same day). An author's denial is cached with requests just like an approval, and the first `share_for` stopped at the first device response—including denial. An heir denied as a device during the author's life but later given a code-based bequest could not open the document—precisely the scenario promised here. Now the device door yields a share only on approval; denial there means “check the bequest,” not “no share.” Test: `crates/cc-cli/tests/share_doors.rs`.
+
+**Residuals identified by review and deliberately retained.** The window's code field is `egui::TextEdit`, whose undo history keeps copies of typed text until process exit; `Zeroizing` does not cover them, and `.password(true)` masking affects rendering only. The code string read by the new process from stdin remains in the process's standard-input buffer. Both residuals reside in a process already holding the document plaintext and are mitigated by a wiping allocator for freed blocks. There is one `.bequest` file per `file_id`: two codes for one file on one machine overwrite each other; opening with the first requires the server again.
+
+### 11.11. Ordering between orders—decision of 2026-09-06
+
+Signature and freshness are checked for EVERY order, but nothing checked the order BETWEEN them: `order.at` was used for freshness and replay memory, yet never compared with already applied state. Replay memory remembers the BODY HASH and rejects the same bytes; it does not know about an order INTERCEPTED and not delivered, which rolled state backward when delivered after a newer order.
+
+**One rule for every kind.** An order OLDER than the last accepted command of the same kind changes nothing—silently, with neither event nor rejection, like any replay.
+
+**A command EXECUTED WITHOUT REJECTION raises the barrier**—including one that changed nothing: confirming the existing state raises it just as a change does; otherwise the door remains open to a withheld command (found for freezing, §11.9). A command rejected by validation does NOT raise it. Previously the mark was set before handling cases, and an author's own typo (invalid proposal timeout) locked out their valid order signed a minute earlier: it passed silently, the author saw success, yet the membership was not installed.
+
+**The check is AT THE DOOR, not at execution.** Under coauthor quorum, a proposal is identified by INTENT, and execution is triggered by whichever signature completes quorum—whose timestamp is always fresh. A barrier at execution let the entire quorum path through: a withheld author signature entered the collection without objection, an honest fresh coauthor signature completed quorum, and a decision the author had later canceled returned THROUGH THE SECOND PERSON'S HANDS. This violates the two-person rule: the command carries a signature the author has repudiated. S-1 in the F-21 review had the same shape—replay memory existed on the unilateral path but not the quorum path; a second finding at the same boundary.
+
+**Execution CLEARS the collection for its kind.** Checking at the door is insufficient: the author's proposal signature is honest and fresh at its own time and legitimately enters the collection, but a command of the same kind executed later makes it obsolete—a subsequently submitted coauthor signature would complete quorum for something already canceled. The reasoning is the same as discarding proposals from the previous coauthor membership when that membership changes: they were collected for a state of affairs that no longer exists.
+
+**Per KIND, not per entire file.** Kinds are independent and arrive interleaved; a shared barrier would lock out membership signed before neighboring limits. Server-state tag 25 stores repeated `kind(1) ‖ i64le time`, and is written only when nonempty.
+
+**An approver vote has its own barrier**, per “device, approver” pair, stored as the signed timestamp in the vote record (81 bytes instead of 73; the 73-byte form is read as before, taking its signed timestamp as the receipt time PLUS the allowed clock skew—the upper bound of anything that could have been accepted at that moment. It cannot be taken as equal to receipt time: skew is allowed in both directions, and an approver's clock may lead the server's, which would place the barrier below the real value. The cost is explicit: an honest vote signed within the same five minutes after starting on the new build silently passes and requires a retry). Without this, a withheld “yes” delivered after withdrawal restored access FOREVER: votes do not expire.
+
+**Equal seconds are resolved by kind, with opposite outcomes.** For a vote, DENIAL wins: the server cannot distinguish “replay” from “changed their mind within the same second,” and the safe direction here is not to issue (I-10); repeating “yes” within the same second costs the approver nothing. For thawing, THAWING wins, for the opposite reason: the server responds “done,” and “freezing wins” would show the author success while the freeze remained (§11.9).
+
+For the five state kinds—revocation, heir, limits, both memberships—equality passes, and whichever is DELIVERED LATER wins. These bodies are DIFFERENT: two distinct author commands signed within one second, not a replay of one, with no basis for choosing a “safe” one—memberships and limits have no direction of tightening; a lower limit is stricter for the recipient and weaker for the author. The cost is the same one-second window as thawing, and the adversary controls it only within what the author actually signed that second. It does not affect revocation: revocation is irreversible, and no order can restore a revoked file.
+
+**An order sequence number was rejected.** It would require a new `order.rs` registry tag and a change to `docs/format.md`, hence a format decision. The signed-time rule does not touch the wire at all.
+
+**The attack window is narrower than it looks.** Freshness requires delivery within ±300 s of the signed timestamp: the author or approver must change their mind within the same five minutes. That is what real cancellations look like—“clicked, then realized.”
+
+### 11.10. The SERVER enforces the author's window—decision of 2026-09-06
+
+`issue()` refuses outside `Validity::Window`: `Denied::NotYetValid { starts_at }` before the start, `Denied::Expired { ended_at }` after the end. This sits beside revocation and freezing for the same reason: a closed file is never issued, and citing limits where issuance will not happen would give the wrong reason. Renewal checks it too, so a window ending mid-session closes the document at the next renewal (F-18).
+
+**Why, if the client already checks the window.** Because before this decision, the author's “not before nine on Monday morning” was enforced by ONE evaluator on the recipient's machine—using a clock the recipient can change. The server, whose clock the recipient cannot access, knew nothing of the window and would issue a license with the second half of the key even a month early. Under the ideas collection's end-to-end principle, that made an embargo **client friction**, not a **server guarantee**; for a file distributed before a premiere, the difference is decisive: a patched client could open it whenever it wanted.
+
+**The server does not and cannot check `FromFirstOpen`.** Its period starts at an event on the recipient's machine that the server does not see: opening happens without it. The server cannot judge that event, and a precautionary ban would close the file forever. The client enforces this, a substantive distinction rather than unfinished work.
+
+**What this still does not provide.** Already issued material cannot be recalled—a format property. A recipient who acquired the share within the window retains it after `not_after`; the client and the server's renewal refusal enforce closure. The refusal gives the timestamp in epoch seconds: the client presents it to the person, not the wire.
+
+**The server address is “host:port,” without a scheme.** The address goes directly into `connect`, which does not understand schemes: `http://host:port` is read as an entire hostname and produces “this host is unknown” even with a live server. It is rejected by `servers::check_address`—the same gate used by `--url` in `cc protect`, remembering an address against an author key, and reading the store. Before the fix, a failed command could save a broken address over a working one; renewal and subscription then fell silent, so revocation stopped arriving quickly (media-pilot review, 2026-09-06).
+
+### 11.9. Panic button—decision of 2026-09-05
+
+The `Freeze` order (kind 9): stop issuance for **all files belonging to the key** in one action—or resume it. Tag 16 `FROZEN` (`u8`: 1 freeze, 0 lift) is required; `file_id` **must be zero**, and the signer's key is in tag 14, as for a sign of life: an incident is a property of the author, not a document, and stopping documents one by one would give the adversary time. Freezing one file is revocation, with its own kind.
+
+**What stops.** `issue()` returns `Denied::Frozen` immediately after the revocation check, for the same reason: a closed file is never issued, and complaining about limits or quorum where issuance will not happen would name the wrong reason. Renewal checks it too: an open document closes at the next renewal (F-18), no later than the offline window. Author decisions (`Collect`) are not stopped: share B is useless without share A, and freezing controls issuance of A.
+
+**A new file INHERITS panic.** Freezing is an author property stored on the file: otherwise there would be nowhere for the change timestamp to survive restart. This caused a gap—a registration-created record was unfrozen, so a document packaged AFTER panic could be issued while everything else was stopped. The error points in an unsafe direction: the author clicked “stop everything,” received confirmation, and the very next packaged document went to recipients—with no way for the author to discover this, because each file's individual standing told the truth. Registration takes both state and TIMESTAMP from other files belonging to the same key. The timestamp matters because otherwise a thaw signed before this registration would not thaw the new file: its barrier would be below that thaw, leaving the file frozen forever. Found during assessment on 2026-09-06.
+
+**What freezing does not do.** It neither recalls issued material nor increments the epoch: it is reversible, while revocation is not. Only `Revoke` closes permanently.
+
+**It deliberately bypasses quorum.** Freezing is the safe direction (I-10), and delaying it for coauthor signatures would give the adversary time they must not have. Thawing restores only what the author unilaterally stopped; it does not bypass the two-person rule, which concerns file administration, not the author's presence.
+
+**Replaying an intercepted thaw does not unfreeze.** Directions are ordered by the AUTHOR'S CLOCK: the file stores the timestamp of the last ACCEPTED freeze command (`frozen_at`), and an order OLDER than it changes nothing—with no event or rejection, like any replay. Otherwise an intercepted `--off` could lift a freeze at any point within the freshness window—precisely when the author had just set it. Confirming an existing state raises the timestamp as well, not just a change: if only changes raised it, a withheld thaw would pass after a repeated freeze (external review, 2026-09-06, corrected that day). Equal seconds pass: the author may change their mind within one second, and the one-second replay window is an explicit cost; a thaw signed in the same second as the previous one is byte-for-byte identical, so the server cannot distinguish them by construction. The timestamp survives restart (server-state tags 23 and 24).
+
+**Log:** `Frozen` (20) and `Thawed` (21)—one entry per file belonging to the key, not one per author: the log is per-file, and a reader subscribed to one file must see what happened to it. Only changes are recorded.
+
+**File standing** carries tag 17 `frozen` only when true. A sign of life is recorded: the author has just spoken.
+
+Command: `cc panic [<file.cc>] [--url] [--off]`; in the desktop interface, a two-click button on the “Server” tab.
+
+### 11.8. Proposal timeout is a file setting—decision of 2026-09-05
+
+Tag 15 of `SetCoauthors`: how long a proposal that lacks enough signatures lives. Optional; absence means “server default”—**three days**—not zero. Zero is rejected: the timeout may be changed but not removed, otherwise a proposal would accumulate forever and surface a month later when no longer relevant.
+
+The lower bound is one day, the same as for silence and for the same reason: a typo in units. “3” instead of “3d” would mean three seconds.
+
+A membership change WITHOUT a specified timeout retains the previous one instead of resetting the default: changing membership and changing timeout are different intents.
+
+**An expired proposal is neither displayed nor retained by clock-aware saving** (F-21 review, N-5). Cleanup previously happened only upon a new signature; file standing and the state file knew no clock, so the author's desktop showed a proposal that had expired weeks ago as live. Now `Standing` filters by the file timeout, and saving with the server clock removes expired proposals before assembling bytes. There is no “proposal expired” refusal, nor was one ever reachable: the expired proposal is removed, and a late signature creates a new one—it is its first signature, accurately reflecting the situation.
+
+**At most 64 incomplete proposals per file** (N-6). The intent fingerprint zeroes only the timestamp and key, so `SetLimits` with different limits yields 2³² different intents; one coauthor key could fill state, memory, and every `Standing` response without bound, whereas votes had a limit. The limit applies to new proposals; a signature on an existing one passes even when the table is full, otherwise a full table would lock out quorum.
+
+APPROVER membership has no timeout and cannot have one: approvers have no proposals, so there is nothing to expire. A vote remains effective until withdrawn.
+
+## 12. Quorum: approvers and coauthors—decision of 2026-09-04
+
+There are **two** quorums, enforcing different things. Approvers control OPENING: the server does not release share A until M of N votes are collected. Coauthors control ADMINISTRATION: revocation, limits, memberships, and heir changes execute after M signatures from the membership. Neither touches the key scheme—there are still two shares, and `KEK = HKDF(A‖B)` is unchanged.
+
+### 12.1. Kind, tag, and event registry
+
+Order kinds (in `kind`, in addition to §11.2):
+
+| Number | Kind | Effect |
 |---|---|---|
-| 3 | `SetLimits` | сменить пределы устройств и выдач у занятого файла |
-| 4 | `SetCoauthors` | назначить состав соавторов и порог их подписей |
-| 5 | `SetApprovers` | назначить состав одобряющих и порог их голосов |
-| 6 | `ApproveDevice` | голос одобряющего за конкретное устройство |
-| 10 | `ReplaceDevice` | заменить потерянное устройство новым (Ф-26, 2026-09-15) |
-| 11 | `SetRule` | задать правило файла по атрибутам держателя целиком (Ф-27, B4b, 2026-09-16; §13.5) |
-| 12 | `WatchAuthor` | доказательство подписки по области «файлы автора»; НЕ веление, дверью `Order` не исполняется (B5, 2026-09-16; §9.9) |
+| 3 | `SetLimits` | change device and issuance limits for a reserved file |
+| 4 | `SetCoauthors` | configure coauthor membership and signature threshold |
+| 5 | `SetApprovers` | configure approver membership and vote threshold |
+| 6 | `ApproveDevice` | an approver's vote for a specific device |
+| 10 | `ReplaceDevice` | replace a lost device with a new one (F-26, 2026-09-15) |
+| 11 | `SetRule` | set the entire file rule based on holder attributes (F-27, B4b, 2026-09-16; §13.5) |
+| 12 | `WatchAuthor` | subscription proof for the “author's files” scope; NOT a command, not executed through the `Order` door (B5, 2026-09-16; §9.9) |
 
-Теги тела (к перечисленным в §11.2):
+Body tags (in addition to §11.2):
 
-| Тег | Имя | Тип | У какого вида |
+| Tag | Name | Type | Applicable kinds |
 |---|---|---|---|
-| 7 | `keys` | байты, 32·n, `n ≤ 16` | обязателен у `SetCoauthors`/`SetApprovers`, запрещён иначе |
-| 8 | `threshold` | `u8` | там же; `0` при пустом составе означает «кворума нет» |
-| 9 | `device_fpr` | байты, ровно 32 | обязателен у `ApproveDevice`, запрещён иначе |
-| 10 | `approve` | `u8` (0 или 1) | там же |
-| 17 | `old_devices` | байты, 32·n, `1 ≤ n ≤ 4` | обязателен у `ReplaceDevice`, запрещён иначе |
-| 18 | `new_devices` | байты, 32·n, `1 ≤ n ≤ 4` | там же |
-| 19 | `rule` | правило файла, раскладка §13.5 | обязателен у `SetRule`, запрещён иначе |
-| 20 | `authority_key` | байты, ровно 32 — ключ подписи лизингов адресата | обязателен у `WatchAuthor`, запрещён иначе; `file_id` у этого вида нулевой, `signer_key` обязателен |
+| 7 | `keys` | bytes, 32·n, `n ≤ 16` | required for `SetCoauthors`/`SetApprovers`, forbidden otherwise |
+| 8 | `threshold` | `u8` | same; `0` with empty membership means “no quorum” |
+| 9 | `device_fpr` | bytes, exactly 32 | required for `ApproveDevice`, forbidden otherwise |
+| 10 | `approve` | `u8` (0 or 1) | same |
+| 17 | `old_devices` | bytes, 32·n, `1 ≤ n ≤ 4` | required for `ReplaceDevice`, forbidden otherwise |
+| 18 | `new_devices` | bytes, 32·n, `1 ≤ n ≤ 4` | same |
+| 19 | `rule` | file rule, layout in §13.5 | required for `SetRule`, forbidden otherwise |
+| 20 | `authority_key` | bytes, exactly 32—the addressee's lease-signing key | required for `WatchAuthor`, forbidden otherwise; this kind has zero `file_id` and requires `signer_key` |
 
-### 12.2. Замена потерянного устройства — `ReplaceDevice` (вид 10, Ф-26)
+### 12.2. Replacing a lost device—`ReplaceDevice` (kind 10, F-26)
 
-**Кто вправе.** Только автор файла — той же дверью §9.3, что отзыв, пределы и
-состав; у файла с закреплённым составом соавторов — по кворуму этого состава.
-Код доступа и код-претензия права замены НЕ дают: кто держит код, держит одну
-выдачу, а не власть вытеснить чужое место. Имена сверяет человек — те же
-отпечатки K27, что печатает `cc ask` у просителя и `cc keygen` на устройстве;
-сервер их не угадывает и из сети не берёт.
+**Who is authorized.** Only the file's author, through the same §9.3 door as revocation, limits, and membership; for a file with pinned coauthor membership, through that membership's quorum. Access codes and claim codes do NOT confer replacement authority: a code holder holds one issuance, not the power to displace someone else's place. A person verifies the identities—the same K27 fingerprints printed by `cc ask` for the requester and `cc keygen` on the device; the server neither guesses them nor obtains them from the network.
 
-**Почему имён несколько.** У одного устройства их до четырёх — X25519, X-Wing,
-P-256 в TPM, аппаратный гибрид, — и замена, назвавшая одно, оставила бы
-остальные действующими. Поэтому и прежнее, и новое устройство называются
-СПИСКОМ имён (1…4), и ни одно имя не стоит сразу в обеих сторонах.
+**Why several identities.** One device has up to four—X25519, X-Wing, P-256 in TPM, hardware hybrid—and a replacement naming only one would leave the others active. Both old and new devices are therefore named by a LIST of identities (1…4), with no identity appearing on both sides.
 
-**Что делает сервер одной записью состояния** (файл — одно переименование,
-SQL — одна транзакция):
+**What the server does in one state write** (file storage—one rename; SQL—one transaction):
 
-* вычёркивает имена прежнего устройства из активированных;
-* ПОМНИТ их заменёнными: новых выдач и продлений им нет и после рестарта, даже
-  когда место свободно. Вычеркнуть было бы мало — освобождённое место прежнее
-  устройство заняло бы обычной активацией;
-* резервирует ОДНО место в пределе устройств за группой имён нового. Без резерва
-  замена была бы «освободить и надеяться»: место занял бы тот, кто успел раньше.
-  Первая активация любым именем группы резерв снимает.
+* removes the old device's identities from activated devices;
+* REMEMBERS them as replaced: no new issuance or renewal for them, even after restart and even when space is free. Removal alone would be insufficient—the old device could occupy the freed place through ordinary activation;
+* reserves ONE place in the device limit for the new device's identity group. Without reservation, replacement would mean “free it and hope”: whoever arrived first would occupy the place. The first activation under any group identity consumes the reservation.
 
-**Чего замена НЕ делает.** Не трогает предел ВЫДАЧ: освобождается место
-устройства, а не выдача, и новое устройство расходует выдачу, как всякое (у
-файла с исчерпанным пределом автор поднимает его `SetLimits`). Не отзывает уже
-полученный прежним устройством открытый текст и его офлайн-лизинги — граница
-модели угроз та же, что у отзыва (`docs/threat-model.md` §3, §3.1). Не выдаёт
-новому устройству долю B: её оно получает как всякое — кодом, одобрением
-просьбы или своим слотом.
+**What replacement does NOT do.** It does not change the ISSUANCE limit: a device place is freed, not an issuance, and the new device consumes an issuance like any other (if the file has exhausted its limit, the author raises it with `SetLimits`). It does not revoke plaintext or offline leases already received by the previous device—the threat-model boundary is the same as revocation (`docs/threat-model.md` §3, §3.1). It does not supply share B to the new device: that device obtains it like any other—through a code, request approval, or its own slot.
 
-**Отказы по причине:** прежнего устройства у файла нет; имя нового уже занято,
-заменено или зарезервировано; файл отозван; подпись не автора (или не члена
-состава). Повтор ТЕХ ЖЕ байтов — ответ по тождеству операции
-(`docs/managed-store-contract.md` §5.4), а не вторая замена; новое распоряжение
-о том же прежнем устройстве после исполненной замены — отказ «устройства у файла
-нет». Журнал: `DeviceReplaced` (первое имя прежнего) и `DeviceReserved` (первое
-имя нового).
+**Rejection reasons:** the old device is not associated with the file; the new identity is already occupied, replaced, or reserved; the file is revoked; the signature is not the author's (or a membership member's). Repeating the SAME bytes receives the response identified by operation identity (`docs/managed-store-contract.md` §5.4), not a second replacement; a new order for the same old device after successful replacement is rejected as “device is not associated with the file.” Log: `DeviceReplaced` (first old identity) and `DeviceReserved` (first new identity).
 
-**Команда:** `cc replace-device <файл.cc> --old <отпечаток>… --new <отпечаток>…
-[--url адрес]`. Проба — `crates/cc-authority/tests/device_replacement.rs` на обоих
-хранилищах.
+**Command:** `cc replace-device <file.cc> --old <fingerprint>… --new <fingerprint>…
+[--url address]`. Test: `crates/cc-authority/tests/device_replacement.rs` on both stores.
 
-**Тег 14 сменил имя, но не номер:** `author_key` → `signer_key`, «чей ключ
-проверяет подпись, когда взять его по файлу нельзя». Заводился он для признака
-жизни за все файлы сразу; с голосом одобряющего выяснилось, что смысл шире —
-подписывает не автор, а член состава, и его ключ по файлу тоже не найти. Имя
-`author_key` стало бы ложью с видом истины: под ним лежал бы ключ постороннего.
-И-7 запрещает переиспользовать номера под ДРУГИМ смыслом, а смысл здесь тот же и
-всегда был им.
+**Tag 14 changed its name but not its number:** `author_key` → `signer_key`, “the key that verifies the signature when it cannot be obtained from the file.” It originated for a sign of life covering all files at once; the approver vote revealed a broader meaning—the signer is a membership member, not the author, and their key cannot be obtained from the file either. `author_key` would have become a lie presented as truth: it would contain someone else's key. I-7 forbids reusing numbers for a DIFFERENT meaning; here the meaning is, and always was, unchanged.
 
-Виды сообщений: **26 `Endorse`** (`ключ подписавшего(32) ‖ подписанное
-распоряжение`), **28 `Endorsed{have, need}`** (два байта). Ключ подписавшего едет
-рядом, а не подбирается перебором состава: перебор дал бы посреднику способ
-нагрузить сервер шестнадцатью проверками подписи на одно сообщение.
+Message kinds: **26 `Endorse`** (`signer's key(32) ‖ signed
+order`), **28 `Endorsed{have, need}`** (two bytes). The signer's key travels alongside instead of being found by iterating membership: iteration would let an intermediary burden the server with sixteen signature verifications per message.
 
-События журнала: **11 `CoauthorsSet`, 12 `ApproversSet`, 13 `DeviceApproved`,
-14 `IssueHeldForQuorum`, 15 `LimitsChanged`, 19 `ProposalEndorsed`.**
+Log events: **11 `CoauthorsSet`, 12 `ApproversSet`, 13 `DeviceApproved`, 14 `IssueHeldForQuorum`, 15 `LimitsChanged`, 19 `ProposalEndorsed`.**
 
-### 12.2. Правила состава
+### 12.2. Membership rules
 
-Состав — не более **шестнадцати** ключей: столько же, сколько адресов сервера в
-заголовке и просьб в очереди, и по той же причине — величина, которую человек в
-состоянии просмотреть глазами.
+Membership contains at most **sixteen** keys: the same as server addresses in the header and requests in the queue, for the same reason—a quantity a person can review by eye.
 
-* **Повтор ключа отвергается.** Один голос считался бы за два, и «двое из трёх»
-  исполнялось бы одной подписью.
-* **Порог обязан быть исполним составом** (`1 ≤ M ≤ n`). Порог выше числа ключей —
-  правило, которого никто никогда не исполнит: файл замирает навсегда, и заметить
-  это можно только тем, что он замер.
-* **Пустой состав с нулевым порогом законен** и означает «кворума нет». Снять
-  кворум надо чем-то, и отдельного вида для этого заводить незачем.
-* **Состав сверяется ПРИ СЧЁТЕ, а не только при приёме.** Человека могли исключить
-  после того, как он проголосовал или подписал, и оставленный им голос считаться не
-  должен — иначе исключение из состава не действовало бы до переголосования всех
-  остальных. Сами голоса при этом не стираются: состав ещё вернут, а стирать чужое
-  волеизъявление сервер не вправе.
-* **Те же правила действуют на разборе `Standing` (2026-09-20).** Положение файла
-  сочиняет отвечающая сторона, и «кворум, которого никто никогда не наберёт»
-  собирается из байтов так же легко, как честное положение. Заодно отвергается
-  всё, чего писатель не пишет: пустой состав, порог без состава и состав без
-  порога, нулевой срок предложения, пустые потоки голосов и предложений,
-  `frozen = 0`. Незамороженное положение остаётся законным — оно выражается
-  ОТСУТСТВИЕМ тега 17, как и раньше; отвергается только вторая, никем не
-  производимая форма того же смысла.
+* **Duplicate keys are rejected.** One vote would count as two, making “two of three” executable with one signature.
+* **The threshold must be achievable by the membership** (`1 ≤ M ≤ n`). A threshold above the key count is a rule nobody can ever satisfy: the file freezes forever, and its being frozen would be the only way to notice.
+* **Empty membership with a zero threshold is valid** and means “no quorum.” There must be a way to remove quorum, with no reason for a separate kind.
+* **Membership is checked WHEN COUNTING, not only on receipt.** A person may have been removed after voting or signing, and their vote must no longer count—otherwise removal would not take effect until everyone else voted again. Votes themselves are not erased: membership may be restored, and the server has no right to erase someone else's expressed intent.
+* **The same rules apply when parsing `Standing` (2026-09-20).** The responding side constructs file standing, and “quorum nobody can ever achieve” is as easy to construct from bytes as an honest standing. Also rejected is everything the writer never writes: empty membership, threshold without membership or membership without threshold, zero proposal timeout, empty vote and proposal streams, `frozen = 0`. An unfrozen standing remains valid—it is represented by ABSENCE of tag 17, as before; only a second representation of the same meaning, produced by nobody, is rejected.
 
-### 12.3. Одобряющие: кворум на открытие
+### 12.3. Approvers: quorum for opening
 
-Голоса лежат по паре **«устройство, голосующий»**. По устройству одному второй
-голос затирал бы первый, и порог набирался бы одним человеком, проголосовавшим
-дважды. Голос действует, пока его не отозвали (`approve = 0`); срока у него нет.
+Votes are stored by **“device, voter”** pair. With the device alone as key, a second vote would overwrite the first, and one person voting twice could reach the threshold. A vote is effective until withdrawn (`approve = 0`); it has no expiry.
 
-Проверка стоит в выдаче — после доказательства владения ключом устройства и до
-всяких пределов. После доказательства потому, что до него не расходуется ни один
-предел и не пишется ни одной записи в журнал; до пределов потому, что закрытый
-кворумом файл не выдаётся вовсе, и жаловаться на исчерпанный предел там, где
-выдачи не будет, значило бы называть не ту причину.
+The check occurs during issuance—after proof of device-key possession and before any limits. After proof because no limit is consumed and no log entry written before it; before limits because a file blocked by quorum is never issued, and complaining about an exhausted limit where issuance will not happen would name the wrong reason.
 
-**Проверяется и при ПРОДЛЕНИИ.** Иначе отозванный голос не действовал бы вовсе:
-выданный лизинг продлевался бы вечно. Так документ закрывается через интервал
-продления (Ф-18) — отобрать выданное нельзя, но продлевать перестанут.
+**RENEWAL checks it too.** Otherwise withdrawing a vote would have no effect: an issued lease would renew forever. This way the document closes after the renewal interval (F-18)—issued material cannot be taken back, but renewal stops.
 
-Отказ несёт СЧЁТ (`QuorumPending{have, need}`): «один из двух» человек читает как
-«ждём ещё одного», а голое «отказано» — как «идите прочь». Задержка пишется в
-журнал: это событие ФАЙЛА, и автор обязан видеть, что кто-то стучится и ждёт.
+The refusal carries the COUNT (`QuorumPending{have, need}`): a person reads “one of two” as “waiting for one more,” but a bare “denied” as “go away.” The hold is logged: it is a FILE event, and the author must see that someone is knocking and waiting.
 
-Таблица голосов имеет потолок в **64 устройства на файл**, и считается он по
-РАЗНЫМ устройствам: переголосование своё место не занимает. Отпечаток называет кто
-угодно, и без потолка это очередь, которую набивают бесплатно.
+The vote table has a ceiling of **64 devices per file**, counted by DISTINCT devices: revoting does not consume another place. Anyone may name a fingerprint, and without a ceiling this is a queue that can be filled for free.
 
-**Долю B одобряющие не выдают.** Она лежит только в слоте `AuthorDevice`, и
-запечатать её на чужое устройство может лишь автор. Одобряющие вправе ЗАДЕРЖАТЬ
-открытие, но не открыть.
+**Approvers do not release share B.** It exists only in the `AuthorDevice` slot, and only the author can seal it to another device. Approvers may HOLD opening, but cannot open access.
 
-### 12.4. Соавторы: кворум на администрирование
+### 12.4. Coauthors: quorum for administration
 
-**Предложение опознаётся ВЕЛЕНИЕМ, а не телом.** Это несущее решение, и первая
-редакция была неверна.
+**A proposal is identified by its COMMAND, not its body.** This is a foundational decision, and the first version was wrong.
 
-Соавторы подписывают со своих машин: каждый набирает ту же команду, и его клиент
-ставит свой момент выписки и свою подпись. Тела поэтому разные ВСЕГДА. Опознавай
-сервер предложение по хешу тела — два человека, набравшие одну команду в разные
-секунды, завели бы два разных предложения, и кворум не собрался бы никогда.
+Coauthors sign from their own machines: each enters the same command, and their client sets its own issue timestamp and signature. The bodies therefore ALWAYS differ. If the server identified proposals by body hash, two people entering one command in different seconds would create two proposals, and quorum could never be reached.
 
-Отпечаток намерения (`order::intent_digest`) считается тем же кодировщиком, что и
-тело, но с обнулённым `at` и снятым `signer_key`. Совпасть обязаны файл, вид и все
-параметры; когда об этом сказали и кто сказал — принадлежит подписи, а не
-намерению. Второй сериализатор ради хеша был бы вторым определением того, что
-такое «то же распоряжение», и разошёлся бы с первым на первой же новой строке.
+The intent fingerprint (`order::intent_digest`) is computed with the same encoder as the body, but with `at` zeroed and `signer_key` removed. The file, kind, and all parameters must match; who said it and when belong to the signature, not the intent. A second serializer solely for hashing would be a second definition of “the same order,” diverging at the first new line.
 
-**Тела на сервере не хранятся.** Подпись каждого проверена в момент, когда он её
-прислал, над его собственными байтами; исполняется то распоряжение, которое довело
-счёт до порога.
+**Bodies are not stored on the server.** Each signature is verified when submitted, over its own bytes; the order that brings the count to the threshold is the one executed.
 
-Из этого следует и форма команды: подписывают не чужой документ, а свою команду.
-Подписывая чужие байты, человек подписывает то, что ему показали; набирая команду,
-он подписывает то, что сказал сам. Совпадение сверяет сервер, а не глаз.
+This also determines the command form: people sign their own command, not someone else's document. Signing someone else's bytes means signing what one was shown; entering a command means signing what one said oneself. The server, not the eye, checks equality.
 
-Прочие правила:
+Other rules:
 
-* **Первая подпись создаёт предложение.** Первый `SetCoauthors` автор ставит
-  единолично — набирать кворум ещё не с кем; все последующие идут по кворуму
-  прежнего состава.
-* **Автор в состав не входит неявно.** Список — полный перечень тех, чьи подписи
-  считаются. Список без собственного ключа означает «я больше не вправе
-  администрировать этот файл»; команда такой список отвергает и требует сказать
-  это словом (`--without-me`). То же правило — у состава, который автор ставит в
-  заголовок при упаковке (`cc protect --coauthor … --coauthors-threshold M`); SDK и
-  обвязка WASM слова `--without-me` не имеют и состав без автора отвергают.
-* **Состав из подписанного заголовка закрепляется при регистрации по проводу**
-  (`register_by_order`, тег `0x8001`): начальный состав — из заголовка, а не из
-  первого распоряжения; дальше он меняется только кворумом этого состава. Порог
-  ноль в теге («соавторов не будет») закрепляется так же — единоличное назначение
-  соавторов такому файлу отвергается. Повтор регистрации того же файла состав из
-  заголовка не возвращает: сменённое кворумом остаётся сменённым. Файл без тега —
-  прежний путь: первый `SetCoauthors` автор ставит единолично. Проба —
-  `crates/cc-authority/tests/coauthors_header.rs` на файловом хранилище и на SQL.
-* **Смена состава выбрасывает предложения прежнего.** Иначе подпись выбывшего
-  продолжала бы лежать в копилке, а новый порог считался бы по старым подписям.
-* **Исполненное предложение убирается сразу**, а не по сроку: оставь его — и
-  повторная подпись исполнила бы распоряжение второй раз.
-* **Срок жизни предложения — трое суток умолчанием, автор ставит свой** (§11.8,
-  решение 2026-09-05; здесь стояло «семь суток» — редакция до решения). Не оценка
-  расторопности соавторов, а срок, после которого документ перестаёт означать то,
-  что означал: пределы, состав и наследник успевают устареть.
-* **Отзыв при соавторах отвечает `Endorsed`, а не `Accepted`.** Сказать «сделано»
-  о предложении значило бы отпустить человека с уверенностью, что файл отозван,
-  когда он открыт. Выданная доля B не отзывается и здесь — свойство формата.
+* **The first signature creates a proposal.** The author issues the first `SetCoauthors` unilaterally—there is nobody yet with whom to form quorum; all subsequent ones require quorum of the previous membership.
+* **The author is not implicitly a member.** The list fully enumerates whose signatures count. A list omitting one's own key means “I am no longer entitled to administer this file”; the command rejects such a list and requires an explicit statement (`--without-me`). The same rule applies to membership placed in the header during packaging (`cc protect --coauthor … --coauthors-threshold M`); the SDK and WASM wrapper have no `--without-me` expression and reject membership without the author.
+* **Membership from the signed header is pinned during wire registration** (`register_by_order`, tag `0x8001`): initial membership comes from the header, not the first order; subsequent changes require that membership's quorum. A zero threshold in the tag (“there will be no coauthors”) is pinned too—unilateral coauthor assignment for that file is rejected. Re-registering the same file does not restore header membership: what quorum changed stays changed. A file without the tag follows the previous path: the author issues the first `SetCoauthors` unilaterally. Test: `crates/cc-authority/tests/coauthors_header.rs` on file storage and SQL.
+* **Changing membership discards proposals from the previous membership.** Otherwise a departed member's signature would remain in the collection, and the new threshold would count old signatures.
+* **An executed proposal is removed immediately**, not upon timeout: leaving it would let a repeated signature execute the order again.
+* **Proposal lifetime defaults to three days; the author can set their own** (§11.8, decision of 2026-09-05; this previously said “seven days”—the pre-decision version). This is not an estimate of coauthor promptness, but a period after which a document stops meaning what it meant: limits, membership, and heirs can become outdated.
+* **Revocation with coauthors responds with `Endorsed`, not `Accepted`.** Saying “done” about a proposal would leave the person believing the file had been revoked while it remained open. Delivered share B cannot be recalled here either—a format property.
 
-### 12.5. Границы, названные вслух
+### 12.5. Explicit boundaries
 
-* **Счёт ведёт сервер, и заверен он только его состоянием.** Сговор сервера с
-  получателем обходит оба кворума — та же граница 2-из-2, что и везде, ничего
-  нового. Честному серверу кворум даёт события в журнале, видимые по подписке.
-* **Состав живёт на сервере.** Тот, кто держит сервер, может его переписать.
-  Якорь переедет в подписанный заголовок вместе с тегом `0x8001` версии 3
-  (`docs/format.md`); до нарезки цена названа здесь.
-* **Кворум не защищает от автора.** Он защищает от одного скомпрометированного
-  ключа среди нескольких — и только пока ключи не у одного человека.
+* **The server counts, and only its state attests to the count.** Server–recipient collusion bypasses both quorums—the same 2-of-2 boundary as everywhere else, nothing new. For an honest server, quorum produces log events visible through subscription.
+* **Membership lives on the server.** Whoever controls the server can rewrite it. The anchor will move into the signed header with version 3 tag `0x8001` (`docs/format.md`); until implementation, the cost is stated here.
+* **Quorum does not protect against the author.** It protects against one compromised key among several—and only while those keys are not held by one person.
 
-## 13. Атрибуты на стороне сервера — решение 2026-09-10 (Ф-27)
+## 13. Server-side attributes—decision of 2026-09-10 (F-27)
 
-Сервер ведёт **словарь атрибутов**, **держания устройств** и **правило файла**,
-и решает по ним ВЫДАЧУ лизы: кому и на сколько. Провод этим не затронут: кадры
-`Activate`/`Renew` те же, доля та же, и лизинг атрибуты не меняют; отказ уходит
-текстом, как всякий отказ сервера, и называет ИМЯ атрибута, которого не хватило,
-— не значения, чтобы получателю не подсказывать, что просить.
+The server maintains an **attribute vocabulary**, **device holdings**, and a **file rule**, using them to decide lease ISSUANCE: to whom and for how long. The wire is unaffected: the `Activate`/`Renew` frames and share are unchanged, and attributes do not change the lease; refusal is sent as text like any server refusal, naming the missing attribute's NAME—not values, so as not to tell the recipient what to request.
 
-Здесь стояло «лизинг тот же (§2.3 заморожен)». Лизинг с тех пор получил версию 2
-(§2.3), и атрибуты им пользуются: правило файла умеет не только ДОПУСК, но и
-**ужесточение действий по держанию** (§13.2, B4b) — оно едет в лизинге тем же
-полем, что строгий профиль сервера. Нового поля на проводе атрибуты не завели.
+This previously said “the lease is unchanged (§2.3 is frozen).” Leases have since acquired version 2 (§2.3), and attributes use it: a file rule supports not just ADMISSION but also **action tightening by holding** (§13.2, B4b), carried in the same lease field as the server's strict profile. Attributes introduced no new wire field.
 
-### 13.1. Что где живёт
+### 13.1. What lives where
 
-| Что | Где | Кто задаёт |
+| Item | Location | Set by |
 |---|---|---|
-| словарь: имя → значения по порядку ранга | состояние сервера, секция `VOCABULARY` | оператор, `cca attr define` |
-| держания: отпечаток → атрибут → значение → срок | секция `HOLDINGS` | оператор, `cca attr assign` / `withdraw` |
-| правило файла: условия и потолок срока лизы | запись файла, тег `REQUIREMENT` | оператор, `cca attr require <файл.cc>` |
-| ужесточения по держанию: «кроме кого» и профиль | та же запись, вложенный тег `R_TIGHTENINGS` | оператор, `cca attr limit <файл.cc>` |
-| строгий профиль сервера (не атрибут; один на сервер, §2.3) | состояние сервера, секция `SERVER_POLICY` | оператор, `cca policy set` |
+| vocabulary: name → values in rank order | server state, `VOCABULARY` section | operator, `cca attr define` |
+| holdings: fingerprint → attribute → value → expiry | `HOLDINGS` section | operator, `cca attr assign` / `withdraw` |
+| file rule: conditions and lease-duration ceiling | file record, `REQUIREMENT` tag | operator, `cca attr require <file.cc>` |
+| tightening by holding: exemption condition and profile | same record, nested `R_TIGHTENINGS` tag | operator, `cca attr limit <file.cc>` |
+| strict server profile (not an attribute; one per server, §2.3) | server state, `SERVER_POLICY` section | operator, `cca policy set` |
 
-Держания привязаны к **отпечатку устройства**, не к файлу: держание — про
-человека за устройством, и действует на всех файлах, чьё правило его
-спрашивает. Сверка «кто за отпечатком» — записная книжка автора
-(`cc verified --name`), как и везде.
+Holdings are bound to the **device fingerprint**, not the file: a holding concerns the person behind the device and applies to every file whose rule asks for it. “Who is behind the fingerprint” is verified through the author's address book (`cc verified --name`), as everywhere else.
 
-**Кто задаёт смысл.** Один URI доверия не создаёт: `dept=legal` значит что-то
-только потому, что кто-то отвечает за список тех, кому оно присвоено. Ответ —
-тот, кто держит каталог сервера: то же доверие, что у `cca register`,
-`cca revoke` и `cca author add`. Для одиночного автора это автор; для
-размещённого сервера — оператор, и граница между ними — Ф-31 и Ф-29.
+**Who defines the meaning.** A URI alone creates no trust: `dept=legal` means something only because someone is responsible for the list of those assigned it. That party is whoever controls the server directory: the same trust as `cca register`, `cca revoke`, and `cca author add`. For a solo author, that is the author; for a hosted server, the operator, with the boundary between them addressed by F-31 and F-29.
 
-**Кто задаёт что — решение B4b (2026-09-16).** Словарь и держания — про
-ОРГАНИЗАЦИЮ, правило — про ФАЙЛ, и двери у них разные:
+**Who sets what—B4b decision (2026-09-16).** Vocabulary and holdings concern the ORGANIZATION; a rule concerns the FILE, and their doors differ:
 
-* **правило файла** задаёт хозяин файла — подписанным распоряжением `SetRule`
-  (§13.5), той же дверью, что пределы: подпись автора или кворум соавторов.
-  Оператор по-прежнему может поставить его командой `cca attr require`/`limit`
-  — это тот же доступ к каталогу сервера, что у `cca revoke`;
-* **словарь и держания** — только оператор, командами `cca attr`, с журналом.
-  Подписанного пути для них нет, и это не пропуск: подпись одного автора,
-  меняющая держания, меняла бы доступ к файлам ДРУГИХ авторов того же сервера.
-  Правом на это обладал бы ключ организации, а его в продукте нет (Ф-29, Ф-31;
-  `docs/deferred.md` §6.3).
+* the **file rule** is set by the file owner through a signed `SetRule` order (§13.5), using the same door as limits: the author's signature or coauthor quorum. The operator can still set it using `cca attr require`/`limit`—the same server-directory access as `cca revoke`;
+* **vocabulary and holdings** are set only by the operator, using logged `cca attr` commands. There is no signed path for them, deliberately: one author's signature changing holdings would change access to OTHER authors' files on the same server. An organization key would carry that authority, but the product has none (F-29, F-31; `docs/deferred.md` §6.3).
 
-Изоляция держится дверью: распоряжение о правиле проверяется ключом,
-закреплённым за ЭТИМ файлом, и автор одного файла не закрывает, не открывает и
-не сужает другой (`crates/cc-authority/tests/attributes.rs`,
-`stand_attributes.rs`).
+Isolation is enforced at the door: a rule order is verified with the key pinned to THIS file, and one file's author cannot close, open, or restrict another (`crates/cc-authority/tests/attributes.rs`, `stand_attributes.rs`).
 
-### 13.2. Правило
+### 13.2. The rule
 
-Правило — список условий, между условиями «и», плюс необязательный потолок
-срока лизы. Условие — атрибут, режим, значения:
+A rule is a list of conditions joined by “and,” plus an optional lease-duration ceiling. A condition consists of an attribute, mode, and values:
 
-| Режим | Смысл | В команде |
+| Mode | Meaning | Command syntax |
 |---|---|---|
-| `AnyOf` | устройство держит хотя бы одно из значений | `имя=a\|b` |
-| `AllOf` | держит все перечисленные | `имя=a&b` |
-| `AtLeast` | держит значение с рангом не ниже названного — по порядку значений в словаре | `имя>=a` |
+| `AnyOf` | the device holds at least one of the values | `name=a\|b` |
+| `AllOf` | holds every listed value | `name=a&b` |
+| `AtLeast` | holds a value ranked no lower than the specified value, according to vocabulary order | `name>=a` |
 
-Держание действует, пока `now < until`; в сам момент `until` — уже нет.
-Пустое правило — отсутствие правила: файл выдаётся как до этого раздела.
-Потолок срока применяется **минимумом** к сроку, разрешённому автором: сервер
-ужесточает, не расширяет (§5).
+A holding is effective while `now < until`; at `until` itself it is no longer effective. An empty rule means no rule: the file is issued as before this section. The duration ceiling is applied as the **minimum** with the duration authorized by the author: the server tightens, never expands (§5).
 
-**Ужесточение по держанию** (B4b, 2026-09-16) — вторая часть правила: условие
-«кроме кого» и профиль, обычная политика. Всем, кто условие НЕ проходит,
-выдача сужается этим профилем; прошедшие освобождены. Несколько ужесточений
-складываются пересечением, порядок записи на итог не влияет. Итог пересекается
-со строгим профилем сервера и едет получателю полем `server_policy` лизинга
-версии 2 (§2.3); клиент складывает его с политикой автора сам. Отказ клиента
-называет виновником сервер, а не автора (`ActionTightenedByServer`).
+**Tightening by holding** (B4b, 2026-09-16) is the second part of the rule: an exemption condition and a profile, which is an ordinary policy. Issuance for anyone who does NOT satisfy the condition is narrowed by this profile; those satisfying it are exempt. Multiple tightenings combine by intersection; their recorded order does not affect the result. The result intersects with the strict server profile and reaches the recipient in the version 2 lease's `server_policy` field (§2.3); the client combines it with author policy itself. A client refusal identifies the server, not the author, as the cause (`ActionTightenedByServer`).
 
-Условие описывает ОСВОБОЖДЁННЫХ, а не ужесточаемых, и это выбор стороны
-ошибки: держания теряются (отзыв, срок, правка состояния), и потерянное
-держание при такой записи означает «ужесточено», а не «освобождено» (И-10).
-Профиль, не сужающий ничего, команда отвергает — это опечатка, а не правило.
+The condition describes those EXEMPTED, not those restricted, deliberately choosing the direction of error: holdings can be lost (withdrawal, expiry, state edits), and a lost holding in this representation means “restricted,” not “exempted” (I-10). The command rejects a profile that narrows nothing—it is a typo, not a rule.
 
-**Лизинг не переживает держание, на котором выдан.** Срок выдачи урезается до
-момента, когда перестаёт быть верным решение: конец держания, по которому
-пройдены ворота, или держания, освободившего от ужесточения. У «любого из»
-опора — самое долгое из подходящих держаний, у «всех» — самое короткое, у «не
-ниже» — самое долгое из достаточных. Лизинг кончается на секунду раньше
-держания: держание истекает исключительно (`now < until`), лизинг —
-включительно (`now > expires_at` — отказ), и равные сроки оставили бы секунду,
-в которую продление уже отвергнуто, а файл ещё открывается. Ужесточение,
-которого устройство НЕ проходит, срока не задаёт: держание, полученное позже,
-лишь расширило бы права, и это подождёт продления.
+**A lease does not outlive the holding on which it was issued.** Issuance duration is cut to the point when the decision stops being valid: expiry of the holding that passed the gate or exempted the device from tightening. For “any of,” the basis is the longest matching holding; for “all,” the shortest; for “at least,” the longest sufficient holding. The lease ends one second before the holding: a holding expires exclusively (`now < until`), a lease inclusively (`now > expires_at` means rejection), so equal deadlines would leave a second during which renewal is already refused but the file still opens. A tightening condition the device does NOT pass sets no expiry: a holding acquired later would only expand rights, which can wait for renewal.
 
-**Словарь — закон.** Держать и требовать можно только определённое словарём;
-незнакомое — отказ команды, а не новое слово (И-10). Определённый атрибут не
-переопределяется молча и не снимается, пока на него ссылается держание или
-правило. При загрузке состояния словарь собирается тем же `define`, а держания
-сверяются со словарём: правка файла состояния не заводит атрибут в обход
-команды и журнала.
+**The vocabulary is law.** Only vocabulary-defined attributes and values may be held or required; unknown ones cause command rejection, not a new word (I-10). A defined attribute cannot silently be redefined or removed while a holding or rule refers to it. When state is loaded, the vocabulary is constructed using the same `define`, and holdings are checked against it: editing the state file cannot introduce an attribute around the command and log.
 
-### 13.3. Где проверяется
+### 13.3. Where checks occur
 
-В `issue` — **до кворума и до пределов** и **у продления тоже**. До кворума:
-голос одобряющего — за устройство, правило — за то, кто за ним; человек без
-договора не должен собирать голоса, чтобы узнать, что договора нет. До
-пределов — чтобы отказ называл настоящую причину. У продления — потому что
-правило про то, кто устройство СЕЙЧАС: договор, отозванный у открытого
-документа, закрывает его ближайшим продлением (§5.1, Ф-18), а договор,
-кончившийся по сроку, закрывает его и без продления — лизинг не переживает
-держание (§13.2).
+In `issue`—**before quorum and limits**, and **during renewal too**. Before quorum because an approver's vote concerns the device while the rule concerns who is behind it; someone without a contract should not have to collect votes to learn they have no contract. Before limits so that refusal names the real reason. During renewal because the rule concerns who the device is NOW: a contract withdrawn while a document is open closes it at the next renewal (§5.1, F-18), while a contract expiring by time closes it even without renewal—the lease does not outlive the holding (§13.2).
 
-Продление с ужесточением закрывает и прежний, более широкий лизинг того же
-устройства: увидевший бо́льший номер клиент отвергает меньший как откат (§3,
-Ф-8). Доживает свой срок только лизинг устройства, которое НЕ продлевало.
+Renewal with tightening also invalidates the same device's previous, broader lease: a client that has seen a higher number rejects a lower one as rollback (§3, F-8). Only a lease on a device that did NOT renew lives out its term.
 
-События журнала (§7): `AttributesRefused = 22` (файл, устройство),
-`AttributeRuleSet = 23` (файл), `AttributeAssigned = 24` и
-`AttributeWithdrawn = 25` (устройство; файла нет — шестнадцать нулей,
-`cca journal --list` печатает «файл —»). Вектор `tests/kat/journal.kat` держит
-записи прежних видов и не тронут.
+Log events (§7): `AttributesRefused = 22` (file, device), `AttributeRuleSet = 23` (file), `AttributeAssigned = 24` and `AttributeWithdrawn = 25` (device; no file—sixteen zeros, `cca journal --list` prints “file —”). The `tests/kat/journal.kat` vector holds entries of previous kinds and is unchanged.
 
-### 13.4. Чего раздел НЕ даёт
+### 13.4. What this section does NOT provide
 
-* **Расширения прав по атрибуту.** «Юристам — ещё и печать» выразить нельзя и
-  не будет можно: верхняя граница — политика файла, подписанная автором, и
-  ужесточение по держанию только сужает её (§13.2). Здесь стояло «ужесточения
-  действий по атрибуту нет» — оно появилось с лизингом версии 2 (B4b).
-* **Атрибутов в файле.** Их там нет намеренно (`docs/strategy.md`, «ABAC — на
-  стороне authority»): политика файла подписана автором и исполняется офлайн.
-* **Доказательства владения у держания.** Держание назначается по отпечатку;
-  что за отпечатком именно тот человек, знает назначивший, а не сервер.
+* **Attribute-based expansion of rights.** “Lawyers may also print” cannot and will not be expressible: the upper bound is the author's signed file policy, and tightening by holding only narrows it (§13.2). This previously said “no attribute-based action tightening”—it arrived with lease version 2 (B4b).
+* **Attributes in the file.** They are deliberately absent (`docs/strategy.md`, “ABAC—on the authority side”): file policy is signed by the author and enforced offline.
+* **Proof of possession for a holding.** A holding is assigned by fingerprint; whoever assigns it, not the server, knows that the intended person stands behind that fingerprint.
 
-### 13.5. Правило на проводе — `SetRule` (вид 11, B4b)
+### 13.5. The rule on the wire—`SetRule` (kind 11, B4b)
 
-Правило едет значением тега 19 распоряжения автора. Кодек — один на провод и
-на файл состояния (`oc_protocol::attribute_rule`); байты те же, что хранилище
-писало до B4b, поэтому прежние файлы состояния читаются без правок.
+The rule travels as the value of author-order tag 19. One codec serves both wire and state file (`oc_protocol::attribute_rule`); the bytes match what storage wrote before B4b, so older state files are read without changes.
 
-TLV, теги по возрастанию, все критичные:
+TLV, increasing tag order, all critical:
 
-| Тег | Поле | Значение |
+| Tag | Field | Value |
 |---|---|---|
-| 1 | `max_lease` | `i64le` секунд, `> 0`; необязателен |
-| 2 | `clauses` | поток условий; пишется ВСЕГДА, в том числе пустым |
-| 3 | `tightenings` | поток пар `[условие, профиль]`, `1..=8`; только если есть |
+| 1 | `max_lease` | `i64le` seconds, `> 0`; optional |
+| 2 | `clauses` | condition stream; ALWAYS written, including when empty |
+| 3 | `tightenings` | stream of `[condition, profile]` pairs, `1..=8`; only when present |
 
-Поток — подряд `u32le длина ‖ байты`. Условие — `u8 режим ‖ поток [атрибут,
-значение…]`, режим 1 `AnyOf`, 2 `AllOf`, 3 `AtLeast`. Профиль — кодек политики
-§4 формата. Разбор сам отвергает: имя или значение не идентификатор
-(латиница, цифры, `_ . : / -`, до 64 байт); условие без значений; «не ниже» не
-с одним значением; незнакомый режим; больше 16 условий, 64 значений или 8
-ужесточений; неположительный потолок; пустой поток ужесточений; отсутствие
-потока условий. Слова правила сверяет со словарём сервер: несовпадение —
-отказ `RuleRejected` с причиной, правило при этом не меняется.
+A stream is consecutive `u32le length ‖ bytes`. A condition is `u8 mode ‖ stream [attribute,
+value…]`, mode 1 `AnyOf`, 2 `AllOf`, 3 `AtLeast`. A profile uses the format's §4 policy codec. Parsing itself rejects: a name or value that is not an identifier (Latin letters, digits, `_ . : / -`, up to 64 bytes); a condition without values; “at least” without exactly one value; an unknown mode; more than 16 conditions, 64 values, or 8 tightenings; a nonpositive ceiling; an empty tightening stream; absence of the condition stream. The server checks rule terms against the vocabulary: mismatch returns `RuleRejected` with a reason, leaving the rule unchanged.
 
-**Распоряжение задаёт правило ЦЕЛИКОМ.** Не правку прежнего: подписанное
-состояние, а не приращение, — повтор тех же байтов сервер узнаёт (§11.11,
-память повторов), а две правки подряд не складываются в третье, никем не
-подписанное правило. Пустое правило снимает прежнее.
+**The order specifies the ENTIRE rule.** Not a modification to the previous one: signed state, not an increment—the server recognizes repeated identical bytes (§11.11, replay memory), and two consecutive edits cannot combine into a third rule nobody signed. An empty rule removes the previous one.
 
-**Команда:** `cc rule <файл.cc> [<условие>…] [--lease <срок>] [--unless
-<условие> --allow <действия>]… [--url адрес]` и `cc rule <файл.cc> --clear`.
-Разбор условия (`имя=a|b`, `имя=a&b`, `имя>=a`) и основа профиля
-(`Policy::no_tightening`) общие с `cca`: соавторы, набравшие одну команду на
-разных машинах, обязаны получить побайтно одно намерение. Ужесточение из
-`cc rule` сужает только ДЕЙСТВИЯ; прочие ручки профиля — у оператора
-(`cca attr limit`).
+**Command:** `cc rule <file.cc> [<condition>…] [--lease <deadline>] [--unless
+<condition> --allow <actions>]… [--url address]` and `cc rule <file.cc> --clear`. Condition parsing (`name=a|b`, `name=a&b`, `name>=a`) and the profile baseline (`Policy::no_tightening`) are shared with `cca`: coauthors entering the same command on different machines must obtain byte-for-byte identical intent. Tightening from `cc rule` narrows ACTIONS only; the operator controls other profile settings (`cca attr limit`).
 
-Журнал: то же `AttributeRuleSet = 23`, что у операторской команды.
+Log: the same `AttributeRuleSet = 23` as the operator command.
 
-## 14. Agent Protocol: грант агента, делегирование, цепочка — решение 2026-09-21
+## 14. Agent Protocol: agent grant, delegation, chain—decision of 2026-09-21
 
-Замысел, границы этапа и модель целиком — `docs/agent-protocol/stage-1-door.md`;
-здесь только то, что уходит по проводу, и то, что проверяет сервер. Документы
-`AgentGrant` и `Delegation` — `oc_protocol::agent`, их метки домена — в
-`docs/format.md` §3.6 (`CC/v1/agent-grant`, `CC/v1/delegation`).
+The design, stage boundaries, and complete model are in `docs/agent-protocol/stage-1-door.md`; this section covers only what travels over the wire and what the server checks. The `AgentGrant` and `Delegation` documents are in `oc_protocol::agent`; their domain labels are in `docs/format.md` §3.6 (`CC/v1/agent-grant`, `CC/v1/delegation`).
 
-Кто с кем говорит: грант на поддерево кладёт АВТОР (`cc agent grant`), звено
-делегирования — дверь-родитель, забирает цепочку ДЕРЖАТЕЛЬ под своим доказанным
-именем. Гасит грант автор велением.
+Who talks to whom: the AUTHOR deposits a subtree grant (`cc agent grant`), the parent door deposits a delegation link, and the HOLDER collects the chain under their proven identity. The author revokes the grant by an order.
 
-### 14.1. Реестр видов, тегов и событий
+### 14.1. Kind, tag, and event registry
 
-Виды сообщений:
+Message kinds:
 
-| Номер | Запрос | Ответ |
+| Number | Request | Response |
 |---|---|---|
-| 51 | `PutGrant` — байты гранта целиком (`подпись(64) ‖ тело`) | 54 `ChainStored` (тела нет) |
-| 52 | `PutDelegation` — байты звена целиком | 54 `ChainStored` |
-| 53 | `FetchChain` — `отпечаток держателя(32)` | 55 `Chain` — поток документов; 56 `NoChain` (тела нет) |
+| 51 | `PutGrant`—complete grant bytes (`signature(64) ‖ body`) | 54 `ChainStored` (no body) |
+| 52 | `PutDelegation`—complete link bytes | 54 `ChainStored` |
+| 53 | `FetchChain`—`holder fingerprint(32)` | 55 `Chain`—document stream; 56 `NoChain` (no body) |
 
-Тело `Chain` — подряд `u32le длина ‖ документ`, первым всегда грант, дальше
-звенья по порядку от корня. Раскладка написана ОДИН раз, в
-`oc_protocol::activation::join_chain` / `split_chain`, и собирать её руками ни
-одной стороне не полагается. Потолки проверяются и на сборке, и на приёме:
-документов не больше `MAX_CHAIN_DOCUMENTS` (`1 + MAX_GRANT_DEPTH`), каждый — не
-пустой и не длиннее `MAX_DOCUMENT`; обрыв внутри записи и хвост после последней
-— отказ, а не «почти правильно».
+The `Chain` body is consecutive `u32le length ‖ document`, always the grant first, then links in order from the root. The layout is written ONCE, in `oc_protocol::activation::join_chain` / `split_chain`; neither side may assemble it by hand. Ceilings are checked during assembly and receipt: at most `MAX_CHAIN_DOCUMENTS` (`1 + MAX_GRANT_DEPTH`) documents, each nonempty and no longer than `MAX_DOCUMENT`; truncation within a record and trailing data after the last record mean rejection, not “almost correct.”
 
-Три номера, а не один «документ Agent Protocol» с видом внутри: у гранта и у
-звена РАЗНЫЕ ключи проверки — автор и родительская дверь, — и выбирать ключ
-сервер обязан до разбора тела. Общий номер заставил бы разобрать тело, чтобы
-узнать, чем его проверять, то есть разбирать незаверенные байты (И-5).
+Three numbers instead of one “Agent Protocol document” with an inner kind: the grant and link use DIFFERENT verification keys—the author and parent door—and the server must select the key before parsing the body. A common number would require parsing the body to learn how to verify it, hence parsing unauthenticated bytes (I-5).
 
-Виды распоряжений (`kind`, к перечисленным в §11.2 и §12.1):
+Order kinds (in `kind`, in addition to §11.2 and §12.1):
 
-| Номер | Вид | Что делает |
+| Number | Kind | Effect |
 |---|---|---|
-| 13 | `RevokeGrant` | погасить грант агента: выдач по всей цепочке больше нет |
+| 13 | `RevokeGrant` | revoke an agent grant: no further issuance anywhere along the chain |
 
-Теги тела (к перечисленным в §11.2 и §12.1):
+Body tags (in addition to §11.2 and §12.1):
 
-| Тег | Имя | Тип | У какого вида |
+| Tag | Name | Type | Applicable kinds |
 |---|---|---|---|
-| 21 | `grant_id` | байты, ровно 16 | обязателен у `RevokeGrant`, запрещён иначе; `file_id` у этого вида нулевой, `signer_key` обязателен |
+| 21 | `grant_id` | bytes, exactly 16 | required for `RevokeGrant`, forbidden otherwise; this kind has zero `file_id` and requires `signer_key` |
 
-Состав полей — как у кнопки паники (§11.9): гранта, а не файла. Грант выдан на
-ПОДДЕРЕВО, и погасить его — одно веление, а не N по числу файлов; отзыв по файлу
-оставил бы цепочку наполовину живой ровно тогда, когда автор хочет её погасить.
-Едет `RevokeGrant` обычным `Request::Order`.
+The field set follows the panic button (§11.9): it concerns a grant, not a file. A grant covers a SUBTREE, and revoking it is one order, not N for the number of files; per-file revocation would leave half the chain alive precisely when the author wants it extinguished. `RevokeGrant` travels as an ordinary `Request::Order`.
 
-События журнала (§7): `AgentGrantRegistered = 29` (отпечаток ДВЕРИ),
-`DelegationRegistered = 30` (отпечаток ПОТОМКА), `AgentGrantRevoked = 31`.
+Log events (§7): `AgentGrantRegistered = 29` (DOOR fingerprint), `DelegationRegistered = 30` (DESCENDANT fingerprint), `AgentGrantRevoked = 31`.
 
-Все три пишутся ПО КАЖДОМУ ФАЙЛУ документа, а не одной записью. Запись журнала
-несёт ровно один `file_id` (её раскладка заморожена транскриптом MAC), и одна
-запись с именем первого файла была бы обманом: автор, читающий журнал по второму
-файлу, не увидел бы, что дверь получила и его. Запись без файла в этом журнале
-есть (держания атрибутов, §13), и здесь она не годится по той же причине:
-подписка идёт ПО ФАЙЛАМ, и событие без файла не дойдёт ни до одного подписчика.
-Цена названа вслух: грант на 256 файлов пишет 256 записей — столько файлов дверь
-и получила.
+All three are written PER FILE in the document, not as one entry. A log entry carries exactly one `file_id` (its layout is frozen by the MAC transcript), and one entry naming the first file would be deceptive: an author reading the second file's log would not see that the door received it too. This log does have fileless entries (attribute holdings, §13), but they are unsuitable here for the same reason: subscriptions are PER FILE, and a fileless event reaches no subscriber. The cost is explicit: a grant for 256 files writes 256 entries—exactly the number of files the door received.
 
-Третье событие планом не предусматривалось и заведено при исполнении: без него
-журнал лгал бы умолчанием — выдача в нём есть, а её конца нет.
+The third event was not in the plan and was introduced during implementation: without it the log would lie by omission—recording the grant but not its end.
 
-### 14.2. Кто что доказывает
+### 14.2. Who proves what
 
-`PutGrant` и `PutDelegation` доказательства владения ключом устройства **не
-требуют**, и требовать его нечем: грант подписан ключом АВТОРА, которого у
-устройства нет вовсе, а звено — ключом `door_verify` родителя, названным в
-гранте под подписью автора. Подпись — всё, что важно; принёсший документ
-посредник подменить в нём ничего не может. То же правило, что у решения автора
-(§10) и у распоряжений (§9.3).
+`PutGrant` and `PutDelegation` **do not require** proof of device-key possession, and have no basis for requiring it: a grant is signed with the AUTHOR's key, which the device does not possess at all, and a link with the parent's `door_verify` key, named in the grant under the author's signature. The signature is all that matters; an intermediary delivering the document cannot substitute anything in it. This is the same rule as author decisions (§10) and orders (§9.3).
 
-Оба идемпотентны по тождеству документа: те же байты второй раз — тот же ответ
-`ChainStored`, другие байты под тем же `grant_id` — отказ.
+Both are idempotent by document identity: the same bytes a second time yield the same `ChainStored` response; different bytes under the same `grant_id` are rejected.
 
-`FetchChain` в `is_session_sealed` НЕ добавлен (MAC сессии ему не нужен), но
-требует `session.proven`: названный отпечаток сервер сверяет с доказанным
-константным временем, как у `Collect` (§11.7.1). Отпечаток держателя лежит в
-гранте открытым, и назвать чужой волен любой; в звеньях же лежат доли B,
-запечатанные на ключ держателя, и отдать их чужому значило бы отдать материал,
-который он сохранит до того дня, когда добудет ключ двери.
+`FetchChain` was NOT added to `is_session_sealed` (it does not need a session MAC), but requires `session.proven`: the server compares the named fingerprint with the proven one in constant time, as with `Collect` (§11.7.1). The holder fingerprint is public in the grant, and anyone may name someone else's; links, however, contain shares B sealed to the holder key, and handing them to an outsider would supply material they could retain until the day they acquired the door key.
 
-`NoChain` — не отказ: не держать гранта не провинность.
+`NoChain` is not a refusal: not holding a grant is no offense.
 
-### 14.3. Что проверяет сервер
+### 14.3. What the server checks
 
-При приёме гранта: каждый `file_id` зарегистрирован; у ВСЕХ файлов один автор
-(иначе одна подпись покрывала бы чужие файлы); подпись — ключом этого автора,
-записанным при регистрации; `verify_grant_chain` с пустыми звеньями по часам
-сервера; доля B не слабее файла (`WeakerThanFile`) — то же правило E2/B8, что у
-решения и завещания: доля живёт у держателя навсегда, и выданная классикой по
-постквантовому файлу ослабила бы сам файл.
+When receiving a grant: every `file_id` is registered; ALL files have one author (otherwise one signature would cover someone else's files); the signature verifies with that author's key recorded at registration; `verify_grant_chain` with no links, using the server clock; share B is no weaker than the file (`WeakerThanFile`)—the same E2/B8 rule as decisions and bequests: the holder retains the share forever, and classical delivery for a post-quantum file would weaken the file itself.
 
-При приёме звена: цепочка родителя находится по `parent_fpr`; `verify_grant_chain`
-с новым звеном; отозванный грант звеньев не принимает; сила доли — та же
-проверка.
+When receiving a link: locate the parent chain by `parent_fpr`; run `verify_grant_chain` with the new link; a revoked grant accepts no links; apply the same share-strength check.
 
-**Один отпечаток — одна цепочка.** Дверь, уже стоящая в цепочке, второго гранта
-не получает: иначе вопрос «чья цепочка у этого держателя» не имел бы одного
-ответа, а ворота активации спрашивают именно его. Погашение гасит КОРЕНЬ, а не
-звенья — цепочка держателя всегда начинается с гранта, — и гасит его только тот
-ключ, под которым грант записан. Иначе автор одного файла гасил бы чужие гранты,
-зная лишь их имена, а имя гранта не тайна: оно лежит в самом гранте.
+**One fingerprint—one chain.** A door already in a chain receives no second grant: otherwise “whose chain belongs to this holder” would have no unique answer, yet the activation gates ask exactly that. Revocation extinguishes the ROOT, not links—a holder's chain always starts with a grant—and only the key under which the grant is recorded may revoke it. Otherwise one file's author could revoke others' grants merely by knowing their identifiers, which are not secret: they appear in the grants themselves.
 
-**Ворота выдачи.** Доля A открывается и перепечатывается в одном месте —
-`Authority::issue`, — и ворота стоят ТАМ, после доказательства владения и до
-первой записи в журнал. Поэтому их проходят активация и продление, оба провода
-и операторская команда `cca activate`. Единственный путь мимо — повтор
-записанной операции (§9.10), где доля отдаётся сохранённым ответом; на нём
-ворота поставлены отдельно. Кворум, завещание и преемство своей выдачи доли A не
-имеют.
+**Issuance gates.** Share A is opened and resealed in one place—`Authority::issue`—and the gates stand THERE, after proof of possession and before the first log entry. Activation and renewal, both wire protocols, and the operator command `cca activate` therefore pass them. The only bypass path is replay of a recorded operation (§9.10), where the share is returned in a saved response; separate gates are installed on that path. Quorum, bequest, and succession do not have their own issuance of share A.
 
-Отпечаток, не состоящий ни в одной цепочке, идёт прежним путём БЕЗ единого
-изменения — на это есть отдельная проба
-(`crates/cc-authority/tests/agent_chain.rs`).
+A fingerprint not belonging to any chain follows the previous path WITHOUT a single change, covered by a dedicated test (`crates/cc-authority/tests/agent_chain.rs`).
 
-Держателю цепочки лиза выписывается, только если грант жив, не погашен и файл в
-его списке; `expires_at` лизы не больше `expires_at` цепочки, а `server_policy`
-лизы — прежняя политика сервера, пересечённая со ВСЕМИ ужесточениями цепочки
-(`oc_policy::intersect`, монотонна только в сторону ужесточения, поэтому лишнее
-звено не может ослабить).
+A chain holder receives a lease only if the grant is live, unrevoked, and lists the file; the lease's `expires_at` is no later than the chain's `expires_at`, and its `server_policy` is the previous server policy intersected with ALL chain tightenings (`oc_policy::intersect`, monotonic only toward restriction, so an extra link cannot weaken it).
 
-Отказы (у всех `Display` по-русски, и дверь показывает их человеку):
-`ChainRefused { why }` — подпись, форма, срок, чужой родитель, занятое имя
-держателя; `GrantRevoked`; `FileNotInGrant`; `WeakerThanFile`;
-`ChainTableFull { limit }`. Пределы хранения: цепочек не больше 1024, звеньев в
-одной — не больше 32.
+Refusals (all have Russian `Display` text, shown to the person by the door): `ChainRefused { why }`—signature, shape, lifetime, wrong parent, occupied holder identity; `GrantRevoked`; `FileNotInGrant`; `WeakerThanFile`; `ChainTableFull { limit }`. Storage limits: at most 1024 chains and at most 32 links in one chain.
 
-### 14.4. Сторона автора
+### 14.4. Author side
 
-`cc agent grant --door <отпечаток> --door-key <ключ> --door-verify <ключ>
---tree <каталог> --until <срок> [--depth N] [--view-only] [--url адрес]`.
+`cc agent grant --door <fingerprint> --door-key <key> --door-verify <key>
+--tree <directory> --until <deadline> [--depth N] [--view-only] [--url address]`.
 
-Обходятся только обычные файлы `.cc`; символические ссылки не проходятся.
-Отпечаток двери сверяется с её ключом (K27) ДО открытия первого авторского
-слота: отказ по неверно переписанному имени не должен стоить ни одной добытой
-копии доли (И-11). Файл чужого автора или файл сильнее двери роняет команду
-целиком — человек назвал каталог, и выдать ему часть каталога, не сказав какую,
-хуже, чем не выдать ничего.
+Only regular `.cc` files are traversed; symbolic links are not followed. The door fingerprint is compared with its key (K27) BEFORE opening the first author slot: rejection of a mistyped identity must not cost even one acquired share copy (I-11). A file belonging to another author or stronger than the door fails the entire command—the person named a directory, and granting part of it without saying which part is worse than granting nothing.
 
-Отпечаток и ключ называются ПОРОЗНЬ, хотя у классического механизма это одни и
-те же байты: сверка «отпечаток называет этот ключ» — единственное, что программа
-тут вправе проверить, и вторая строка делает ошибку переписывания видимой
-отказом, а не грантом, уехавшим на чужой ключ. Кто стоит за дверью, протокол не
-знает и знать не может; человек сверяет отпечаток с тем, что напечатала сама
-дверь, вторым каналом — то же правило одного имени, что у людей
-(`docs/format.md`, «Этап 4», правило 1).
+Fingerprint and key are specified SEPARATELY even though they are the same bytes for the classical mechanism: “this fingerprint names this key” is the only check the program is entitled to make here, and the second line makes a transcription mistake visible as a refusal rather than a grant sent to someone else's key. The protocol does not and cannot know who stands behind the door; a person compares the fingerprint with what the door itself printed through a second channel—the same single-identity rule as for people (`docs/format.md`, “Stage 4,” rule 1).
 
-`cc agent revoke <имя гранта> [--url адрес]` шлёт веление 13.
+`cc agent revoke <grant name> [--url address]` sends order 13.
 
-### 14.5. Этап 2: дверь действий — решение 2026-09-22
+### 14.5. Stage 2: action door—decision of 2026-09-22
 
-Замысел и границы — `docs/agent-protocol/stage-2-actions.md`; здесь только
-провод и то, что проверяет сервер. Документы `ActionGrant`, `ActionRequest`,
-`ActionLease`, `ActionDecision`, `PendingAction` — `oc_protocol::action`, их
-метки домена — в `docs/format.md` §3.6 (`CC/v1/action-grant`,
-`CC/v1/action-lease`, `CC/v1/action-decision`; у просьбы метки НЕТ и быть не
-должно — она не подписана).
+The design and boundaries are in `docs/agent-protocol/stage-2-actions.md`; this section covers only the wire and server checks. The `ActionGrant`, `ActionRequest`, `ActionLease`, `ActionDecision`, and `PendingAction` documents are in `oc_protocol::action`; their domain labels are in `docs/format.md` §3.6 (`CC/v1/action-grant`, `CC/v1/action-lease`, `CC/v1/action-decision`; the request has NO label and must not have one—it is unsigned).
 
-Кто с кем говорит: грант действий кладёт АВТОР, просит исполнения ДВЕРЬ под
-своим доказанным именем, лизу подписывает СЕРВЕР ключом подписи лиз, решение по
-`confirm` подписывает автор. Гасит всё то же веление 13 `RevokeGrant`: грант
-действий привязан к файловому, и второй сущности отзыва не появляется.
+Who talks to whom: the AUTHOR deposits an action grant; the DOOR requests execution under its proven identity; the SERVER signs the lease with its lease-signing key; the author signs a decision for `confirm`. The same order 13, `RevokeGrant`, revokes everything: the action grant is bound to the file grant, introducing no second revocation entity.
 
-Виды сообщений:
+Message kinds:
 
-| Номер | Запрос | Ответ |
+| Number | Request | Response |
 |---|---|---|
-| 57 | `PutActionGrant` — байты гранта действий целиком (`подпись(64) ‖ тело`) | 54 `ChainStored` (тела нет) |
-| 58 | `RequestAction` — байты просьбы (не подписана) | 62 `ActionGranted` — лиза целиком; 63 `ActionPending` — `u64le seq`; 64 `ActionRefused` — причина UTF-8 |
-| 59 | `ReportAction` — `u64le seq ‖ u8 ok ‖ digest(32)`, ровно 41 байт | 14 `Accepted` |
-| 60 | `ActionRequests` — `имя гранта(16)` | 65 `ActionQueue` — окно очереди |
-| 61 | `DecideAction` — байты решения владельца целиком | 14 `Accepted` |
+| 57 | `PutActionGrant`—complete action-grant bytes (`signature(64) ‖ body`) | 54 `ChainStored` (no body) |
+| 58 | `RequestAction`—request bytes (unsigned) | 62 `ActionGranted`—complete lease; 63 `ActionPending`—`u64le seq`; 64 `ActionRefused`—UTF-8 reason |
+| 59 | `ReportAction`—`u64le seq ‖ u8 ok ‖ digest(32)`, exactly 41 bytes | 14 `Accepted` |
+| 60 | `ActionRequests`—`grant name(16)` | 65 `ActionQueue`—queue window |
+| 61 | `DecideAction`—complete owner-decision bytes | 14 `Accepted` |
 
-Пять номеров, а не один «документ этапа 2» с видом внутри, — по тому же доводу,
-что у трёх номеров §14.1: разбор выбирается первым байтом РАНЬШЕ, чем известно,
-чей документ приехал, и ключи проверки у гранта, просьбы, отчёта и решения
-разные (автор, никакой, никакой, автор). Ответы 54 и 14 переиспользованы
-намеренно: новых обещаний у `PutActionGrant`, `ReportAction` и `DecideAction`
-нет, а новый вид ответа обещал бы вторую сущность.
+Five numbers instead of one “stage 2 document” with an inner kind, for the same reason as the three numbers in §14.1: the first byte selects parsing BEFORE it is known whose document arrived, and the verification keys for grant, request, report, and decision differ (author, none, none, author). Responses 54 and 14 are deliberately reused: `PutActionGrant`, `ReportAction`, and `DecideAction` make no new promises, while a new response kind would promise a second entity.
 
-Тело `ActionQueue` — подряд `u32le длина ‖ документ PendingAction`, как у
-очереди просьб о доступе (§10), и разбирается тем же приёмом
-(`oc_protocol::action::split_action_queue`). Окно — 16 записей
-(`MAX_PENDING_ACTION_WINDOW`); решённые уходят, и в окно встают следующие по
-номеру. Пустое тело законно и означает «никто не ждёт».
+The `ActionQueue` body is consecutive `u32le length ‖ document PendingAction`, as in the access-request queue (§10), parsed by the same technique (`oc_protocol::action::split_action_queue`). The window is 16 entries (`MAX_PENDING_ACTION_WINDOW`); resolved entries leave and the next by number enter. An empty body is valid and means “nobody is waiting.”
 
-Тело `ActionRefused` — причина текстом, и она ОБЯЗАТЕЛЬНА: пустую строку
-отвергает сам кодек, на обоих концах, то есть произвести отказ без слов наша
-сторона не может. Потолок — 1024 байта (`MAX_REFUSAL`), набор отсекаемых
-категорий — общий с запиской (`oc_format::text`). Отдельно от `Denied` (7):
-`Denied` отвечает про РАЗГОВОР (рукопожатия нет, имя чужое), `ActionRefused` —
-про само действие, и ответ его окончателен.
+The `ActionRefused` body is a textual reason, and it is REQUIRED: the codec itself rejects an empty string at both ends, so our side cannot produce a wordless refusal. The ceiling is 1024 bytes (`MAX_REFUSAL`); rejected character categories are shared with notes (`oc_format::text`). This is separate from `Denied` (7): `Denied` concerns the CONVERSATION (no handshake, wrong identity); `ActionRefused` concerns the action itself, and its answer is final.
 
-**Тело `Chain` (55) обросло обрамлением.** До этапа 2 оно было голым потоком
-документов; теперь это TLV: тег 1 `documents` (критичный) — тот же поток, тег
-`0x8001` `lease_verify_key` (НЕОБЯЗАТЕЛЬНЫЙ, 32 байта) — ключ подписи лиз этого
-сервера. Приписать ключ к потоку было некуда: у него нет ни тегов, ни места под
-необязательное поле, а дописанная в хвост запись неотличима от лишнего
-документа. Нужен ключ двери, которой выданы ОДНИ ДЕЙСТВИЯ: обычно она берёт его
-из заголовка любого файла гранта, где он закреплён подписью автора, а файлов у
-неё нет. Доверия ответ не добавляет — сервер называет собственный открытый
-ключ, — и дверь, у которой хоть один файл есть, обязана сверить названное с
-заголовком. Сервер шлёт его ВСЕГДА: слать через раз значило бы завести второй
-ответ на один вопрос.
+**The `Chain` (55) body acquired an envelope.** Before stage 2 it was a bare document stream; now it is TLV: tag 1 `documents` (critical) contains the same stream, and tag `0x8001` `lease_verify_key` (OPTIONAL, 32 bytes) carries this server's lease-signing key. There was nowhere to append a key to the stream: it has neither tags nor room for an optional field, and an appended record is indistinguishable from an extra document. A door granted ACTIONS ONLY needs the key: ordinarily it obtains it from the header of any granted file, pinned by the author's signature, but it has no files. The response adds no trust—the server names its own public key—and a door with at least one file must compare the supplied key with the header. The server ALWAYS sends it: sending it intermittently would introduce a second answer to one question.
 
-**Третий тег появился с дверью — решение 2026-09-22.** Тег `0x8002`
-`action_grant` (НЕОБЯЗАТЕЛЬНЫЙ) несёт байты гранта действий этой цепочки
-целиком, если он выдан. Заведён потому, что спека этапа 2 (§5, шаг 2) требует
-от двери отказывать агенту СЛОВАМИ и ДО СЕТИ, а правила держателя живут в
-подписанном гранте действий — документе, которого у двери не было ни одного
-способа получить: поток `documents` несёт файловую цепочку, и дописать в него
-грант действий нельзя (читатель первого этапа принял бы его за лишнее звено).
+**A third tag arrived with the door—decision of 2026-09-22.** Tag `0x8002`, `action_grant` (OPTIONAL), carries the complete action grant for this chain if one has been issued. It was introduced because the stage 2 specification (§5, step 2) requires the door to refuse an agent IN WORDS and BEFORE NETWORK ACCESS, while holder rules reside in the signed action grant—a document the door had no way to obtain: the `documents` stream carries the file chain, and an action grant cannot be appended to it (a stage 1 reader would treat it as an extra link).
 
-Доверия тег не добавляет: байты подписаны ключом автора и проверяются самой
-дверью (`agent::verify_grant_chain_with_actions`), а решающая проверка
-по-прежнему на сервере — лизу выдаёт он. Проверка у двери СУЖАЕТ: устаревшие
-правила у неё могут быть только уже выданными, то есть безвредными, а
-расширенные сервер отвергнет.
+The tag adds no trust: the bytes are signed by the author and verified by the door itself (`agent::verify_grant_chain_with_actions`), while decisive verification remains on the server, which issues the lease. Door-side verification RESTRICTS: stale rules it holds can only be previously issued rules, hence harmless, while expanded rules will be rejected by the server.
 
-Пустое значение тега отвергается на разборе: отсутствие гранта действий
-обозначается ОТСУТСТВИЕМ тега, и два представления одного смысла на проводе —
-приглашение к расхождению концов.
+An empty tag value is rejected during parsing: absence of an action grant is represented by ABSENCE of the tag, and two wire representations of one meaning invite divergence between endpoints.
 
-События журнала (§7): `ActionGrantRegistered = 32`, `ActionRequested = 33`,
-`ActionLeased = 34`, `ActionDone = 35`, `ActionFailed = 36`.
+Log events (§7): `ActionGrantRegistered = 32`, `ActionRequested = 33`, `ActionLeased = 34`, `ActionDone = 35`, `ActionFailed = 36`.
 
-Все пять пишутся БЕЗ ФАЙЛА (`file_id` нулевой, как у держаний атрибутов, §13), и
-это не упущение: у действия нет файла — предмет у него аргументы, а не
-контейнер. Цена названа вслух: подписка идёт ПО ФАЙЛАМ, и до подписчика по файлу
-эти записи не доходят. Владелец видит их видом журнала и очередью
-`ActionRequests`; какой грант затронут, восстанавливается по отпечатку
-держателя — одна дверь держит ровно одну цепочку (§14.3).
+All five are written WITHOUT A FILE (zero `file_id`, like attribute holdings, §13), deliberately: an action has no file—its subject is arguments, not a container. The cost is explicit: subscriptions are PER FILE, so these entries do not reach file subscribers. The owner sees them through the log view and `ActionRequests` queue; the affected grant is reconstructed from the holder fingerprint—one door holds exactly one chain (§14.3).
 
-#### Порядок «журнал → лиза» — инвариант этапа
+#### “Log → lease” ordering—a stage invariant
 
-Запись `ActionRequested` ложится ДО ВСЯКИХ ВОРОТ, то есть и тогда, когда лиза не
-выдана. Действие, которого нет в журнале, не могло быть исполнено, — и это
-обещание держится только при таком порядке: поставь запись после ворот, и
-попытка, отбитая воротами, не оставила бы следа вовсе.
+`ActionRequested` is recorded BEFORE ANY GATES, including when no lease is issued. An action absent from the log could not have been executed, and only this ordering sustains that promise: record it after the gates, and an attempt stopped by a gate would leave no trace.
 
-Цена: журнал растёт от просьб. Закрывает её доказательство владения — в отличие
-от просьбы о доступе (§10), просьба об исполнении принимается только под
-ДОКАЗАННЫМ именем, и за каждой записью стоит владелец ключа, которого запись и
-называет.
+The cost is log growth from requests. Proof of possession bounds it: unlike an access request (§10), an execution request is accepted only under a PROVEN identity, and behind every entry stands the key owner that the entry names.
 
-#### Что проверяет сервер
+#### What the server checks
 
-При приёме гранта действий: файловый грант с этим `grant_id` существует и не
-погашен; подпись — ключом ЕГО автора, записанным при регистрации ФАЙЛОВ (у
-действия нет контейнера с заголовком, поэтому якорь — грант); `expires_at` не
-длиннее, чем у файлового гранта; виды действий известны (незнакомый номер
-отвергается на разборе). Повтор тех же байтов идемпотентен, другие байты под тем
-же именем — отказ.
+When receiving an action grant: a file grant with this `grant_id` exists and is not revoked; the signature verifies with ITS author's key recorded when registering FILES (an action has no container header, so the anchor is the grant); `expires_at` is no later than the file grant's; action kinds are known (unknown numbers are rejected during parsing). Repeating the same bytes is idempotent; different bytes under the same identifier are rejected.
 
-При просьбе, В ЭТОМ ПОРЯДКЕ: доказанное имя равно `door_fpr` (сверка
-константного времени, как у `Collect`); **запись `ActionRequested`**; грант
-действий есть и цепочка не погашена; правило есть у держателя ПО ЦЕПОЧКЕ
-(`oc_protocol::agent::verify_grant_chain_with_actions`); аргументы в
-ограничителях (`args_within`); остаток `max_uses` есть У КАЖДОГО ПРЕДКА;
-`nonce` не видан. Дальше: `confirm` — в очередь и `ActionPending`, иначе лиза
-`ActionLease` и запись `ActionLeased`.
+For a request, IN THIS ORDER: the proven identity equals `door_fpr` (constant-time comparison, as for `Collect`); **record `ActionRequested`**; an action grant exists and the chain is not revoked; the holder has the rule ALONG THE CHAIN (`oc_protocol::agent::verify_grant_chain_with_actions`); arguments satisfy the limiters (`args_within`); remaining `max_uses` exists AT EVERY ANCESTOR; `nonce` has not been seen. Then: for `confirm`, enqueue and return `ActionPending`; otherwise issue `ActionLease` and record `ActionLeased`.
 
-`max_uses` считается ПО ЦЕПОЧКЕ: исполнение потомка списывается и с каждого
-предка. Иначе делегирование умножало бы предел. Счётчик — на пару «держатель —
-правило», ключ правила — вид и ограничитель БАЙТАМИ
-(`oc_protocol::action::limiter_key`): два `tree.remove` на два поддерева —
-обычный грант, и спутав их, сервер списывал бы не с того предела. Списывается на
-ВЫДАЧЕ лизы, а не на отчёте: лиза уже разрешает исполнить, и дверь, не
-приславшая отчёта, иначе не тратила бы ничего.
+`max_uses` is counted ALONG THE CHAIN: a descendant's execution also consumes a use at every ancestor. Otherwise delegation would multiply the limit. The counter is per “holder—rule” pair; the rule key is the kind and limiter AS BYTES (`oc_protocol::action::limiter_key`): two `tree.remove` rules for two subtrees are an ordinary grant, and confusing them would debit the wrong limit. A use is consumed at lease ISSUANCE, not reporting: a lease already authorizes execution, and otherwise a door submitting no report would spend nothing.
 
-`nonce` помнится до `expires_at` выданной по нему лизы — тридцати секунд
-(`ACTION_LEASE_SECONDS`). Окно лизы проверяется и на РАЗБОРЕ: документ,
-объявивший неделю, отвергается границей крейта.
+`nonce` is remembered until the `expires_at` of the lease issued for it—thirty seconds (`ACTION_LEASE_SECONDS`). The lease window is checked during PARSING too: a document claiming a week is rejected at the crate boundary.
 
-#### `confirm`: как дверь получает лизу после одобрения
+#### `confirm`: how the door obtains a lease after approval
 
-Просьба по правилу с `confirm` встаёт в очередь, и дверь получает
-`ActionPending { seq }`. Владелец видит её `ActionRequests` и решает
-`DecideAction`. Лиза при одобрении НЕ ВЫПИСЫВАЕТСЯ тут же: **дверь повторяет
-`RequestAction` с ТЕМ ЖЕ `nonce`**, сервер находит одобренную просьбу по этому
-`nonce` и выдаёт лизу, не ставя её в очередь второй раз.
+A request under a rule with `confirm` enters the queue, and the door receives `ActionPending { seq }`. The owner sees it through `ActionRequests` and decides via `DecideAction`. Approval does NOT issue a lease immediately: **the door repeats `RequestAction` with THE SAME `nonce`**; the server locates the approved request by this `nonce` and issues a lease without enqueueing it again.
 
-Так, а не «сервер выписал лизу и держит её до следующего вопроса», по двум
-причинам. Во-первых, лиза живёт тридцать секунд, и выписанная в момент
-одобрения она истекла бы, пока владелец закрывает ноутбук. Во-вторых, ворота при
-выдаче проходятся ЗАНОВО, по часам того мгновения: между одобрением и
-исполнением лежит погашение гранта и истечение срока, и одобрение, превращённое
-в лизу заранее, прошло бы мимо них.
+This is done instead of “the server issues a lease and holds it until the next query” for two reasons. First, a lease lives thirty seconds; issued upon approval, it could expire while the owner closes their laptop. Second, issuance passes the gates AGAIN using the clock at that instant: grant revocation and expiry may intervene between approval and execution, and approval converted to a lease in advance would bypass them.
 
-Повтор с тем же `nonce`, но ДРУГИМИ аргументами — отказ: иначе одобрение «толкни
-эту ветку» отоваривалось бы толчком в другую.
+A repeat with the same `nonce` but DIFFERENT arguments is rejected: otherwise approval to “push this branch” could be redeemed by pushing another.
 
-Отказ владельца — `ActionRefused` с его запиской. Записка при отказе и есть
-причина, которую увидит агент.
+An owner's denial becomes `ActionRefused` with their note. The denial note is the reason the agent sees.
 
-Отчёт `ReportAction` принимается только под доказанным именем ДЕРЖАТЕЛЯ той
-лизы: чужой отчёт писал бы в журнал исход чужого действия. Повтор того же отчёта
-идемпотентен, отчёт с другим исходом по тому же номеру — отказ.
+A `ReportAction` report is accepted only under the proven identity of that lease's HOLDER: another party's report would log the outcome of someone else's action. Repeating the same report is idempotent; a report with a different outcome for the same number is rejected.
 
-Отказы (у всех `Display` по-русски): `NoActionGrant`,
-`ActionNotGranted { why }`, `ActionUsesExhausted { limit }`, `ActionNonceSeen`,
-`ActionQueueFull { limit }`, `ActionDeclined { why }`, `NoSuchActionRequest`, и
-прежние `GrantRevoked`, `ChainRefused { why }`, `NotTheAuthor`, `NotServing`.
-Пределы хранения: ждущих «да» просьб — не больше 64 на грант
-(`MAX_PENDING_ACTIONS`), помнимых выданных лиз — не больше 256 на грант
-(`MAX_ISSUED_ACTIONS`), и помнятся они час (`ACTION_REPORT_WINDOW_SECONDS`):
-дверь отчитывается ПОСЛЕ исполнения, и тридцати секунд жизни лизы на это мало.
+Refusals (all have Russian `Display` text): `NoActionGrant`, `ActionNotGranted { why }`, `ActionUsesExhausted { limit }`, `ActionNonceSeen`, `ActionQueueFull { limit }`, `ActionDeclined { why }`, `NoSuchActionRequest`, and the existing `GrantRevoked`, `ChainRefused { why }`, `NotTheAuthor`, `NotServing`. Storage limits: at most 64 requests awaiting “yes” per grant (`MAX_PENDING_ACTIONS`), at most 256 remembered issued leases per grant (`MAX_ISSUED_ACTIONS`), remembered for one hour (`ACTION_REPORT_WINDOW_SECONDS`): the door reports AFTER execution, for which the lease's thirty-second lifetime is insufficient.

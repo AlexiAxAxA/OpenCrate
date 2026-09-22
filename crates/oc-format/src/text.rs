@@ -1,47 +1,47 @@
-//! Правило показа текста, который выбрал ПОСТОРОННИЙ.
+//! Rules for displaying text chosen by AN OUTSIDER.
 //!
-//! # Зачем отдельный модуль
+//! # Why a separate module
 //!
-//! Одно и то же правило лежало в репозитории ЧЕТЫРЬМЯ копиями — имена файлов
-//! (`cc-cli`, находка В-8), текст отказа сервера (`activate.rs`), очередь просьб
-//! (`decide.rs`) и записка (`access.rs`), — а пятая функция того же класса,
-//! `printable`, обходилась без списка вовсе. Копии разошлись ровно так, как
-//! расходятся все копии: список из девяти кодовых точек пополнить забыли везде,
-//! а `printable` не пополняли, потому что рядом стоял комментарий, обещавший,
-//! что вход и так сужен.
+//! The same rule existed in FOUR copies in the repository: filenames
+//! (`cc-cli`, finding V-8), server denial text (`activate.rs`), the request queue
+//! (`decide.rs`), and the note (`access.rs`); a fifth function of the same kind,
+//! `printable`, had no list at all. The copies diverged just as copies always
+//! do: nobody updated any of the nine-code-point lists,
+//! and nobody updated `printable` because a nearby comment promised
+//! that its input was already constrained.
 //!
-//! Правило живёт здесь, в чистом крейте, по двум причинам сразу: разбор обязан
-//! ОТВЕРГАТЬ такой текст, а показ — ЗАМЕНЯТЬ его точкой, и обе стороны должны
-//! брать один и тот же список. Реакция разная, множество — общее.
+//! The rule lives here in the pure crate for two reasons: parsing must
+//! REJECT such text, while display must REPLACE it with a dot, and both must
+//! use the same list. The responses differ; the set is shared.
 //!
-//! # Чего здесь нет и почему
+//! # What is absent and why
 //!
-//! * **Сужения до печатного ASCII.** Оно верно для адресов сервера, у которых
-//!   есть проводная форма (нелатинские имена ходят punycode), и неверно для
-//!   всего, что пишет человек: имя документа законно бывает русским, записка —
-//!   тоже. Отсекаются КАТЕГОРИИ, а не алфавиты.
-//! * **Запрета U+200C и U+200D** (ZWNJ и ZWJ). Они невидимы, но орфографически
-//!   ОБЯЗАТЕЛЬНЫ в персидском, арабском и деванагари и склеивают составные
-//!   эмодзи. Запретить их значило бы повторить ту же ошибку, что и сужение до
-//!   ASCII, только на уровень глубже.
-//! * **Запрета комбинирующих знаков.** «Залго» из сотни диакритик рушит вёрстку,
-//!   но комбинирующие знаки — это письменность половины мира. Здесь работает
-//!   потолок ДЛИНЫ, а не запрет категории.
-//! * **Запрета селекторов начертания** (U+FE00..U+FE0F): они меняют вид
-//!   предыдущего символа, а не порядок и не видимость строки.
+//! * **Restriction to printable ASCII.** Correct for server addresses, which
+//!   have a wire representation (non-Latin names use punycode), but incorrect for
+//!   anything a person writes: a document name may legitimately be Russian,
+//!   as may a note. CATEGORIES are excluded, not alphabets.
+//! * **A ban on U+200C and U+200D** (ZWNJ and ZWJ). Invisible but orthographically
+//!   REQUIRED in Persian, Arabic, and Devanagari, they also join composite
+//!   emoji. Banning them would repeat the mistake of restricting to
+//!   ASCII, one level deeper.
+//! * **A ban on combining marks.** "Zalgo" with a hundred diacritics breaks layout,
+//!   but combining marks belong to the writing systems of half the world. A
+//!   LENGTH limit applies here, rather than a ban on the category.
+//! * **A ban on variation selectors** (U+FE00..U+FE0F): these change the appearance
+//!   of the preceding character, rather than the order or visibility of the line.
 
-/// Кодовые точки, переставляющие текст при показе.
+/// Code points that reorder displayed text.
 ///
-/// **Двенадцать, а не девять.** Прежние копии перечисляли только набор Trojan
-/// Source — встраивания (LRE, RLE), PDF, override (LRO, RLO) и изоляции
-/// (LRI, RLI, FSI, PDI). Собственно МЕТКИ направления — ALM, LRM, RLM — в
-/// список не попадали ни в одной из четырёх копий, хотя делают то же самое:
-/// задают направление соседнему тексту и меняют порядок показа.
+/// **Twelve, not nine.** The previous copies listed only the Trojan
+/// Source set: embeddings (LRE, RLE), PDF, overrides (LRO, RLO), and isolates
+/// (LRI, RLI, FSI, PDI). The direction MARKS themselves, ALM, LRM, and RLM, were
+/// absent from all four copies, although they do the same thing:
+/// set the direction of adjacent text and change display order.
 ///
-/// Управляющими символами они НЕ являются: `char::is_control` — это категория
-/// `Cc` и только она, а все три лежат в `Cf`. Значит второе условие их не
-/// ловило, и после расширения набора символов записки они проходили насквозь до
-/// терминала автора.
+/// They are NOT control characters: `char::is_control` covers category
+/// `Cc` only, while all three belong to `Cf`. The second condition therefore
+/// missed them, and after the note's character set was expanded they passed
+/// straight through to the author's terminal.
 pub const BIDI: [char; 12] = [
     '\u{061c}', // ALM  ARABIC LETTER MARK
     '\u{200e}', // LRM  LEFT-TO-RIGHT MARK
@@ -57,17 +57,17 @@ pub const BIDI: [char; 12] = [
     '\u{2069}', // PDI  POP DIRECTIONAL ISOLATE
 ];
 
-/// Невидимые форматирующие, у которых нет орфографической роли.
+/// Invisible formatting characters with no orthographic role.
 ///
-/// Порядок они не меняют — они не показываются вовсе, и в этом их вред: две
-/// разные строки печатаются НЕОТЛИЧИМО.
+/// They do not change order: they are not displayed at all, which is the danger:
+/// two different strings are displayed INDISTINGUISHABLY.
 ///
-/// Пример ниже записан ВИДИМОЙ нотацией — `(U+2060)` вместо самого символа.
-/// Раньше он был вставлен настоящей невидимкой, и это была та же беда, о которой
-/// он рассказывает: символа не видно при чтении файла, он переживает копирование
-/// и уезжает в чужой код вместе с примером. Нашёл его сторож гигиены, а не глаз. Там, где человек принимает решение по
-/// показанному тексту, это подделка, пусть и тихая: «Пётр из бух(U+2060)галтерии» с
-/// невидимкой внутри выглядит как настоящий Пётр, стоящий в той же очереди.
+/// The example below uses VISIBLE notation: `(U+2060)` instead of the character itself.
+/// Previously it contained the actual invisible character, causing the very problem
+/// it describes: invisible when reading the file, it survives copying
+/// into someone else's code with the example. The hygiene guard found it, not an eye. Where a person decides based on
+/// displayed text, this is forgery, however quiet: "Peter from acc(U+2060)ounting" with
+/// an invisible character looks like the real Peter in the same queue.
 pub const INVISIBLE: [char; 5] = [
     '\u{00ad}', // SOFT HYPHEN
     '\u{180e}', // MONGOLIAN VOWEL SEPARATOR
@@ -76,33 +76,33 @@ pub const INVISIBLE: [char; 5] = [
     '\u{feff}', // ZERO WIDTH NO-BREAK SPACE (BOM в середине строки)
 ];
 
-/// Разделители строки и абзаца.
+/// Line and paragraph separators.
 ///
-/// Отдельно от управляющих намеренно: их категории — `Zl` и `Zp`, а не `Cc`,
-/// поэтому `char::is_control` их не ловит. Между тем они переносят строку, то
-/// есть умеют ровно то, ради чего запрещён `\n`: сдвинуть вывод и подделать
-/// перечень.
+/// Deliberately separate from controls: their categories are `Zl` and `Zp`, not `Cc`,
+/// so `char::is_control` misses them. Yet they insert a line break,
+/// doing exactly what `\n` is forbidden for: shifting output and forging
+/// a list.
 pub const SEPARATORS: [char; 2] = [
     '\u{2028}', // LINE SEPARATOR
     '\u{2029}', // PARAGRAPH SEPARATOR
 ];
 
-/// Теговые символы: невидимая копия ASCII.
+/// Tag characters: an invisible copy of ASCII.
 ///
-/// U+E0020..U+E007F повторяют печатный ASCII невидимыми знаками — ими прячут
-/// текст внутри текста. Отвергаются вместе с U+E0001. Цена решения названа
-/// вслух: последовательности флагов отдельных регионов (флаг Англии и подобные)
-/// собираются как раз из теговых символов и через эту проверку не пройдут. Для
-/// поля, по которому человек принимает решение, невидимая контрабанда опаснее
-/// потерянного флага.
+/// U+E0020..U+E007F repeat printable ASCII with invisible characters, allowing
+/// text to be hidden inside text. Rejected along with U+E0001. The cost is
+/// explicit: subdivision flag sequences (England's flag and similar)
+/// use precisely these tag characters and will not pass this check. For a
+/// field on which a human bases a decision, invisible smuggling is more dangerous
+/// than losing a flag.
 const TAG_FIRST: char = '\u{e0000}';
 const TAG_LAST: char = '\u{e007f}';
 
-/// Опасно ли показывать этот символ человеку.
+/// Whether this character is dangerous to display to a person.
 ///
-/// Одно множество на весь репозиторий. Разбор по нему ОТВЕРГАЕТ, показ —
-/// ЗАМЕНЯЕТ точкой; решение о реакции принимает вызывающий, решение о составе
-/// принято здесь.
+/// One set for the entire repository. Parsing REJECTS using it; display
+/// REPLACES with a dot. The caller chooses the response; the contents of
+/// the set are decided here.
 #[must_use]
 pub fn is_display_unsafe(c: char) -> bool {
     c.is_control()
@@ -116,8 +116,8 @@ pub fn is_display_unsafe(c: char) -> bool {
 mod tests {
     use super::*;
 
-    /// Каждая кодовая точка из списков обязана быть опасной, и ни одна —
-    /// случайно не пройти. Проба закрывает разъезд списка с предикатом.
+    /// Every code point in the lists must be dangerous, with none
+    /// accidentally accepted. This probe prevents divergence between the list and predicate.
     #[test]
     fn every_listed_point_is_unsafe() {
         for c in BIDI.into_iter().chain(INVISIBLE).chain(SEPARATORS) {
@@ -128,12 +128,12 @@ mod tests {
         }
     }
 
-    /// Контроль: буквы живых письменностей опасными не считаются.
+    /// Control: letters of living writing systems are not considered dangerous.
     ///
-    /// Проба стоит здесь не для полноты. Ошибка, из-за которой правило и
-    /// заводилось, была ровно обратной: сужение до печатного ASCII отвергало
-    /// законный текст, и ни один тест этого не заметил, потому что все они были
-    /// написаны латиницей.
+    /// This probe is not here for completeness. The bug that prompted the rule
+    /// was precisely the opposite: restriction to printable ASCII rejected
+    /// legitimate text, and no test noticed because all tests were
+    /// written in Latin characters.
     #[test]
     fn letters_of_living_scripts_are_safe() {
         for c in "Пётр из бухгалтерии 会计部的彼得 פטר حساب Ελλάδα ñ é ß 123 .,!-".chars() {
@@ -146,8 +146,8 @@ mod tests {
         }
     }
 
-    /// Управляющие символы ловятся, и это единственное, что ловил `is_control`
-    /// в одиночку.
+    /// Control characters are caught, and these are the only characters `is_control`
+    /// caught on its own.
     #[test]
     fn control_characters_are_unsafe() {
         for c in ['\u{0}', '\r', '\n', '\u{1b}', '\u{7f}', '\u{9b}'] {

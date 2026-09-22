@@ -1,6 +1,12 @@
 # Architecture
 
-Open Crate is an application library core, not an operating-system kernel.
+[Documentation](index.md) · [Document lifecycle](how-it-works.md) · [Examples](../examples/README.md)
+
+Open Crate's five libraries share an explicit boundary with the application.
+
+![Application responsibilities and the five core libraries](assets/core-map.svg)
+
+## Library dependencies
 
 ```mermaid
 flowchart TD

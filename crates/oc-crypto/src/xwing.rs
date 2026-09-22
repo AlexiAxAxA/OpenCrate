@@ -1,26 +1,26 @@
-//! X-Wing: гибрид X25519 и ML-KEM-768 — механизм слота `kem_id = 4`.
+//! X-Wing: X25519 and ML-KEM-768 hybrid, slot mechanism `kem_id = 4`.
 //!
-//! Нормативный источник — `draft-connolly-cfrg-xwing-kem-10` (2 марта 2026),
-//! §5.2–5.5; решение о выборе именно этого построения и его обоснование —
-//! `docs/format.md`, «ВЕРСИЯ 3 ОТКРЫТА», пункт 1 (сам пункт живёт в версии 4).
-//! Замеры, на которых решение стоит, — `spikes/ml-kem-cost/`.
+//! Normative source: `draft-connolly-cfrg-xwing-kem-10` (March 2, 2026),
+//! §5.2–5.5; decision choosing this construction and its rationale:
+//! `docs/format.md`, "VERSION 3 OPENED", item 1 (the item itself lives in version 4).
+//! Measurements supporting the decision: `spikes/ml-kem-cost/`.
 //!
-//! # Что здесь важно знать читателю кода
+//! # What readers of this code should know
 //!
-//! **Приватная половина — 32 байта, а не 2400.** Обе пары растут из одного
-//! семени через SHAKE256, поэтому `device.key` остаётся файлом в тридцать два
-//! байта, каким он был до гибрида. Это свойство конструкции, а не наша
-//! оптимизация, и терять его нельзя: храня развёрнутый ключ ML-KEM, мы завели бы
-//! второй формат ключевого файла.
+//! **The private half is 32 bytes, not 2400.** Both pairs grow from one
+//! seed through SHAKE256, so `device.key` remains a thirty-two-byte
+//! file, as before the hybrid. This is a construction property, not our
+//! optimization, and must not be lost: storing an expanded ML-KEM key would introduce
+//! a second key-file format.
 //!
-//! **Метка комбинатора идёт ПОСЛЕДНЕЙ.** Написанная по памяти реализация ставила
-//! её в начало — и это молчаливая ошибка: две стороны, ошибшиеся одинаково,
-//! сходятся между собой и расходятся со всем остальным миром. Поймано векторами
-//! черновика (`tests/kat/xwing.kat`), а не рассуждением.
+//! **The combiner label comes LAST.** An implementation written from memory placed
+//! it first, a silent mistake: two parties making the same mistake agree
+//! with each other and disagree with the rest of the world. Caught by the draft's
+//! vectors (`tests/kat/xwing.kat`), not by reasoning.
 //!
-//! **Гибрид адресуется X25519, то есть ПРОГРАММНОМУ ключу.** Ключ в TPM — P-256,
-//! и X-Wing на нём не определён. Постквантовая защита и аппаратная привязка
-//! получателя сегодня взаимоисключающи; разбор — `docs/threat-model.md` §2.
+//! **The hybrid targets X25519, hence a SOFTWARE key.** TPM keys are P-256,
+//! where X-Wing is undefined. Post-quantum protection and recipient hardware
+//! binding are currently mutually exclusive; see `docs/threat-model.md` §2.
 
 use crate::CryptoError;
 use ml_kem::array::{Array, ArrayN};
@@ -31,39 +31,39 @@ use sha3::{Digest, Sha3_256, Shake256};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
-/// Семя приватной половины: из него растут ОБЕ пары.
+/// Private-half seed: BOTH pairs grow from it.
 pub const SECRET_LEN: usize = 32;
 
-/// Открытая половина на проводе: `pk_M(1184) ‖ pk_X(32)`.
+/// Wire public half: `pk_M(1184) ‖ pk_X(32)`.
 pub const PUBLIC_KEY_LEN: usize = 1216;
 
-/// Шифротекст на проводе: `ct_M(1088) ‖ ct_X(32)`.
+/// Wire ciphertext: `ct_M(1088) ‖ ct_X(32)`.
 pub const CIPHERTEXT_LEN: usize = 1120;
 
-/// Общий секрет — выход SHA3-256.
+/// Shared secret: SHA3-256 output.
 pub const SHARED_LEN: usize = 32;
 
-/// Семя инкапсуляции: `m(32)` для ML-KEM и `ek_X(32)` для X25519.
+/// Encapsulation seed: `m(32)` for ML-KEM and `ek_X(32)` for X25519.
 pub const ENCAPS_SEED_LEN: usize = 64;
 
 const ML_KEM_PUBLIC_LEN: usize = 1184;
 const ML_KEM_CIPHERTEXT_LEN: usize = 1088;
 const EXPANDED_LEN: usize = 96;
 
-/// Шесть байт ASCII: `\./` и `/^\`.
+/// Six ASCII bytes: `\./` and `/^\`.
 ///
-/// Записана байтами, а не строковым литералом, и это не педантизм: в литерале
-/// обратная косая черта требует экранирования, и `"\./"` в Rust не то, чем
-/// выглядит. Значение из черновика прямо: `5c2e2f2f5e5c`.
+/// Written as bytes rather than a string literal for a reason: a literal
+/// requires escaping backslashes, and `"\./"` in Rust is not what
+/// it seems. The draft's value directly: `5c2e2f2f5e5c`.
 const XWING_LABEL: [u8; 6] = [0x5c, 0x2e, 0x2f, 0x2f, 0x5e, 0x5c];
 
-/// Комбинатор X-Wing (§5.3 черновика).
+/// X-Wing combiner (§5.3 of the draft).
 ///
-/// Не HKDF и не HMAC — один вызов SHA3-256, и это решение черновика, а не наше
-/// упрощение: с губкой SHA3 конструкция на HMAC не нужна.
+/// Neither HKDF nor HMAC: one SHA3-256 call, the draft's decision rather than our
+/// simplification: the SHA3 sponge needs no HMAC construction.
 ///
-/// Порядок входов несущий, и метка ЗАВЕРШАЕТ его. Перестановка даёт другой
-/// секрет при тех же величинах, ничего при этом не ломая на своей стороне.
+/// Input order is essential, and the label ENDS it. Reordering produces a different
+/// secret from identical values without breaking anything on one's own side.
 fn combiner(ss_m: &[u8], ss_x: &[u8], ct_x: &[u8], pk_x: &[u8]) -> Zeroizing<[u8; SHARED_LEN]> {
     let mut h = Sha3_256::new();
     Digest::update(&mut h, ss_m);
@@ -74,14 +74,14 @@ fn combiner(ss_m: &[u8], ss_x: &[u8], ct_x: &[u8], pk_x: &[u8]) -> Zeroizing<[u8
     Zeroizing::new(h.finalize().into())
 }
 
-/// Развёрнутая приватная половина. Наружу не выходит: обе пары выводятся из
-/// семени заново при каждом употреблении.
+/// Expanded private half. Never exposed: both pairs are rederived from
+/// the seed on every use.
 ///
-/// Черновик разрешает кешировать разворачивание (§5.5.1), и мы этого НЕ делаем.
-/// Причина не в скорости: развёрнутый ключ — это 2400 байт секрета, живущих
-/// столько, сколько живёт кеш, тогда как семя в тридцать два байта затирается
-/// сразу. Цена — одно разворачивание на открытие файла, порядка сорока
-/// микросекунд (замер в `spikes/ml-kem-cost/`), то есть незаметная.
+/// The draft permits caching expansion (§5.5.1); we do NOT do so.
+/// The reason is not speed: an expanded key is 2400 secret bytes living
+/// as long as the cache, whereas the thirty-two-byte seed is wiped
+/// immediately. The price is one expansion per file opening, around forty
+/// microseconds (measured in `spikes/ml-kem-cost/`), hence negligible.
 struct Expanded {
     ml_kem: DecapsulationKey768,
     x25519: StaticSecret,
@@ -89,7 +89,7 @@ struct Expanded {
     x25519_public: [u8; 32],
 }
 
-/// `expandDecapsulationKey(sk)` — §5.2 черновика.
+/// `expandDecapsulationKey(sk)`: §5.2 of the draft.
 fn expand(secret: &[u8; SECRET_LEN]) -> Result<Expanded, CryptoError> {
     let mut xof = Shake256::default();
     Update::update(&mut xof, secret);
@@ -117,11 +117,11 @@ fn expand(secret: &[u8; SECRET_LEN]) -> Result<Expanded, CryptoError> {
     Ok(Expanded { ml_kem, x25519, ml_kem_public, x25519_public })
 }
 
-/// Открытая половина по семени: `pk_M ‖ pk_X`, 1216 байт.
+/// Public half from the seed: `pk_M ‖ pk_X`, 1216 bytes.
 ///
 /// # Errors
-/// Только на несоответствии длин, которого при исправной библиотеке не бывает;
-/// проверки оставлены потому, что паниковать этому крейту запрещено.
+/// Only mismatched lengths, impossible with a functioning library;
+/// checks remain because this crate forbids panics.
 pub fn public_key(secret: &[u8; SECRET_LEN]) -> Result<[u8; PUBLIC_KEY_LEN], CryptoError> {
     let expanded = expand(secret)?;
     let mut out = [0u8; PUBLIC_KEY_LEN];
@@ -131,14 +131,14 @@ pub fn public_key(secret: &[u8; SECRET_LEN]) -> Result<[u8; PUBLIC_KEY_LEN], Cry
     Ok(out)
 }
 
-/// Инкапсуляция по названному семени — `EncapsulateDerand` (§5.4.1 черновика).
+/// Encapsulation with a specified seed: `EncapsulateDerand` (§5.4.1 of the draft).
 ///
-/// Отдельно от [`encapsulate`] по той же причине, по какой у соседей отдельно
-/// живёт всё детерминированное: KAT обязан быть воспроизводим, а генератор в
-/// этом крейте запрещён.
+/// Separate from [`encapsulate`] for the same reason neighbors separate
+/// all deterministic operations: KATs must be reproducible, and an RNG is
+/// forbidden in this crate.
 ///
 /// # Errors
-/// Открытая половина не той длины либо не разбирается как ключ ML-KEM.
+/// Incorrect public-half length or unparseable ML-KEM key.
 pub fn encapsulate_derand(
     public_key: &[u8],
     seed: &[u8; ENCAPS_SEED_LEN],
@@ -179,14 +179,14 @@ pub fn encapsulate_derand(
     Ok((shared, ciphertext))
 }
 
-/// Инкапсуляция на открытую половину получателя.
+/// Encapsulate to the recipient's public half.
 ///
-/// Генератор приходит параметром — правило крейта. Шестьдесят четыре байта
-/// берутся ОДНИМ обращением: два подряд сдвинули бы порядок расхода генератора,
-/// от которого зависят эталоны (тот же довод, что у `seal::seal_p256`).
+/// The RNG arrives as a parameter under the crate rule. Sixty-four bytes
+/// are taken in ONE call: two consecutive calls would shift RNG consumption order,
+/// on which golden artifacts depend (same reasoning as `seal::seal_p256`).
 ///
 /// # Errors
-/// Открытая половина не той длины либо не разбирается как ключ ML-KEM.
+/// Incorrect public-half length or unparseable ML-KEM key.
 pub fn encapsulate<R: rand_core::CryptoRng + ?Sized>(
     public_key: &[u8],
     rng: &mut R,
@@ -196,16 +196,16 @@ pub fn encapsulate<R: rand_core::CryptoRng + ?Sized>(
     encapsulate_derand(public_key, &seed)
 }
 
-/// Декапсуляция — §5.5 черновика.
+/// Decapsulation: §5.5 of the draft.
 ///
-/// Отказа по «неверному шифротексту» здесь нет и быть не может: ML-KEM на
-/// испорченном шифротексте отвечает НЕЯВНЫМ ОТКАЗОМ — выводит секрет из `z` и
-/// возвращает его как ни в чём не бывало. Это свойство схемы, а не недосмотр:
-/// различимый отказ был бы оракулом. Ложность секрета обнаруживает вызывающий —
-/// обязательством слота (И-4) и тегом AEAD, оба константным временем.
+/// There is and can be no "invalid ciphertext" rejection here: on corrupted
+/// ciphertext ML-KEM performs IMPLICIT REJECTION, deriving a secret from `z` and
+/// returning it normally. This is a scheme property, not an oversight:
+/// a distinguishable failure would be an oracle. The caller detects the false secret
+/// using the slot commitment (I-4) and AEAD tag, both in constant time.
 ///
 /// # Errors
-/// Шифротекст не той длины. Всё остальное — молча другой секрет.
+/// Incorrect ciphertext length. Everything else silently yields a different secret.
 pub fn decapsulate(
     secret: &[u8; SECRET_LEN],
     ciphertext: &[u8],
@@ -233,7 +233,7 @@ pub fn decapsulate(
 mod tests {
     use super::*;
 
-    /// КРУГ ЗАМЫКАЕТСЯ: что запечатано инкапсуляцией, то же выходит декапсуляцией.
+    /// ROUND TRIP: what encapsulation seals, decapsulation recovers.
     #[test]
     fn what_is_encapsulated_comes_back_out_of_decapsulation() {
         let secret = [0x3a_u8; SECRET_LEN];
@@ -243,10 +243,10 @@ mod tests {
         assert_eq!(sent.as_slice(), received.as_slice(), "секрет не сошёлся с обеих сторон");
     }
 
-    /// ИСПОРЧЕННЫЙ ШИФРОТЕКСТ ДАЁТ ДРУГОЙ СЕКРЕТ, А НЕ ОТКАЗ.
+    /// CORRUPTED CIPHERTEXT YIELDS ANOTHER SECRET, NOT REJECTION.
     ///
-    /// Проба стережёт именно это свойство. Появись здесь отказ — значит кто-то
-    /// добавил различимую ветвь по враждебным байтам, то есть оракул.
+    /// Guards precisely this property. A rejection here would mean someone
+    /// added a distinguishable branch on hostile bytes, hence an oracle.
     #[test]
     fn a_corrupted_ciphertext_yields_a_different_secret_rather_than_an_error() {
         let secret = [0x3a_u8; SECRET_LEN];
@@ -268,11 +268,11 @@ mod tests {
         assert_eq!(decapsulate(&secret, &ciphertext).unwrap().as_slice(), sent.as_slice());
     }
 
-    /// ДЛИНЫ НА ПРОВОДЕ — ТЕ, ЧТО ОБЕЩАНЫ ФОРМАТОМ.
+    /// WIRE LENGTHS MATCH THE FORMAT'S PROMISE.
     ///
-    /// Тут стоит не «проверить арифметику», а поймать смену глубины ML-KEM:
-    /// 1024 дал бы другие числа, а формат задаёт длину как функцию пары
-    /// (версия, `kem_id`) — менять её у занятого номера нельзя.
+    /// This is not "check arithmetic" but detect a change in ML-KEM level:
+    /// 1024 would yield different numbers, while the format defines length as a function of
+    /// (version, `kem_id`); it cannot change for an occupied number.
     #[test]
     fn the_wire_lengths_are_the_ones_the_format_promises() {
         let secret = [0x01_u8; SECRET_LEN];
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(ciphertext.len(), 1120);
     }
 
-    /// ЧУЖАЯ ДЛИНА ОТВЕРГАЕТСЯ ДО ВСЯКОЙ РАБОТЫ.
+    /// WRONG LENGTH IS REJECTED BEFORE ANY WORK.
     #[test]
     fn foreign_lengths_are_refused_before_any_work() {
         let secret = [0x01_u8; SECRET_LEN];
@@ -292,12 +292,12 @@ mod tests {
         assert!(decapsulate(&secret, &[0u8; 1121]).is_err());
     }
 
-    /// МЕТКА СТОИТ В КОНЦЕ, И ЭТО ПРОВЕРЯЕТСЯ, А НЕ ПОДРАЗУМЕВАЕТСЯ.
+    /// THE LABEL IS LAST, TESTED RATHER THAN ASSUMED.
     ///
-    /// Отдельная проба, потому что ошибка была настоящей: реализация по памяти
-    /// ставила метку в начало. Здесь комбинатор сверяется с независимым счётом
-    /// того же хеша — если кто-нибудь переставит входы, разойдётся именно тут, а
-    /// не через год у второй реализации.
+    /// A separate probe because the error was real: implementation from memory
+    /// placed the label first. The combiner is checked against an independent computation
+    /// of the same hash: reordering inputs causes divergence right here,
+    /// not a year later in a second implementation.
     #[test]
     fn the_label_terminates_the_combiner_input() {
         let (ss_m, ss_x, ct_x, pk_x) = ([1_u8; 32], [2_u8; 32], [3_u8; 32], [4_u8; 32]);

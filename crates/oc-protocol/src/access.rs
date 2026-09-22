@@ -1,80 +1,80 @@
-//! Документы ЗАПРОСА ДОСТУПА: получатель просит, автор одобряет.
+//! ACCESS REQUEST documents: the recipient requests, the author approves.
 //!
-//! # Что это за разговор и чем он отличается от активации
+//! # What this conversation is and how it differs from activation
 //!
-//! Активация отвечает на вопрос «можно ли ЭТОМУ устройству открыть файл СЕЙЧАС»
-//! и решается сервером по правилам, которые автор записал заранее. Запрос
-//! доступа отвечает на другой вопрос — «а этот человек вообще из числа тех, кому
-//! файл предназначен», — и решить его сервер не может ни при каких правилах:
-//! получателя при упаковке не называли.
+//! Activation asks "may THIS device open the file NOW?"
+//! and the server decides under rules written by the author beforehand. An access
+//! request asks a different question: "is this person among the intended
+//! recipients at all?" No server rule can answer that:
+//! the recipient was not named when the file was packed.
 //!
-//! Решает автор. Сервер здесь **слепой посредник**: он хранит очередь, показывает
-//! её автору и доставляет ответ. Ни доли B, ни содержимого он не видит — ответ
-//! запечатан на ключ устройства, а не на его.
+//! The author decides. The server is a **blind intermediary**: it stores the queue, shows
+//! it to the author and delivers the answer. It sees neither share B nor the contents:
+//! the answer is sealed to the device key, not the server's.
 //!
-//! # Почему это не стоило формату ни байта
+//! # Why this cost the format no bytes
 //!
-//! Слот `AuthorDevice` несёт ОБЕ доли (`docs/format.md` §3.3), поэтому автор
-//! вправе отдать долю B кому угодно, не трогая контейнер и не переподписывая
-//! заголовок. Выданная доля живёт отдельным запечатанным блоком той же формы,
-//! что уже отдаёт сервер, — получатель хранит её рядом с лизингом.
+//! The `AuthorDevice` slot carries BOTH shares (`docs/format.md` §3.3), so the author
+//! can give share B to anyone without changing the container or re-signing
+//! the header. The issued share lives in a separate sealed block of the same shape
+//! already returned by the server; the recipient stores it alongside the lease.
 //!
-//! # Кто такой «автор» с точки зрения сервера
+//! # Who the "author" is from the server's perspective
 //!
-//! Учётных записей у сервера нет и заводить их не пришлось. Заголовок контейнера
-//! несёт `author_key` (тег 5) и подписан ИМ ЖЕ, строгой проверкой (И-6). Значит
-//! сервер узнаёт ключ автора при регистрации файла — из самого файла, — и
-//! одобрение принимает только подписанное этим ключом.
+//! The server has no accounts, and none had to be added. The container header
+//! carries `author_key` (tag 5), signed BY THAT SAME KEY with strict verification (I-6). Thus
+//! the server learns the author's key on file registration, from the file itself,
+//! and accepts approval only when signed by that key.
 //!
-//! Приём тот же, которым закреплён ключ подписи лизинга: истина о том, кто вправе
-//! решать, приходит из подписанного заголовка, а не из слов собеседника.
+//! The technique is the same as pinning the lease-signing key: authority to
+//! decide comes from the signed header, not the peer's claims.
 
 use oc_format::tlv::{TlvReader, TlvWriter};
 use oc_format::{FormatError, MAX_HEADER_LEN};
 
-/// Наибольший размер документа этого разговора.
+/// Maximum size of a document in this conversation.
 ///
-/// Тот же потолок, что у документов активации, и по той же причине: самое
-/// крупное здесь — запечатанный блок доли, а он по форме слот и больше
-/// предельного заголовка быть не может.
+/// The same cap as activation documents, for the same reason: the largest
+/// item is a sealed share block, which has the shape of a slot and cannot exceed
+/// the maximum header size.
 pub const MAX_DOCUMENT: usize = MAX_HEADER_LEN as usize;
 
-/// Сколько ожидающих просьб сервер отдаёт автору за раз — ОКНО очереди.
+/// Number of pending requests returned to the author at once: the queue WINDOW.
 ///
-/// Величина провода: ответ на `Requests` несёт не больше стольких записей, и
-/// клиент больший ответ отвергает — длина приходит от чужой стороны.
+/// A wire quantity: a `Requests` response carries at most this many entries,
+/// and the client rejects a larger response because the length comes from a foreign party.
 ///
-/// Шестнадцать: столько же, сколько адресов сервера в заголовке, и по сходной
-/// причине — величина, которую человек в состоянии просмотреть глазами. Решённые
-/// уходят из окна, и в него встают следующие по номеру (C4): так сто просьб
-/// разбираются окнами по шестнадцать, а не упираются в потолок.
+/// Sixteen: the same as the number of server addresses in the header, for a similar
+/// reason: a quantity a person can review visually. Resolved requests
+/// leave the window, and the next numbered requests enter it (C4), so a hundred requests
+/// are handled in windows of sixteen instead of hitting a cap.
 pub const MAX_PENDING_PER_FILE: usize = 16;
 
-/// Сколько нерешённых просьб сервер согласен ПОМНИТЬ на один файл — потолок.
+/// Maximum unresolved requests the server agrees to REMEMBER per file.
 ///
-/// Предел нужен, потому что просьба принимается ДО всякого одобрения: кто
-/// угодно, добравшийся до сервера, вправе попросить. Без потолка это очередь,
-/// которую набивают бесплатно.
+/// The limit is necessary because a request is accepted BEFORE any approval:
+/// anyone able to reach the server may ask. Without a cap, this queue
+/// can be filled for free.
 ///
-/// Прежде потолок совпадал с окном (16), и на рассылке ста критикам
-/// восемьдесят четыре получали «очередь полна» (`docs/plan.md`, Ф-22 п. 3).
-/// Двести пятьдесят шесть — с запасом на такую рассылку; цена названа: до
-/// ~400 КиБ состояния на файл при гибридных ключах (1216 байт ключа и 256 байт
-/// записки на запись). Величина только серверная: на провод не выходит.
+/// Previously the cap equaled the window (16), so a distribution to a hundred reviewers
+/// left eighty-four with "queue full" (`docs/plan.md`, F-22 item 3).
+/// Two hundred fifty-six provides headroom for that distribution; the cost is explicit:
+/// up to ~400 KiB of state per file with hybrid keys (1216 key bytes and 256 note bytes
+/// per entry). This is server-only and never appears on the wire.
 pub const MAX_WAITING_PER_FILE: usize = 256;
 
-/// Номер решения, зарезервированный за завещанием.
+/// Decision number reserved for a bequest.
 ///
-/// Завещание — обычное подписанное решение автора, лежащее на сервере до тишины
-/// (`docs/protocol.md` §11). Сквозная очередь решений начинается с нуля и растёт,
-/// поэтому наибольшее возможное число ей недостижимо: занять его завещанием
-/// значит не отнять у очереди ни одного номера.
+/// A bequest is an ordinary signed author decision stored on the server until silence
+/// (`docs/protocol.md` §11). The sequential decision queue starts at zero and grows,
+/// so the largest possible number is unreachable: assigning it to a bequest
+/// takes no number away from the queue.
 ///
-/// Резервируется он затем, чтобы завещание нельзя было выдать за очередное
-/// решение и наоборот. Сторона приёма номер не сверяет вовсе
-/// (`cc_cli::granted::accept_against`) — и это не упущение, а причина, по которой
-/// завещание вообще возможно без правки получателя: сверяет номер сервер, и по
-/// нему отличает одно от другого, не заводя второго вида документа.
+/// It is reserved so that a bequest cannot masquerade as an ordinary
+/// decision or vice versa. The receiving side does not check the number at all
+/// (`cc_cli::granted::accept_against`), not an oversight but the very reason
+/// bequests require no recipient changes: the server checks the number and uses
+/// it to distinguish the two without adding a second document kind.
 pub const HEIR_SEQ: u64 = u64::MAX;
 
 mod tag {
@@ -93,60 +93,60 @@ mod tag {
     pub const SIGNATURE: u16 = 13;
 }
 
-/// Просьба о доступе, отправленная устройством.
+/// An access request sent by a device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AskAccess {
     pub file_id: [u8; 16],
     pub device_fpr: [u8; 32],
     pub device_public: Vec<u8>,
     pub device_kem: u8,
-    /// Записка от человека к человеку: «это Пётр из бухгалтерии».
+    /// A person-to-person note: "this is Peter from accounting".
     ///
-    /// Чистый UTF-8 на ЛЮБОМ языке: записку показывают человеку, и пишет её
-    /// тоже человек. Отсекаются не буквы, а категории — управляющие символы и
-    /// двунаправленные метки, потому что текст выбирает посторонний, а печатают
-    /// его рядом со строками, которым автор верит. Правило — `note_char_is_safe`.
+    /// Plain UTF-8 in ANY language: a person reads the note and a person
+    /// writes it. Categories are excluded, not letters: control characters and
+    /// bidirectional marks, because an outsider chooses text displayed
+    /// alongside lines the author trusts. The rule is `note_char_is_safe`.
     pub note: String,
 }
 
-/// Запрос, ждущий решения. Так его видит автор.
+/// A request awaiting a decision, as seen by the author.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pending {
-    /// Номер в очереди сервера. Им автор и называет запрос, одобряя.
+    /// Server queue number, used by the author to identify the request when approving it.
     pub seq: u64,
     pub file_id: [u8; 16],
     pub device_fpr: [u8; 32],
     pub device_public: Vec<u8>,
     pub device_kem: u8,
     pub note: String,
-    /// Когда запрос принят — по часам СЕРВЕРА.
+    /// When the request was accepted, by the SERVER clock.
     ///
-    /// Именно сервера: время, названное просителем, ничем не подтверждено, а
-    /// автору оно нужно, чтобы отличить «просят прямо сейчас» от «просили
-    /// месяц назад».
+    /// Specifically the server's: a requester's claimed time is unauthenticated,
+    /// and the author needs to distinguish "requesting right now" from "requested
+    /// a month ago".
     pub at: i64,
 }
 
-/// Решение автора.
+/// The author's decision.
 ///
-/// Подписывается ключом автора (`author_key` из заголовка), и подпись покрывает
-/// ВСЁ решение целиком, включая запечатанную долю: иначе посредник мог бы
-/// подменить долю, оставив одобрение.
+/// Signed with the author key (`author_key` from the header); the signature covers
+/// the ENTIRE decision, including the sealed share: otherwise an intermediary could
+/// replace the share while keeping the approval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
     pub seq: u64,
     pub file_id: [u8; 16],
-    /// Кому. Дублирует то, что лежит в очереди, и это не избыточность: подпись
-    /// покрывает отпечаток, поэтому одобрение нельзя переадресовать.
+    /// Recipient. Duplicates the queue data deliberately: the signature
+    /// covers the fingerprint, so approval cannot be redirected.
     pub device_fpr: [u8; 32],
     pub approve: bool,
-    /// Доля B, запечатанная на ключ устройства. `None` при отказе.
+    /// Share B, sealed to the device key. `None` for a denial.
     pub share_b: Option<Blob>,
     pub author_key: [u8; 32],
     pub signature: [u8; 64],
 }
 
-/// Запечатанный блок: та же форма, что у слота и у доли сервера.
+/// Sealed block: the same shape as a slot and the server share.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Blob {
     pub enc: Vec<u8>,
@@ -154,14 +154,14 @@ pub struct Blob {
     pub ct: Vec<u8>,
 }
 
-/// Байты решения БЕЗ подписи — то, что подписывается и проверяется.
+/// Decision bytes WITHOUT the signature: what is signed and verified.
 ///
-/// Отдельной функцией, потому что подписывающий и проверяющий обязаны собрать
-/// одни и те же байты. Две сборки разошлись бы молча, и подпись перестала бы
-/// значить то, что обещает.
+/// A separate function because signer and verifier must construct
+/// identical bytes. Two constructions would silently diverge, and the signature would cease
+/// to mean what it promises.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`], если тело не кодируется.
+/// Returns [`FormatError`] if the body cannot be encoded.
 pub fn decision_body(decision: &Decision) -> Result<Vec<u8>, FormatError> {
     // Порядок полей — ПО ВОЗРАСТАНИЮ ТЕГА, как требует И-7. Записать их в
     // порядке чтения было бы естественнее для глаза, и первая редакция так и
@@ -180,11 +180,11 @@ pub fn decision_body(decision: &Decision) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Транскрипт подписи решения.
+/// Decision signature transcript.
 ///
-/// Через [`oc_crypto::Transcript`], а не ручной сборкой: его конструктор ТРЕБУЕТ
-/// метку и сам ставит разделитель. Собери мы байты руками — метку можно было бы
-/// забыть, и подпись решения столкнулась бы с подписью заголовка в одном домене.
+/// Uses [`oc_crypto::Transcript`] rather than manual construction: its constructor REQUIRES
+/// a label and inserts the separator itself. Hand-building bytes could omit
+/// the label, placing decision and header signatures in the same domain.
 #[must_use]
 pub fn decision_transcript(body: &[u8]) -> oc_crypto::Transcript {
     let mut t = oc_crypto::Transcript::new(oc_crypto::label::GRANT);
@@ -192,67 +192,67 @@ pub fn decision_transcript(body: &[u8]) -> oc_crypto::Transcript {
     t
 }
 
-/// Годится ли символ для записки.
+/// Whether a character is suitable for a note.
 ///
-/// # Почему НЕ печатный ASCII, хотя у адресов сервера именно он
+/// # Why NOT printable ASCII, although server addresses use it
 ///
-/// Первая редакция сузила записку до печатного ASCII — тем же правилом, что
-/// закрывает подделку отображения у адресов сервера. Правило верное, перенос
-/// неверный, и поймал это не тест, а живой прогон между двумя машинами:
-/// записка «проба с ноутбука HUAWEI» была отвергнута сервером.
+/// The first revision restricted notes to printable ASCII using the same rule that
+/// prevents display spoofing in server addresses. The rule was correct, its transfer
+/// was not; a live run between two machines caught this, not a test:
+/// the Russian note "test from the HUAWEI laptop" was rejected by the server.
 ///
-/// Вещи разные. У адреса сервера есть ПРОВОДНАЯ форма, и она ASCII по
-/// построению: нелатинские имена ходят в сеть как punycode, так что сужение не
-/// отсекает там ничего живого. У записки проводной формы нет — это фраза от
-/// человека человеку, и люди пишут на своём языке. Пример в докстроке
-/// [`AskAccess::note`] («это Пётр из бухгалтерии») сам не прошёл бы проверку:
-/// код запрещал ровно то, что документация приводила образцом.
+/// These are different things. A server address has a WIRE representation that is ASCII by
+/// construction: non-Latin names travel over the network as punycode, so the restriction
+/// excludes nothing legitimate. A note has no separate wire representation: it is a phrase from
+/// one person to another, and people write in their own language. The example in
+/// [`AskAccess::note`] ("this is Peter from accounting", in Russian) would itself fail validation:
+/// the code prohibited precisely what the documentation used as an example.
 ///
-/// # Что отсекается
+/// # What is excluded
 ///
-/// То же, что у имён файлов (находка В-8), и по той же причине — опасны не
-/// буквы, а КАТЕГОРИИ. Состав множества и обоснование каждой категории —
-/// [`oc_format::text`]; здесь только РЕАКЦИЯ: отвергнуть.
+/// The same categories as for filenames (finding V-8), for the same reason: the danger lies in
+/// CATEGORIES, not letters. The set and rationale for each category are in
+/// [`oc_format::text`]; only the REACTION is local: reject.
 ///
-/// Первая редакция несла свою копию списка — четвёртую в репозитории — и была
-/// неполна ровно там же, где остальные три: девять кодовых точек Trojan Source
-/// без самих меток направления (ALM, LRM, RLM). Копия убрана, список общий.
+/// The first revision carried its own copy of the list, the repository's fourth, and it was
+/// incomplete in precisely the same place as the other three: nine Trojan Source code points
+/// without the direction marks themselves (ALM, LRM, RLM). The copy is gone; the list is shared.
 ///
-/// # Почему перевода строки БОЛЬШЕ НЕТ
+/// # Why newlines are NO LONGER allowed
 ///
-/// Первая редакция его разрешала: «фраза бывает в две строки, а сдвинуть им
-/// вывод нельзя — он добавляет строку, а не переписывает соседнюю». Довод верен
-/// про ЗАТИРАНИЕ и упускает ПОДДЕЛКУ ПЕРЕЧНЯ. Записка печатается пунктом списка
-/// просьб, и перевод строки выводит текст из этого пункта наружу: записка,
-/// внутри которой стоят «№ 2» и «устройство:», дорисовывает в очередь просьбу,
-/// которой нет.
+/// The first revision allowed them: "a phrase may span two lines, and a newline cannot shift
+/// output; it adds a line rather than rewriting its neighbor". That reasoning is valid
+/// for OVERWRITING but misses LIST SPOOFING. A note is printed as a request-list
+/// item, and a newline moves text outside that item: a note
+/// containing "No. 2" and "device:" adds a nonexistent request to the displayed
+/// queue.
 ///
-/// Довесок: единственный потребитель записки всё равно заменял `\n` точкой,
-/// то есть двухстрочная записка НИКОГДА не показывалась в две строки. Формат
-/// разрешал то, чего показ не умел.
+/// Additionally, the only note consumer already replaced `\n` with a dot,
+/// so a two-line note was NEVER displayed on two lines. The format
+/// allowed something the display could not render.
 fn note_char_is_safe(c: char) -> bool {
     !oc_format::text::is_display_unsafe(c)
 }
 
-/// Наибольшая длина записки. Фраза, а не письмо.
+/// Maximum note length. A phrase, not a letter.
 pub const MAX_NOTE: usize = 256;
 
-/// Правило записки, общее на весь крейт.
+/// The note rule shared across the crate.
 ///
-/// # Почему номер тега — параметр, а не константа внутри
+/// # Why the tag number is a parameter rather than an internal constant
 ///
-/// Потому что записка есть не только здесь: её несёт и просьба об ИСПОЛНЕНИИ
-/// действия ([`crate::action::ActionRequest`], этап 2), и там у поля свой номер
-/// в своём реестре. Копия этих десяти строк во втором месте — ровно та болезнь,
-/// которую репозиторий знает поимённо: один путь чинят, соседний забывают, и
-/// набор отсекаемых категорий разошёлся бы на первой же правке
-/// [`oc_format::text`]. Параметр стоит дешевле копии, а отказ при этом называет
-/// ТОТ тег, в котором записка лежала, — иначе человек читал бы номер поля из
-/// чужого документа.
+/// Because notes occur elsewhere: an action EXECUTION request
+/// ([`crate::action::ActionRequest`], stage 2) also carries one, with its own field number
+/// in its own registry. Copying these ten lines elsewhere would recreate the repository's
+/// familiar problem: one path fixed, its neighbor forgotten. The excluded-category
+/// sets would diverge at the first change to
+/// [`oc_format::text`]. A parameter costs less than a copy, and the rejection identifies
+/// THE tag containing the note; otherwise the user would read a field number from
+/// another document.
 ///
 /// # Errors
-/// [`FormatError::BadFieldLength`] — записка длиннее [`MAX_NOTE`];
-/// [`FormatError::BadNoteChar`] — в ней символ из отсекаемых категорий.
+/// [`FormatError::BadFieldLength`]: the note exceeds [`MAX_NOTE`];
+/// [`FormatError::BadNoteChar`]: it contains a character from an excluded category.
 pub(crate) fn check_note(note: &str, tag: u16) -> Result<(), FormatError> {
     if note.len() > MAX_NOTE {
         return Err(FormatError::BadFieldLength { tag, len: note.len() });
@@ -267,11 +267,11 @@ pub(crate) fn check_note(note: &str, tag: u16) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Закодировать просьбу.
+/// Encode a request.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`], если записка длиннее допустимого или содержит
-/// небезопасные символы.
+/// Returns [`FormatError`] if the note is too long or contains
+/// unsafe characters.
 pub fn encode_ask(ask: &AskAccess) -> Result<Vec<u8>, FormatError> {
     check_note(&ask.note, tag::NOTE)?;
     let mut w = TlvWriter::new();
@@ -283,11 +283,11 @@ pub fn encode_ask(ask: &AskAccess) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать просьбу.
+/// Parse a request.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`] при нехватке полей, неверных длинах или небезопасной
-/// записке.
+/// Returns [`FormatError`] for missing fields, invalid lengths or an unsafe
+/// note.
 pub fn decode_ask(bytes: &[u8]) -> Result<AskAccess, FormatError> {
     let mut reader = TlvReader::new(bytes);
     let (mut file_id, mut fpr, mut public, mut kem, mut note) = (None, None, None, None, None);
@@ -315,10 +315,10 @@ pub fn decode_ask(bytes: &[u8]) -> Result<AskAccess, FormatError> {
     })
 }
 
-/// Закодировать запись очереди.
+/// Encode a queue entry.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`], если тело не кодируется.
+/// Returns [`FormatError`] if the body cannot be encoded.
 pub fn encode_pending(p: &Pending) -> Result<Vec<u8>, FormatError> {
     check_note(&p.note, tag::NOTE)?;
     let mut w = TlvWriter::new();
@@ -332,10 +332,10 @@ pub fn encode_pending(p: &Pending) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать запись очереди.
+/// Parse a queue entry.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`] при нехватке полей или неверных длинах.
+/// Returns [`FormatError`] for missing fields or invalid lengths.
 pub fn decode_pending(bytes: &[u8]) -> Result<Pending, FormatError> {
     let mut reader = TlvReader::new(bytes);
     let (mut file_id, mut fpr, mut public, mut kem, mut note) = (None, None, None, None, None);
@@ -368,18 +368,18 @@ pub fn decode_pending(bytes: &[u8]) -> Result<Pending, FormatError> {
     })
 }
 
-/// Почему очередь не разобралась.
+/// Why queue parsing failed.
 ///
-/// Свой род ошибки, а не вариант [`FormatError`]: обрыв на границе записи и
-/// лишняя запись — события КОНВЕРТА очереди, а не поля TLV, и номера тега у них
-/// нет. Причина названа словом, потому что оба хоста показывают её человеку.
+/// A separate error type rather than a [`FormatError`] variant: truncation at an entry boundary
+/// and an extra entry concern the queue ENVELOPE, not a TLV field, and have
+/// no tag number. The reason is named in words because both hosts show it to a person.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueError {
-    /// Тело кончилось посреди записи: на длине либо раньше объявленной длины.
+    /// The body ended within an entry: during its length or before the declared length.
     Torn(&'static str),
-    /// Запись выделена, но не разбирается.
+    /// The entry was extracted but cannot be parsed.
     Record(FormatError),
-    /// Записей больше окна [`MAX_PENDING_PER_FILE`].
+    /// More entries than the [`MAX_PENDING_PER_FILE`] window.
     TooMany,
 }
 
@@ -395,20 +395,20 @@ impl core::fmt::Display for QueueError {
     }
 }
 
-/// Разобрать очередь: записи идут подряд, каждая со своей длиной.
+/// Parse a queue: consecutive entries, each with its own length.
 ///
-/// Длина у каждой записи, а не одна на всё тело, потому что записи разной длины:
-/// записка и публичный ключ переменные. Общего счётчика записей нет намеренно —
-/// он был бы вторым источником истины о том, сколько их, и разошёлся бы с телом.
+/// Each entry has a length rather than one for the whole body because entries vary:
+/// the note and public key are variable-length. There is deliberately no total entry counter:
+/// it would be a second source of truth for their number and could diverge from the body.
 ///
-/// Живёт здесь, а не у вызывающего, потому что хостов у разбора два — `cc-cli` и
-/// `cc-wasm`, — и вторая реализация одной раскладки разошлась бы молча. До
-/// переноса она была одна и лежала в `cc_cli::decide`, куда модулю под `wasm32`
-/// дороги нет.
+/// Lives here rather than in the caller because parsing has two hosts, `cc-cli` and
+/// `cc-wasm`, and a second implementation of one layout would silently diverge. Before
+/// the move there was one implementation in `cc_cli::decide`, inaccessible to a
+/// `wasm32` module.
 ///
 /// # Errors
-/// [`QueueError`], если тело оборвано, запись не разбирается или записей больше
-/// окна.
+/// [`QueueError`] if the body is truncated, an entry cannot be parsed, or the entry count exceeds
+/// the window.
 pub fn split_queue(mut rest: &[u8]) -> Result<Vec<Pending>, QueueError> {
     let mut out: Vec<Pending> = Vec::new();
     while !rest.is_empty() {
@@ -435,10 +435,10 @@ pub fn split_queue(mut rest: &[u8]) -> Result<Vec<Pending>, QueueError> {
     Ok(out)
 }
 
-/// Закодировать решение вместе с подписью.
+/// Encode a decision together with its signature.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`], если тело не кодируется.
+/// Returns [`FormatError`] if the body cannot be encoded.
 pub fn encode_decision(d: &Decision) -> Result<Vec<u8>, FormatError> {
     let mut out = decision_body(d)?;
     let mut w = TlvWriter::new();
@@ -447,15 +447,15 @@ pub fn encode_decision(d: &Decision) -> Result<Vec<u8>, FormatError> {
     Ok(out)
 }
 
-/// Разобрать решение.
+/// Parse a decision.
 ///
-/// Подпись здесь НЕ проверяется — проверять её обязан тот, у кого есть ключ
-/// автора, и делать это он обязан ДО всякого использования полей. Разбор и
-/// проверка разведены намеренно: смешав их, мы получили бы функцию, чей отказ
-/// не отличает «байты не те» от «подпись не сошлась».
+/// The signature is NOT checked here: whoever holds the author's key must
+/// check it BEFORE any use of the fields. Parsing and
+/// verification are deliberately separate: combining them would produce a function whose error
+/// cannot distinguish "wrong bytes" from "signature mismatch".
 ///
 /// # Errors
-/// Отдаёт [`FormatError`] при нехватке полей или неверных длинах.
+/// Returns [`FormatError`] for missing fields or invalid lengths.
 pub fn decode_decision(bytes: &[u8]) -> Result<Decision, FormatError> {
     let mut reader = TlvReader::new(bytes);
     let (mut seq, mut file_id, mut fpr, mut approve) = (None, None, None, None);
@@ -562,10 +562,10 @@ mod tests {
         assert_eq!(decode_ask(&encode_ask(&a).unwrap()).unwrap(), a);
     }
 
-    /// ЗАПИСКУ ПОКАЖУТ ЧЕЛОВЕКУ, ПОЭТОМУ ОНА НЕ ВПРАВЕ ДВИГАТЬ КУРСОР.
+    /// A HUMAN WILL SEE THE NOTE, SO IT MUST NOT MOVE THE CURSOR.
     ///
-    /// Тот же класс, что у адресов сервера и у имён файлов: текст сочиняет
-    /// посторонний, а печатается он рядом со строками, которым человек верит.
+    /// The same class as server addresses and filenames: an outsider authors the
+    /// text, but it is displayed alongside lines the person trusts.
     #[test]
     fn a_note_that_could_repaint_the_screen_is_refused() {
         for bad in [
@@ -603,12 +603,12 @@ mod tests {
         assert!(encode_ask(&a).is_ok());
     }
 
-    /// Отказ называет ПОЛЕ и КОД — не чужую беду и не сам символ.
+    /// The rejection identifies the FIELD and CODE POINT, not an unrelated problem or the character itself.
     ///
-    /// Проба закрепляет то, ради чего заведён [`FormatError::BadNoteChar`]:
-    /// прежняя редакция возвращала `BadAddressByte { byte: 0 }`, и человек с
-    /// русской запиской читал «в адресе байт 0x00». Без этой пробы возврат к
-    /// прежнему варианту прошёл бы зелёным — `is_err()` истинно у обоих.
+    /// The test pins the purpose of [`FormatError::BadNoteChar`]:
+    /// the old revision returned `BadAddressByte { byte: 0 }`, so someone with a
+    /// Russian note saw "address contains byte 0x00". Without this test, reverting to
+    /// the old variant would pass, since `is_err()` is true for both.
     #[test]
     fn a_refused_note_names_the_field_and_the_code() {
         let mut a = ask();
@@ -628,7 +628,7 @@ mod tests {
         }
     }
 
-    /// Не-UTF-8 в записке сообщается как не-UTF-8, а не как ошибка длины.
+    /// Non-UTF-8 in a note is reported as non-UTF-8, not as a length error.
     #[test]
     fn a_note_that_is_not_utf8_says_so() {
         let mut a = ask();
@@ -647,11 +647,11 @@ mod tests {
         }
     }
 
-    /// Записка на своём языке — законная записка.
+    /// A note in one's own language is valid.
     ///
-    /// Проба заведена по следу: первая редакция сужала набор до печатного
-    /// ASCII, и НИ ОДИН тест этого не заметил, потому что все они были
-    /// написаны латиницей. Нашёл живой прогон между двумя машинами.
+    /// A regression test: the first revision narrowed the set to printable
+    /// ASCII, and NOT ONE test noticed because all used
+    /// Latin letters. A live run between two machines found it.
     #[test]
     fn a_note_in_any_script_is_accepted() {
         for good in [
@@ -699,11 +699,11 @@ mod tests {
         }
     }
 
-    /// ОДОБРЕНИЕ БЕЗ ДОЛИ И ОТКАЗ С ДОЛЕЙ — ОБА ОТВЕРГАЮТСЯ.
+    /// APPROVAL WITHOUT A SHARE AND DENIAL WITH A SHARE ARE BOTH REJECTED.
     ///
-    /// Первое — обещание без исполнения: получатель увидел бы «одобрено» и не
-    /// смог открыть файл. Второе опаснее: выдача, замаскированная под отказ, —
-    /// автор думает, что отказал, а доля ушла.
+    /// The first is a promise without delivery: the recipient would see "approved" but could not
+    /// open the file. The second is worse: issuance disguised as denial;
+    /// the author thinks access was denied, yet the share was sent.
     #[test]
     fn approval_without_a_share_and_refusal_with_one_are_both_refused() {
         let mut d = decision(true);
@@ -715,13 +715,13 @@ mod tests {
         assert!(decode_decision(&encode_decision(&d).unwrap()).is_err(), "отказ с долей");
     }
 
-    /// ПРИЗНАК ОДОБРЕНИЯ — РОВНО 0 ИЛИ 1, И НИЧЕГО МЕЖДУ.
+    /// THE APPROVAL FLAG IS EXACTLY 0 OR 1, NOTHING IN BETWEEN.
     ///
-    /// До 2026-09-20 он читался как «байт не ноль», и решение с байтом 5
-    /// разбиралось в одобрение, а кодировалось обратно единицей: две разные
-    /// последовательности байтов означали одно и то же (И-7). Проба ловит именно
-    /// возврат к такому чтению — `is_err()` здесь недостаточно, поэтому
-    /// проверяется и КОД отказа.
+    /// Before 2026-09-20 it was read as "nonzero byte": a decision with byte 5
+    /// parsed as approval and re-encoded as one, so two different
+    /// byte sequences meant the same thing (I-7). This test specifically catches
+    /// returning to that interpretation; `is_err()` is insufficient here, so
+    /// the rejection CODE is checked too.
     #[test]
     fn the_approval_flag_is_exactly_zero_or_one() {
         // Смещение байта одобрения ищется по заголовку поля: тег 8, длина 1.
@@ -765,10 +765,10 @@ mod tests {
         }
     }
 
-    /// ПОДПИСЬ ПОКРЫВАЕТ ДОЛЮ, А НЕ ТОЛЬКО СЛОВО «ОДОБРЕНО».
+    /// THE SIGNATURE COVERS THE SHARE, NOT ONLY THE WORD "APPROVED".
     ///
-    /// Иначе посредник подменил бы долю, оставив одобрение, и получатель открыл
-    /// бы не тот файл — или не открыл вовсе, виня автора.
+    /// Otherwise an intermediary could replace the share while keeping approval, and the recipient would open
+    /// the wrong file, or fail to open it and blame the author.
     #[test]
     fn the_signed_body_changes_when_the_share_changes() {
         let a = decision(true);

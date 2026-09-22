@@ -1,23 +1,23 @@
-//! ПРОГРАММНЫЙ подписант RSA-PSS-SHA256 — ТОЛЬКО для проб.
+//! SOFTWARE RSA-PSS-SHA256 signer: ONLY for probes.
 //!
-//! # Почему он вообще есть
+//! # Why it exists at all
 //!
-//! Продуктовый ключ правки живёт в TPM (`docs/format.md`, «ПРАВКА ИСПОЛНИМА»,
-//! п. G), и подписывает только TPM. Но проверку правки обязан проходить каждый
-//! прогон, включая Linux-контейнеры без TPM, а подпись PSS случайна — эталонный
-//! вектор с живого TPM (`tests/kat/rsa_pss.kat`) покрывает одно сообщение, а
-//! пробам нужны подписи над ЛЮБЫМИ областями. Отсюда подписант с ЗАШИТЫМИ
-//! тестовыми ключами и солью параметром: одна и та же соль даёт одну и ту же
-//! подпись, и вектор `tests/kat/edit.kat` воспроизводим.
+//! The production editing key resides in a TPM (`docs/format.md`, "EDITING IS EXECUTABLE",
+//! item G), and only the TPM signs. But every run must test editing verification,
+//! including Linux containers without TPMs, while PSS signatures are randomized: the live-TPM golden
+//! vector (`tests/kat/rsa_pss.kat`) covers one message, whereas
+//! probes need signatures over ARBITRARY regions. Hence a signer with HARDCODED
+//! test keys and a salt parameter: the same salt gives the same
+//! signature, making `tests/kat/edit.kat` reproducible.
 //!
-//! # Почему ему можно
+//! # Why it is permitted
 //!
-//! Модуль существует только под `cfg(test)` или признаком `test-signer`, и
-//! признак этот включают лишь `[dev-dependencies]` и стендовые сборки
-//! (сторож в `cc-cli/tests/repository_hygiene.rs`). Приватная операция здесь
-//! НЕ постоянного времени и ключи открыты в исходнике — ровно поэтому ни один
-//! продуктовый путь сюда не ведёт. Ключи сгенерированы для этого файла
-//! (2026-09-17, простые Миллера—Рабина, 40 раундов) и нигде больше не живут.
+//! This module exists only under `cfg(test)` or feature `test-signer`, enabled
+//! only by `[dev-dependencies]` and testbed builds
+//! (guarded in `cc-cli/tests/repository_hygiene.rs`). The private operation here
+//! is NOT constant-time, and keys are public in source, precisely why no
+//! production path reaches it. The keys were generated for this file
+//! (2026-09-17, Miller–Rabin primes, 40 rounds) and live nowhere else.
 
 use crate::CryptoError;
 use crate::rsa::MODULUS_LEN;
@@ -30,20 +30,20 @@ const HLEN: usize = 32;
 const DB_LEN: usize = 223;
 const PS_LEN: usize = 190;
 
-/// Тестовый ключ RSA-2048: модуль и приватный показатель. НЕ СЕКРЕТ.
+/// RSA-2048 test key: modulus and private exponent. NOT SECRET.
 #[derive(Debug, Clone, Copy)]
 pub struct TestRsaKey {
     n: [u8; MODULUS_LEN],
     d: [u8; MODULUS_LEN],
 }
 
-/// Ключ «своего» редактора в пробах.
+/// The "our editor" key in probes.
 pub const TEST_KEY_A: TestRsaKey = TestRsaKey {
     n: NA,
     d: DA,
 };
 
-/// Ключ «чужого» редактора в пробах.
+/// The "other editor" key in probes.
 pub const TEST_KEY_B: TestRsaKey = TestRsaKey {
     n: NB,
     d: DB,
@@ -161,16 +161,16 @@ fn mgf1(seed: &[u8], out: &mut [u8]) {
 }
 
 impl TestRsaKey {
-    /// Модуль — то, что кладётся в сертификат как `editor_key`.
+    /// Modulus: stored in the certificate as `editor_key`.
     #[must_use]
     pub const fn modulus(&self) -> [u8; MODULUS_LEN] {
         self.n
     }
 
-    /// Подпись EMSA-PSS (RFC 8017 §9.1.1) с данной солью.
+    /// EMSA-PSS signature (RFC 8017 §9.1.1) using the supplied salt.
     ///
     /// # Errors
-    /// [`CryptoError::BadLength`] — ключ не разбирается (не бывает у зашитых).
+    /// [`CryptoError::BadLength`]: unparseable key (impossible for the hardcoded keys).
     pub fn sign_pss_sha256(&self, message: &[u8], salt: &[u8; 32]) -> Result<[u8; MODULUS_LEN], CryptoError> {
         let m_hash = Sha256::digest(message);
         let mut prime = Sha256::new();

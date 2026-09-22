@@ -20,19 +20,7 @@ id_ed25519
 **/.aws/
 *.cc
 !/tests/golden/**/*.cc
-/.closecrate/
-authority-state*
 
-# Local tools and agent instructions
-**/.agents/
-**/.claude/
-**/.codex/
-**/.codegraph/
-**/.openai/
-**/AGENTS.md
-**/CLAUDE.md
-**/node_modules/
-**/__pycache__/
-*.pyc
+# Operating-system metadata
 .DS_Store
 Thumbs.db

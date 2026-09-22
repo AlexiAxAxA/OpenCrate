@@ -1,39 +1,39 @@
-//! Кодирование политики.
+//! Policy encoding.
 //!
-//! Правило, определяющее весь модуль: **читатель, встретив то, чего не знает,
-//! запрещает**. Действие с неизвестным тегом не игнорируется и не разрешается —
-//! оно попадает в [`Policy::unknown_actions`] и делает файл менее доступным, а не
-//! более. Благодаря этому любое действие, добавленное в будущей версии
-//! (`ai_ingest`, `ocr`, `forward`), будет запрещено и старыми клиентами тоже,
-//! без единой их правки.
+//! The rule governing this entire module: **a reader encountering something unknown
+//! denies**. An action with an unknown tag is neither ignored nor allowed:
+//! it enters [`Policy::unknown_actions`], making the file less accessible, not
+//! more. Thus any action added in a future version
+//! (`ai_ingest`, `ocr`, `forward`) is also denied by old clients,
+//! without changing them at all.
 //!
-//! Обратное поведение — «не знаю поля, значит его нет, значит можно» — это
-//! классический способ обойти политику, просто предъявив клиенту постарше.
+//! The opposite behavior, "unknown field means absent means allowed", is
+//! the classic way to bypass policy simply by presenting it to an older client.
 //!
-//! Из того же правила следует, что [`encode`] обязан выгружать неизвестные
-//! действия обратно на провод: иначе клиент, который их не понял, стирает их
-//! своей же перекодировкой, и следующий читатель получает политику, выглядящую
-//! полностью понятой. Тогда «предъявить клиенту постарше» превращается в
-//! «пропустить файл ЧЕРЕЗ клиента постарше» — тот же обход, только в два шага.
+//! The same rule requires [`encode`] to write unknown actions
+//! back onto the wire: otherwise a client that does not understand them erases them
+//! through its own re-encoding, and the next reader receives a policy appearing
+//! fully understood. Then "present to an older client" becomes
+//! "pass the file THROUGH an older client": the same bypass in two steps.
 //!
-//! То же правило распространяется на ОТСУТСТВИЕ поля, а не только на неизвестный
-//! тег (§4: «отсутствующее поле означает запрет»). Опасность здесь в том, что у
-//! ограничения «нулевое» значение обычно и означает «ограничения нет»: `false` у
-//! обязанности снимает обязанность, `None` у лимита снимает лимит. Поэтому
-//! отсутствующее поле НИКОГДА не читается как значение по умолчанию из
-//! `Default` — оно читается либо как отказ разбора, либо как самое строгое из
-//! осмысленных значений. Что именно выбрано для каждого поля и почему — в
-//! документации [`decode`].
+//! The rule also applies to an ABSENT field, not just an unknown
+//! tag (§4: "an absent field means denial"). The danger is that a
+//! restriction's "zero" value usually means "no restriction": `false` for
+//! an obligation removes it; `None` for a limit removes the limit. Therefore
+//! an absent field is NEVER read as the default value from
+//! `Default`: it either causes a parse failure or takes the strictest
+//! meaningful value. Each field's choice and rationale are in the
+//! documentation for [`decode`].
 
 use crate::tlv::{TlvReader, TlvWriter};
 use crate::FormatError;
 use oc_policy::{Action, Binding, Network, Policy, Rule, Timestamp, Validity};
 use std::collections::BTreeMap;
 
-/// Теги полей политики.
+/// Policy field tags.
 ///
-/// Значения входят в подписанные автором байты, поэтому менять их нельзя: ранее
-/// выпущенные файлы перестанут читаться.
+/// Values are part of the author-signed bytes and cannot be changed:
+/// previously issued files would become unreadable.
 pub mod tag {
     pub const ACTIONS: u16 = 1;
     pub const VALIDITY: u16 = 2;
@@ -41,18 +41,18 @@ pub mod tag {
     pub const MIN_BINDING: u16 = 4;
     pub const MAX_OPENS: u16 = 5;
     pub const WATERMARK: u16 = 6;
-    /// Требование привязки НА ДЕЙСТВИЕ. **Начиная с версии 4.**
+    /// Binding requirement PER ACTION. **Since version 4.**
     ///
-    /// Диапазон критичный намеренно, и это важнее, чем кажется: будь тег
-    /// необязательным, клиент версии 2 пропустил бы его молча — и разрешил бы
-    /// правку с программной ступени там, где автор потребовал аппаратную.
-    /// Необязательное поле политики, ужесточающее требование, есть противоречие
-    /// в терминах: пропустивший его клиент исполняет НЕ ту политику, которую
-    /// подписал автор.
+    /// Deliberately in the critical range, which matters more than it seems: if
+    /// the tag were optional, a version 2 client would silently skip it and allow
+    /// editing at the software level where the author required hardware.
+    /// An optional policy field that tightens a requirement is a contradiction
+    /// in terms: a client skipping it enforces a DIFFERENT policy than the one
+    /// the author signed.
     pub const ACTION_BINDING: u16 = 7;
 }
 
-/// Теги действий внутри поля `ACTIONS`.
+/// Action tags within the `ACTIONS` field.
 mod action_tag {
     pub const VIEW: u16 = 1;
     pub const EDIT: u16 = 2;
@@ -62,7 +62,7 @@ mod action_tag {
     pub const SCREENSHOT: u16 = 6;
 }
 
-/// Числовой вид разрешения. Всё, что не [`RULE_ALLOW`], — запрет.
+/// Numeric permission representation. Anything other than [`RULE_ALLOW`] means denial.
 const RULE_ALLOW: u8 = 1;
 const RULE_DENY: u8 = 0;
 
@@ -73,11 +73,11 @@ const VALIDITY_FROM_FIRST_OPEN: u8 = 3;
 const NETWORK_STRICT_ONLINE: u8 = 1;
 const NETWORK_LEASE: u8 = 2;
 
-/// Сколько открытий разрешено, если поля [`tag::MAX_OPENS`] в политике нет вовсе.
+/// Number of opens allowed when policy field [`tag::MAX_OPENS`] is entirely absent.
 ///
-/// Не `None` («без лимита») и не `0` («не открывать никогда»), а ровно одно
-/// открытие — самое узкое разрешение, при котором файл всё-таки остаётся
-/// открываемым. Обоснование в документации [`decode`].
+/// Neither `None` ("unlimited") nor `0` ("never open"), but exactly one
+/// open: the narrowest permission that still leaves the file
+/// openable. Rationale is in the documentation for [`decode`].
 const OPENS_WHEN_THE_FIELD_IS_ABSENT: u32 = 1;
 
 const BINDING_SOFTWARE: u8 = 1;
@@ -107,15 +107,15 @@ fn tag_to_action(tag: u16) -> Option<Action> {
     }
 }
 
-/// Первая версия формата, знающая требование привязки на действие.
+/// First format version supporting per-action binding requirements.
 pub const FIRST_ACTION_BINDING_VERSION: u16 = 4;
 
-/// Закодировать политику ДЛЯ НАЗВАННОЙ ВЕРСИИ контейнера.
+/// Encode a policy FOR THE SPECIFIED container VERSION.
 ///
-/// Версия параметром, а не константой, по той же причине, по какой длины слота —
-/// функция пары: тег 7 критичен, и записав его в контейнер версии 3, писатель
-/// сделал бы файл нечитаемым для добросовестного читателя той же версии. Версия
-/// решает, что вообще существует, а не только что мы умеем.
+/// Version is a parameter, not a constant, for the same reason slot lengths depend
+/// on a pair: tag 7 is critical, and writing it into a version 3 container would
+/// make the file unreadable to a conforming reader of that version. Version
+/// determines what exists at all, not merely what we support.
 pub fn encode(version: u16, policy: &Policy) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
 
@@ -220,10 +220,10 @@ pub fn encode(version: u16, policy: &Policy) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Шесть действий, известных этой сборке, в порядке возрастания тега.
+/// The six actions known to this build, in increasing tag order.
 ///
-/// Общий список для обоих мест, где «все действия» выписываются подряд: разойдись
-/// они — и одно поле политики описывало бы другой набор действий, чем соседнее.
+/// Shared list for both places that enumerate "all actions": if they diverged,
+/// one policy field would describe a different action set than its neighbor.
 const ALL_ACTIONS: [Action; 6] = [
     Action::View,
     Action::Edit,
@@ -271,56 +271,56 @@ fn encode_binding(binding: Binding) -> u8 {
     }
 }
 
-/// Разобрать политику.
+/// Parse a policy.
 ///
-/// Тотальна. Отсутствующее поле НИКОГДА не читается как значение по умолчанию:
-/// молчаливая подстановка превратила бы повреждённый или урезанный файл в файл с
-/// другими правилами, причём в сторону послаблений, — а по §4 отсутствие обязано
-/// работать в сторону запрета.
+/// Total. An absent field is NEVER read as a default value:
+/// silent substitution would turn a damaged or truncated file into one with
+/// different and weaker rules, while §4 requires absence
+/// to move toward denial.
 ///
-/// Что означает отсутствие каждого поля — разобрано по одному, потому что общего
-/// ответа тут нет, а «очевидный» ответ у половины полей неверный.
+/// Each field's absence is analyzed separately: there is no universal
+/// answer, and the "obvious" answer is wrong for half the fields.
 ///
-/// Поля-**правила**. Их четыре, они были в формате с первого дня, и файл без
-/// любого из них — не строгий файл, а файл, правила которого до нас не доехали.
-/// Открыть такой как валидный значит скрыть от пользователя порчу или подмену,
-/// поэтому отсутствие любого из них — [`FormatError::MissingField`]:
+/// **Rule** fields. Four fields present since the format's first day; a file missing
+/// any is not a strict file but one whose rules did not reach us.
+/// Opening it as valid would hide corruption or tampering from the user,
+/// so absence of any produces [`FormatError::MissingField`]:
 ///
-/// * `ACTIONS` — иначе набор действий был бы пуст, и файл «открылся», не дав
-///   ничего сделать: пользователь увидел бы неисправность вместо честного
-///   отказа. (Отсутствие ОТДЕЛЬНОГО действия ВНУТРИ поля — другое дело: это
-///   запрет, основа — `Policy::deny_all`.)
-/// * `VALIDITY` — «нет срока» превратилось бы в «навсегда», слабейшее значение.
-/// * `NETWORK` — «нет требования сети» превратилось бы в «оффлайн всегда можно».
-/// * `MIN_BINDING` — пустое место превратилось бы в `Software`, слабейшую привязку.
+/// * `ACTIONS`: otherwise the action set would be empty, and the file would "open" without
+///   allowing anything: the user would see a malfunction rather than an honest
+///   rejection. (An INDIVIDUAL action missing INSIDE the field is different:
+///   that means denial, based on `Policy::deny_all`.)
+/// * `VALIDITY`: "no validity period" would become "forever", the weakest value.
+/// * `NETWORK`: "no network requirement" would become "offline always permitted".
+/// * `MIN_BINDING`: an absence would become `Software`, the weakest binding.
 ///
-/// Поля-**модификаторы** поверх уже прочитанных правил. Их отсутствие не мешает
-/// понять, что автор разрешил, поэтому отказывать в открытии — цена без пользы:
-/// это сломало бы каждый файл, записанный версией, в которой поля ещё не было,
-/// ради защиты, которой достигает и строгое чтение. Здесь отсутствие означает
-/// самое строгое ОСМЫСЛЕННОЕ значение:
+/// **Modifier** fields applied over rules already read. Their absence does not prevent
+/// understanding what the author allowed, so rejecting opening has a cost without benefit:
+/// it would break every file written by a version predating the field,
+/// for protection also achieved by strict interpretation. Here absence means
+/// the strictest MEANINGFUL value:
 ///
-/// * `WATERMARK` — знак требуется. Это и была находка: `false` по умолчанию молча
-///   снимал обязанность, наложенную автором, — достаточно было срезать поле.
-///   Обратная ошибка невозможна: лишний водяной знак файл не ломает.
-/// * `MAX_OPENS` — `OPENS_WHEN_THE_FIELD_IS_ABSENT`, то есть одно открытие.
-///   Тут стоит остановиться, потому что рассуждение неочевидное. «Автор не
-///   ставил лимита» — законное состояние политики, и выдумывать за автора число
-///   читатель не вправе; в этом смысле отсутствие лимита действительно не
-///   послабление. Но именно поэтому «лимита нет» обязано быть НАПИСАНО:
-///   [`encode`] всегда пишет поле, а `None` кодирует пустым значением. Тогда
-///   остаются ровно два случая. Поле есть и пусто — воля автора, читаем `None`.
-///   Поля нет вовсе — значит его срезали, потеряли или его не умела писать
-///   чужая реализация; о воле автора мы не знаем НИЧЕГО, и прочитать это
-///   незнание как «открывай сколько хочешь» значит выдать самое слабое из
-///   возможных значений за подписанное автором. Ноль («не открывать никогда»)
-///   не годится: он превращает срезанное поле в неоткрываемый файл, то есть
-///   даёт противнику дешёвый отказ в обслуживании. Единица — граница между
-///   этими двумя ошибками: получатель откроет файл, но однократно, и разница с
-///   намерением автора станет видна сразу, а не молча.
+/// * `WATERMARK`: a watermark is required. This was the finding: default `false` silently
+///   removed an author-imposed obligation merely by cutting the field out.
+///   The reverse mistake is impossible: an extra watermark does not break the file.
+/// * `MAX_OPENS`: `OPENS_WHEN_THE_FIELD_IS_ABSENT`, meaning one open.
+///   This deserves explanation because the reasoning is not obvious. "The author set
+///   no limit" is a legitimate policy state; the reader may not invent a number
+///   for the author. In that sense, no limit is indeed not
+///   a relaxation. But precisely for that reason, "no limit" must be WRITTEN:
+///   [`encode`] always writes the field, encoding `None` as an empty value. That
+///   leaves exactly two cases. Field present and empty: the author's intent; read `None`.
+///   Field entirely absent: it was cut out, lost, or a third-party implementation
+///   did not know how to write it. We know NOTHING of the author's intent, and reading
+///   that ignorance as "open as often as you want" presents the weakest
+///   possible value as author-signed. Zero ("never open")
+///   is unsuitable: it turns a removed field into an unopenable file,
+///   giving the attacker a cheap denial of service. One is the boundary between
+///   these errors: the recipient can open the file once, and the difference from
+///   the author's intent becomes immediately visible rather than silent.
 ///
-/// Проверка того, что ни одна комбинация отсутствующих полей не ослабляет
-/// политику, — тест `no_absent_field_ever_makes_the_policy_weaker`.
+/// The test `no_absent_field_ever_makes_the_policy_weaker` verifies that
+/// no combination of missing fields weakens the policy.
 pub fn decode(version: u16, bytes: &[u8]) -> Result<Policy, FormatError> {
     let mut reader = TlvReader::new(bytes);
     let mut policy = Policy::deny_all();
@@ -407,14 +407,14 @@ pub fn decode(version: u16, bytes: &[u8]) -> Result<Policy, FormatError> {
     Ok(policy)
 }
 
-/// Разобрать требования привязки на действие.
+/// Parse per-action binding requirements.
 ///
-/// Неизвестное действие здесь НЕ откладывается в `unknown_actions`: туда его уже
-/// положил разбор самого поля `actions`, а требование к действию, которого
-/// клиент не знает, ничего к запрету не добавляет — запрет уже полный.
-/// Незнакомая же СТУПЕНЬ отвергает файл: значение из будущей версии означает
-/// требование строже известных нам, и прочитать его как «сойдёт программная»
-/// значило бы исполнить не ту политику, которую подписал автор.
+/// An unknown action here is NOT added to `unknown_actions`: parsing
+/// the `actions` field already added it, and a requirement on an action
+/// the client does not know adds nothing to denial: denial is already complete.
+/// An unknown LEVEL, however, rejects the file: a future version's value means
+/// a requirement stricter than those we know, and reading it as "software will do"
+/// would enforce a different policy than the author signed.
 fn decode_action_binding(bytes: &[u8], policy: &mut Policy) -> Result<(), FormatError> {
     let mut reader = TlvReader::new(bytes);
     while let Some(field) = reader.next_field()? {
@@ -488,15 +488,15 @@ fn decode_network(tag: u16, bytes: &[u8]) -> Result<Network, FormatError> {
     }
 }
 
-/// Разобрать лимит открытий: пустое значение — «автор лимита не ставил»,
-/// четыре байта — лимит.
+/// Parse the open limit: an empty value means "the author set no limit";
+/// four bytes encode a limit.
 ///
-/// Пустое значение — единственный способ сказать «без лимита», и сказать его
-/// может только автор, потому что оно попадает под подпись. Длина проверяется
-/// точно, а не подгоняется: значение из трёх байтов не дополняется нулём до
-/// `u32` — иначе противник, срезав байт, управлял бы величиной лимита. Любая
-/// другая длина — ошибка, а НЕ «считаем, что лимита нет»: именно такое
-/// великодушие и есть послабление через порчу файла.
+/// An empty value is the only way to say "unlimited", and only the author can
+/// say it because it is signed. Length is checked
+/// exactly, never adjusted: a three-byte value is not zero-padded into a
+/// `u32`, or an attacker could control the limit by cutting off a byte. Any
+/// other length is an error, NOT "assume no limit": precisely such
+/// generosity weakens policy through file corruption.
 fn decode_max_opens(tag: u16, bytes: &[u8]) -> Result<Option<u32>, FormatError> {
     match bytes {
         [] => Ok(None),
@@ -545,7 +545,7 @@ fn two_i64(tag: u16, bytes: &[u8]) -> Result<(i64, i64), FormatError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
-    /// ТРЕБОВАНИЕ НА ДЕЙСТВИЕ ПЕРЕЖИВАЕТ КРУГ КОДИРОВАНИЯ — В ВЕРСИИ 4.
+    /// THE PER-ACTION REQUIREMENT SURVIVES AN ENCODING ROUND TRIP IN VERSION 4.
     #[test]
     fn a_per_action_binding_survives_the_round_trip_in_version_four() {
         let mut policy = Policy::deny_all();
@@ -565,11 +565,11 @@ mod tests {
         assert_eq!(encode(4, &back).unwrap(), bytes);
     }
 
-    /// В ВЕРСИЯХ 1–3 ТЕГ 7 НЕ СУЩЕСТВУЕТ, И ЕГО ПОЯВЛЕНИЕ ОТВЕРГАЕТ ПОЛИТИКУ.
+    /// TAG 7 DOES NOT EXIST IN VERSIONS 1–3; ITS PRESENCE REJECTS THE POLICY.
     ///
-    /// Принять его там значило бы задним числом дать этим версиям семантику,
-    /// которой у них не было, — тот же довод, по которому длина слота есть
-    /// функция ПАРЫ (версия, механизм).
+    /// Accepting it there would retroactively assign those versions semantics
+    /// they never had: the same reasoning that makes slot length a
+    /// function of the PAIR (version, mechanism).
     #[test]
     fn version_three_does_not_know_the_tag_and_refuses_it() {
         let mut policy = Policy::deny_all();
@@ -584,11 +584,11 @@ mod tests {
         assert!(decode(3, &three).is_ok(), "писатель версии 3 записал тег из будущего");
     }
 
-    /// В ВЕРСИИ 4 ПОЛЕ ОБЯЗАТЕЛЬНО: СРЕЗАННОЕ — ЭТО ПОСЛАБЛЕНИЕ.
+    /// IN VERSION 4 THE FIELD IS REQUIRED: REMOVING IT RELAXES POLICY.
     ///
-    /// Единственная сторона, в которую потеря этого поля даёт послабление, —
-    /// его отсутствие: нет записи, нет и поднятой ступени. Поэтому отсутствие
-    /// обязано быть отказом, а не догадкой о намерении автора.
+    /// Losing this field permits relaxation in precisely one way:
+    /// its absence means no record and no raised level. Absence must therefore
+    /// mean rejection, not a guess about author intent.
     #[test]
     fn in_version_four_a_missing_field_is_a_refusal_rather_than_a_guess() {
         let policy = Policy::deny_all();
@@ -599,27 +599,27 @@ mod tests {
         );
     }
 
-    /// Версия, под которой собираются политики в пробах ниже.
+    /// Version used to assemble policies in the probes below.
     ///
-    /// Единица, а не текущая: пробы строят TLV политики руками и тега 7 не
-    /// пишут, а с версии 4 он обязателен. Смысл проб при этом не меняется — они
-    /// проверяют разбор полей 1–6, общих для всех версий.
+    /// One, not the current version: the probes construct policy TLV manually without
+    /// tag 7, which is required since version 4. The probes retain their meaning:
+    /// they test parsing fields 1–6, shared by all versions.
     const POLICY_TEST_VERSION: u16 = 1;
 
     use super::*;
 
-    /// Каждый номер на проводе зафиксирован ЯВНО, а не через собственные константы.
+    /// Every wire number is fixed EXPLICITLY, not through our own constants.
     ///
-    /// Смысл теста в том, что он повторяет числа из §4 руками. Сверка
-    /// `BINDING_SOFTWARE == BINDING_SOFTWARE` доказывала бы только внутреннюю
-    /// согласованность кода — а разошлись как раз код и **документ**: §4 называл
-    /// `0 Software, 1 Hardware, 2 HardwareAttested`, код писал `1/2/3`. Обе стороны
-    /// сдвига вредны: файл по документу отвергался как повреждённый, а `1 = Hardware`
-    /// по документу читалось бы как `Software` — молчаливое ослабление того поля,
-    /// про которое §4 настаивает, что ослабление невозможно.
+    /// The test's point is to repeat the numbers from §4 by hand. Checking
+    /// `BINDING_SOFTWARE == BINDING_SOFTWARE` would prove only internal
+    /// code consistency, while the actual disagreement was between code and the **document**: §4 said
+    /// `0 Software, 1 Hardware, 2 HardwareAttested`; code wrote `1/2/3`. Both sides
+    /// of the shift are harmful: a conforming file was rejected as damaged, while `1 = Hardware`
+    /// according to the document would be read as `Software`, silently weakening the very field
+    /// §4 insists cannot be weakened.
     ///
-    /// Ноль у привязки не занят намеренно: обнулённое или срезанное поле обязано
-    /// отвергаться, а не читаться как самая слабая привязка.
+    /// Zero is deliberately unassigned for binding: a zeroed or truncated field must
+    /// be rejected rather than read as the weakest binding.
     #[test]
     fn every_wire_number_matches_the_specification_literally() {
         assert_eq!(RULE_ALLOW, 1);
@@ -709,9 +709,9 @@ mod tests {
         }
     }
 
-    /// Тело политики со всеми шестью полями: перечисленные действия разрешены,
-    /// остальное — самое мягкое из допустимого, чтобы тест проверял ровно то,
-    /// что заявлено, а не спотыкался о недостающее поле.
+    /// Policy body with all six fields: the listed actions are allowed;
+    /// everything else is as permissive as possible, so the test checks exactly
+    /// its stated property instead of failing on a missing field.
     fn policy_bytes_with_actions(actions: &[u8]) -> Vec<u8> {
         let mut w = TlvWriter::new();
         w.put(tag::ACTIONS, actions).unwrap();
@@ -742,7 +742,7 @@ mod tests {
         }
     }
 
-    /// Теги действий и их байты разрешения из закодированной политики, по порядку.
+    /// Action tags and permission bytes from an encoded policy, in order.
     fn encoded_action_fields(policy: &Policy) -> Vec<(u16, Vec<u8>)> {
         let bytes = encode(POLICY_TEST_VERSION, policy).unwrap();
         let mut reader = TlvReader::new(&bytes);

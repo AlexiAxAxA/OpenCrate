@@ -13,26 +13,26 @@
     clippy::disallowed_types
 )]
 
-//! Замороженные векторы двери ДЕЙСТВИЙ: тела, транскрипты и подписи.
+//! Frozen ACTION door vectors: bodies, transcripts and signatures.
 //!
-//! Отдельным файлом, а не модулем: здесь нужны настоящие подписывающие ключи, то
-//! есть `oc-crypto` целиком, — и здесь же читается файл вектора.
+//! A separate file rather than a module: these tests need real signing keys,
+//! meaning the complete `oc-crypto`, and read the vector file here too.
 //!
-//! # Что заморожено и почему ИМЕННО подпись, а не только тело
+//! # What is frozen, and why the SIGNATURE rather than only the body
 //!
-//! Тот же довод, что у `agent_grant.kat`: тело само по себе ничего не значит.
-//! Грант действий — утверждение АВТОРА, лиза — утверждение СЕРВЕРА, и без
-//! подписи оба лист бумаги. Заморозив только байты, мы оставили бы на свободе
-//! транскрипт, то есть то, ЧТО подписано; расхождение там молчаливо — подпись
-//! просто не сойдётся, и выглядеть это будет как «сервер сломался».
+//! The same rationale as `agent_grant.kat`: the body means nothing by itself.
+//! An action grant is an AUTHOR assertion, a lease a SERVER assertion; without
+//! signatures both are mere sheets of paper. Freezing only bytes would leave the
+//! transcript, WHAT is signed, unfrozen. Divergence there is silent: the signature
+//! simply fails to verify, making it look as though "the server broke".
 //!
-//! # Зачем вектор на ЛИЗУ отдельно от гранта
+//! # Why a separate LEASE vector in addition to the grant
 //!
-//! Потому что ключ подписи у сервера один и тот же на лизинг файла и на лизу
-//! действия, и домены разводит ТОЛЬКО метка. Вектор лизы и есть проверка того,
-//! что метка на месте: подпись, снятая в домене гранта, замороженной не совпадёт.
+//! The server uses the same signing key for file leases and action
+//! leases; ONLY the label separates the domains. The lease vector checks
+//! that the label is present: a signature made in the grant domain will not match the frozen one.
 //!
-//! Версии контейнера векторы не касаются: ни один их байт в `.cc` не лежит.
+//! These vectors do not affect the container version: none of their bytes reside in `.cc`.
 
 use oc_crypto::sign::{Ed25519Signer, Signer as _};
 use oc_protocol::action::{
@@ -41,17 +41,17 @@ use oc_protocol::action::{
     lease_body, lease_transcript,
 };
 
-/// Ключ автора: тот, которым подписан заголовок контейнера.
+/// Author key: the one that signed the container header.
 fn author() -> Ed25519Signer {
     Ed25519Signer::from_seed(&[0xa1; 32])
 }
 
-/// Ключ подписи лиз сервера — `authority.lease_verify_key` из заголовка.
+/// Server lease-signing key: `authority.lease_verify_key` from the header.
 fn server() -> Ed25519Signer {
     Ed25519Signer::from_seed(&[0x5e; 32])
 }
 
-/// Отпечаток двери. У X25519 отпечаток И ЕСТЬ согласовательный ключ (K27).
+/// Door fingerprint. For X25519, the fingerprint IS the key-agreement public key (K27).
 const DOOR_FPR: [u8; 32] = [0xd1; 32];
 
 fn grant() -> ActionGrant {
@@ -111,7 +111,7 @@ fn lease() -> ActionLease {
     l
 }
 
-/// Грант действий сходится с замороженным вектором — ключ, тело и подпись.
+/// The action grant matches the frozen vector: key, body and signature.
 #[test]
 fn the_action_grant_matches_its_frozen_vector() {
     let v = load_kat("action_grant.kat");
@@ -135,7 +135,7 @@ fn the_action_grant_matches_its_frozen_vector() {
     assert_eq!(back, g);
 }
 
-/// Лиза действия сходится с замороженным вектором.
+/// The action lease matches the frozen vector.
 #[test]
 fn the_action_lease_matches_its_frozen_vector() {
     let v = load_kat("action_lease.kat");
@@ -155,12 +155,12 @@ fn the_action_lease_matches_its_frozen_vector() {
     assert_eq!(back, l);
 }
 
-/// ЗАМОРОЖЕННЫЕ БАЙТЫ ПРОХОДЯТ ВОРОТА `args_within` — и тем задают их смысл.
+/// THE FROZEN BYTES PASS THE `args_within` GATE, DEFINING ITS MEANING.
 ///
-/// Не пересказ модульных проб: здесь правило и аргументы берутся из ТЕХ ЖЕ
-/// байтов, которые лежат в векторах, то есть проверяется ровно то, что вторая
-/// реализация увидит на проводе. Без этой пробы векторы замораживали бы форму
-/// документов и ничего не говорили бы о том, что по ним разрешено.
+/// Not a retelling of unit tests: rules and arguments come from the SAME
+/// bytes stored in the vectors, testing exactly what a second
+/// implementation will see on the wire. Without this test, vectors would freeze document
+/// shape without saying anything about what those documents permit.
 #[test]
 fn the_frozen_lease_is_within_the_frozen_grant() {
     let grant_v = load_kat("action_grant.kat");
@@ -208,10 +208,10 @@ fn load_kat(name: &str) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
-/// Выпустить векторы. Инструмент, не проверка.
+/// Generate vectors. A tool, not a test.
 ///
-/// Существует потому, что руками поправят ровно те строки, которые упали, и
-/// молча оставят рассогласованными остальные.
+/// Exists because manual edits would fix only the failing lines and
+/// silently leave the rest inconsistent.
 #[test]
 #[ignore = "инструмент перевыпуска векторов, а не проверка"]
 fn print_action_vectors() {

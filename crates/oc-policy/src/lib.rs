@@ -4,34 +4,34 @@
 // та же, что в `oc-format`.
 #![deny(clippy::arithmetic_side_effects)]
 
-//! Ядро безопасности: решение о том, можно ли выполнить действие над файлом.
+//! Security core: deciding whether an action on a file is permitted.
 //!
-//! Крейт чистый и тотальный. Всё, от чего зависит решение, — время, состояние
-//! лизинга, факты об устройстве — передаётся в [`Context`], а не берётся из
-//! окружения. Благодаря этому тест на путешествие во времени и тест на отзыв
-//! становятся просто данными, а не сценарием с подменой системных часов.
+//! The crate is pure and total. Everything the decision depends on: time, lease
+//! state, and device facts, is supplied in [`Context`], not taken from the
+//! environment. Time-travel and revocation tests thus become
+//! mere data rather than scenarios that manipulate system clocks.
 //!
-//! Главный инвариант, который проверяется тестами и не должен нарушаться ни при
-//! каком расширении: **отсутствующее или неизвестное правило означает запрет**.
+//! The central invariant, tested and required to hold under every
+//! extension: **an absent or unknown rule means denial**.
 
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Сравнить два 32-байтовых дайджеста за постоянное время.
+/// Compare two 32-byte digests in constant time.
 ///
-/// Копия `oc_crypto::digest_eq`, а не вызов её: у этого крейта **нет и не должно
-/// быть зависимостей вообще** — ни `subtle`, ни `oc-crypto`. Отсутствие
-/// зависимостей здесь не гигиена, а условие проверяемости: чистое ядро решения
-/// о доступе — единственная часть системы, которую можно исчерпывающе проверить
-/// model checker'ом, и любая внешняя крейт-зависимость эту возможность рушит.
+/// A copy of `oc_crypto::digest_eq`, not a call to it: this crate **has and must have
+/// no dependencies at all**, neither `subtle` nor `oc-crypto`. Having no
+/// dependencies is a condition of verifiability, not hygiene: the pure access
+/// decision core is the only part of the system amenable to exhaustive
+/// model checking, and any external crate dependency destroys that possibility.
 ///
-/// Реализация не полагается на оптимизатор в том, чего он не обещает: аккумулятор
-/// объявлен `volatile`-подобным приёмом через `core::hint::black_box`, чтобы
-/// компилятор не свернул цикл в ранний выход по первому различию.
+/// The implementation does not rely on optimizer promises that do not exist: the accumulator
+/// uses a `volatile`-like technique through `core::hint::black_box` so the
+/// compiler does not transform the loop into an early exit on the first difference.
 ///
-/// Отпечаток устройства и хеш политики публичны, но сравнение секретов, тегов и
-/// обязательств во всём репозитории делается одним способом — чтобы не
-/// приходилось доказывать безопасность раннего выхода отдельно в каждом месте.
+/// Device fingerprints and policy hashes are public, but secrets, tags, and
+/// commitments are compared uniformly throughout the repository, avoiding
+/// a separate proof of early-exit safety at every site.
 #[must_use]
 pub fn digest_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     let mut diff = 0u8;
@@ -41,25 +41,25 @@ pub fn digest_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     core::hint::black_box(diff) == 0
 }
 
-/// Момент времени в секундах эпохи Unix.
+/// A moment in Unix epoch seconds.
 ///
-/// Собственный тип, а не `SystemTime`, потому что часы устройства контролирует
-/// противник: время обязано приходить снаружи вместе с указанием источника.
+/// A custom type rather than `SystemTime`, because the attacker controls the device
+/// clock: time must come from outside with its source identified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Timestamp(pub i64);
 
-/// Откуда взято время в [`Context::now`].
+/// Source of the time in [`Context::now`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeSource {
-    /// Системные часы. Пользователь может отвести их назад.
+    /// System clock. The user can move it backward.
     Wall,
-    /// Часы самого TPM: монотонны и двигаются только вперёд.
+    /// The TPM's own clock: monotonic and forward-only.
     TpmClock { reset_count: u32 },
-    /// Время, утверждённое сервером в момент выдачи лизинга.
+    /// Time asserted by the server when issuing the lease.
     ServerAsserted,
 }
 
-/// Действие над защищённым файлом.
+/// Action on a protected file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Action {
     View,
@@ -70,17 +70,17 @@ pub enum Action {
     Screenshot,
 }
 
-/// Название действия по-русски.
+/// Russian name of the action.
 ///
-/// Заведено потому, что отказ печатается ЧЕЛОВЕКУ. Прежде причина брала
-/// отладочное имя варианта (`{a:?}`), и в русской фразе выходило «действие
-/// Export не разрешено автором» — половина предложения на чужом языке.
+/// Introduced because denial is displayed to a HUMAN. Previously the reason used
+/// the variant's debug name (`{a:?}`), producing a Russian sentence equivalent to
+/// "action Export is not allowed by the author", half in a foreign language.
 ///
-/// Держится здесь, а не у вызывающего: подставлять слово самому пришлось бы
-/// каждому, кто печатает отказ, и первый же забывший вернул бы `Export`. Ровно
-/// так и было — обёртка в `cc-cli` подставляла «экспорт» вручную, и стоило
-/// отказу пойти общим путём, как английское имя всплыло. Поймал это тест
-/// сценария, проверявший, что отказ называет операцию своим именем.
+/// Kept here rather than in callers: everyone printing a denial would have to
+/// substitute the word themselves, and the first omission would restore `Export`. Precisely
+/// this happened: a `cc-cli` wrapper manually substituted the Russian word for export,
+/// but the English name reappeared when denial used the common path. A scenario test
+/// caught it by requiring the denial to name the operation correctly.
 impl core::fmt::Display for Action {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
@@ -94,11 +94,11 @@ impl core::fmt::Display for Action {
     }
 }
 
-/// Разрешение на действие.
+/// Permission for an action.
 ///
-/// `Default` — [`Rule::Deny`], и это несущее решение: любое поле, которого нет в
-/// файле, любое действие, которого не знает клиент, и любая ошибка разбора
-/// сходятся к запрету.
+/// `Default` is [`Rule::Deny`], a foundational decision: any field absent from the
+/// file, any action unknown to the client, and every parse error
+/// converge on denial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Rule {
     Allow,
@@ -106,25 +106,25 @@ pub enum Rule {
     Deny,
 }
 
-/// Основание, на котором сервер признал аттестацию ключа устройства (B6b).
+/// Basis on which the server accepted device key attestation (B6b).
 ///
-/// Называется раздельно, потому что утверждает разное: сертификат вендора —
-/// «этот TPM выпущен производителем, которому доверяет развёртывание»,
-/// закреплённый EK — «это тот TPM, что был перед администратором».
+/// Distinguished because the claims differ: a vendor certificate means
+/// "this TPM was made by a manufacturer the deployment trusts";
+/// a pinned EK means "this is the TPM the administrator had in front of them".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attestation {
     VendorCertificate,
     EnrolledEk,
 }
 
-/// Ступень привязки, которой верит решатель.
+/// Binding level trusted by the evaluator.
 ///
-/// Устройство сообщает ступень по СВОИМ наблюдениям, и наблюдения эти не
-/// поднимаются выше [`Binding::Hardware`]: аттестация, которую клиент проверил
-/// сам, не доказывает ничего никому. Выше поднимает только признак аттестации в
-/// лизинге — подписанный сервером, который цепочку проследил. Программная
-/// привязка аттестацией не поднимается: аттестуется ключ в TPM, а не тот, что
-/// лежит в профиле.
+/// A device reports its level from ITS OWN observations, which cannot
+/// exceed [`Binding::Hardware`]: attestation checked by the client itself
+/// proves nothing to anyone. Only the lease's attestation flag can raise it:
+/// signed by the server that verified the chain. Attestation cannot raise software
+/// binding: it attests a key inside the TPM, not one
+/// stored in a profile.
 #[must_use]
 pub fn effective_binding(local: Binding, lease: Option<&LeaseFacts>) -> Binding {
     let attested = lease.is_some_and(|l| l.attested.is_some());
@@ -135,19 +135,19 @@ pub fn effective_binding(local: Binding, lease: Option<&LeaseFacts>) -> Binding 
     }
 }
 
-/// Прочность привязки к устройству. Порядок значим: `Software < Hardware < HardwareAttested`.
+/// Strength of device binding. Order matters: `Software < Hardware < HardwareAttested`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Binding {
-    /// DPAPI. Противник, скопировавший профиль вместе с мастер-ключами и знающий
-    /// пароль, развернёт секрет на другой машине.
+    /// DPAPI. An attacker who copies the profile with master keys and knows the
+    /// password can unwrap the secret on another machine.
     Software,
-    /// Неизвлекаемый ключ в TPM.
+    /// Nonexportable key in a TPM.
     Hardware,
-    /// То же плюс подтверждённая цепочка к сертификату вендора TPM.
+    /// The same, plus a verified chain to the TPM vendor certificate.
     HardwareAttested,
 }
 
-/// Срок действия доступа.
+/// Access validity period.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Validity {
     Always,
@@ -155,49 +155,49 @@ pub enum Validity {
     FromFirstOpen { seconds: i64 },
 }
 
-/// Требование к сети.
+/// Network requirement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Network {
-    /// Каждое открытие требует обращения к серверу.
+    /// Every open requires contacting the server.
     StrictOnline,
-    /// Оффлайн разрешён, пока действует лизинг. Его длительность и есть окно,
-    /// в течение которого отзыв ещё не подействовал.
+    /// Offline use is allowed while the lease is valid. Its duration is the window
+    /// during which revocation has not yet taken effect.
     Lease { seconds: i64, max_offline_seconds: i64 },
 }
 
-/// Политика, подписанная автором.
+/// Author-signed policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
-    /// Отсутствующее действие означает запрет, поэтому карта хранит только разрешения.
+    /// An absent action means denial, so the map stores only permissions.
     pub actions: BTreeMap<Action, Rule>,
     pub validity: Validity,
     pub max_opens: Option<u32>,
     pub network: Network,
     pub min_binding: Binding,
-    /// Требование привязки НА ДЕЙСТВИЕ — тег 7 политики, версия 4 формата.
+    /// Binding requirement PER ACTION: policy tag 7, format version 4.
     ///
-    /// Смотреть с программной ступени можно, править — нельзя: подпись правки не
-    /// может быть прочнее ступени, на которой стоит машина. Отсюда и поле:
-    /// одного `min_binding` на всю политику для этого не хватает.
+    /// Viewing may use software binding, editing may not: an edit signature
+    /// cannot be stronger than the machine's binding level. Hence this field:
+    /// a policy-wide `min_binding` alone is insufficient.
     ///
-    /// Действующее требование действия — `max(min_binding, запись здесь)`, то
-    /// есть поле умеет только УЖЕСТОЧАТЬ. Это не удобство, а условие
-    /// монотонности И-10: послабление на действие превратило бы `intersect` в
-    /// функцию, способную сделать из `Deny` — `Allow`.
+    /// The effective requirement for an action is `max(min_binding, the entry here)`,
+    /// so this field can only TIGHTEN it. This is a condition of
+    /// I-10 monotonicity, not a convenience: per-action relaxation would turn `intersect` into
+    /// a function capable of changing `Deny` into `Allow`.
     ///
-    /// Отсутствующая запись означает «своего требования нет», а не «разрешено
-    /// слабее»: запрет по умолчанию сохраняется через `min_binding`.
+    /// An absent entry means "no separate requirement", not "weaker binding
+    /// allowed": default denial remains enforced through `min_binding`.
     pub action_binding: BTreeMap<Action, Binding>,
     pub watermark: bool,
-    /// Теги действий, которых эта версия клиента не знает. Их наличие само по
-    /// себе ничего не разрешает, но фиксируется, чтобы старый клиент не считал,
-    /// будто увидел политику целиком.
+    /// Action tags unknown to this client version. Their presence by itself
+    /// grants nothing, but is recorded so an old client does not assume
+    /// it has seen the entire policy.
     pub unknown_actions: BTreeSet<u16>,
 }
 
 impl Policy {
-    /// Политика, не разрешающая ничего. Основа для построения любой другой:
-    /// разрешения добавляются явно.
+    /// A policy allowing nothing. The foundation for any other policy:
+    /// permissions are added explicitly.
     pub fn deny_all() -> Self {
         Self {
             actions: BTreeMap::new(),
@@ -211,24 +211,24 @@ impl Policy {
         }
     }
 
-    /// Ступень привязки, которой действие требует НА САМОМ ДЕЛЕ.
+    /// The binding level the action ACTUALLY requires.
     ///
-    /// Отдельным методом, а не выражением у вызывающего: правило «максимум из
-    /// двух» обязано быть одним на весь продукт. Разойдись клиент с сервером
-    /// здесь — и файл, требующий аппаратной правки, правился бы с программной.
+    /// A separate method, not a caller-side expression: "maximum of the
+    /// two" must be one rule across the product. If client and server diverged
+    /// here, a file requiring hardware editing could be edited with software binding.
     #[must_use]
     pub fn binding_for(&self, action: Action) -> Binding {
         self.min_binding.max(self.action_binding.get(&action).copied().unwrap_or(Binding::Software))
     }
 
-    /// Профиль сервера, который НИЧЕГО не ужесточает: нейтральный элемент
-    /// пересечения — `intersect(p, &Policy::no_tightening()) == p` по каждому
-    /// полю, кроме непонятых действий (их у нейтрального нет).
+    /// A server profile that tightens NOTHING: the identity element of
+    /// intersection, `intersect(p, &Policy::no_tightening()) == p` for every
+    /// field except unknown actions (the identity has none).
     ///
-    /// Основа, от которой профиль сужается названными флагами. Одна на все
-    /// стороны, и это не удобство: соавторы, набравшие одну и ту же команду на
-    /// разных машинах, обязаны получить побайтно один профиль — иначе их
-    /// подписи легли бы под разные намерения, и кворум не собрался бы никогда.
+    /// The foundation narrowed by specified profile flags. Shared by all
+    /// parties, for more than convenience: coauthors entering the same command on
+    /// different machines must obtain byte-identical profiles; otherwise their
+    /// signatures cover different intentions, and a quorum can never form.
     #[must_use]
     pub fn no_tightening() -> Self {
         let mut policy = Self::deny_all();
@@ -247,13 +247,13 @@ impl Policy {
         policy
     }
 
-    /// Разрешение на действие. Отсутствие записи — запрет.
+    /// Permission for an action. No entry means denial.
     pub fn rule(&self, action: Action) -> Rule {
         self.actions.get(&action).copied().unwrap_or_default()
     }
 
-    /// Разрешить действие. Возвращает себя, чтобы политику можно было собрать
-    /// одним выражением.
+    /// Allow an action. Returns itself so a policy can be assembled
+    /// in one expression.
     #[must_use]
     pub fn allow(mut self, action: Action) -> Self {
         let _ = self.actions.insert(action, Rule::Allow);
@@ -261,38 +261,38 @@ impl Policy {
     }
 }
 
-/// Факты об устройстве, на котором принимается решение.
+/// Facts about the device making the decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceFacts {
     pub fingerprint: [u8; 32],
     pub binding: Binding,
-    /// Аппаратные часы устройства: показания, их отсутствие или сбой чтения.
+    /// Device hardware clock: a reading, absence, or read failure.
     ///
-    /// Не отказ сам по себе: отказ наступит только если ЛИЗИНГ выдан под
-    /// аппаратные часы, и тогда причина у отсутствия и у сбоя разная.
+    /// Not a denial by itself: denial occurs only if the LEASE requires
+    /// hardware time, with distinct reasons for absence and failure.
     pub tpm_clock: DeviceClock,
 }
 
-/// Что устройство знает о своих аппаратных часах.
+/// What the device knows about its hardware clock.
 ///
-/// Три состояния, а не `Option`, и это исправление. С `Option` сбой чтения и
-/// машина без TPM были одним `None`, и случайный отказ TBS на машине с часами
-/// давал отказ «устройство их не предъявило» — неотличимый от машины, у которой
-/// часов нет вовсе (находка 4 baseline A1, `cc_keystore::clock`). Решение при
-/// этом не меняется: лизинг под часы без показаний — отказ в обоих случаях
-/// (И-10); меняется причина, а за ней — код возврата и совет человеку.
+/// Three states, not `Option`: this is a fix. With `Option`, read failure and
+/// a machine without a TPM shared `None`, so an incidental TBS failure on a clock-equipped
+/// machine produced "device did not present a clock", indistinguishable from a machine
+/// with none (finding 4, baseline A1, `cc_keystore::clock`). The decision
+/// remains unchanged: a clock-bound lease without readings is denied in both cases
+/// (I-10); the reason changes, followed by the exit code and user advice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceClock {
-    /// Показания получены.
+    /// A reading was obtained.
     Read(TpmClock),
-    /// Часов у устройства нет: программная ступень, машина без TPM 2.0.
+    /// The device has no clock: software binding, machine without TPM 2.0.
     Absent,
-    /// Часы есть или могут быть, но прочитать их не удалось.
+    /// A clock exists or may exist, but could not be read.
     Unreadable,
 }
 
 impl DeviceClock {
-    /// Показания, если они получены.
+    /// The reading, if obtained.
     #[must_use]
     pub fn reading(&self) -> Option<TpmClock> {
         match self {
@@ -302,62 +302,62 @@ impl DeviceClock {
     }
 }
 
-/// Лизинг, выданный сервером. Проверяется целиком, а не по одному полю.
+/// Server-issued lease. Checked in full, not one field at a time.
 ///
-/// `Copy` снят вместе с появлением политики сервера (B4a): политика — владеющая
-/// структура, и копировать её молча означало бы прятать стоимость там, где она
-/// заметна вызывающему. Клонируется лизинг явно.
+/// `Copy` was removed when server policy appeared (B4a): policy is an owning
+/// structure, and copying it silently would hide a cost the caller
+/// should see. Lease cloning is explicit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaseFacts {
     pub device_fingerprint: [u8; 32],
-    /// Хеш байтового диапазона политики, которую подписал автор.
+    /// Hash of the policy byte range signed by the author.
     pub policy_hash: [u8; 32],
-    /// Строго возрастает на пару (файл, устройство). Меньшее значение означает
-    /// откат восстановленного кеша.
+    /// Strictly increases for each (file, device) pair. A lower value indicates
+    /// rollback of a restored cache.
     pub seq: u64,
-    /// Увеличивается при отзыве, чтобы лизинг до отзыва был опознаваем в журнале.
+    /// Increases on revocation so a pre-revocation lease can be recognized in the journal.
     ///
-    /// Проверкой клиента эпоха НЕ является, и заводить её таковой не нужно:
-    /// отзыв защёлкивает признак и запрещает выдачу, поэтому лизинга с эпохой
-    /// выше нулевой не существует; а если бы он появился, его отсёк бы `seq`,
-    /// который монотонен сквозь смену эпох. Спека протокола обещала обратное и
-    /// исправлена.
+    /// The epoch is NOT a client check and should not become one:
+    /// revocation latches a flag and forbids issuance, so no lease with an epoch
+    /// above zero exists. If one did, `seq` would reject it,
+    /// remaining monotonic across epoch changes. The protocol specification promised otherwise
+    /// and was corrected.
     pub epoch: u64,
     pub issued_at: Timestamp,
     pub expires_at: Timestamp,
     pub opens_remaining: Option<u32>,
-    /// Отзыв, доставленный ВНУТРИ лизинга.
+    /// Revocation delivered INSIDE a lease.
     ///
-    /// Производителя у поля сегодня нет: сервер пишет сюда `false`, потому что
-    /// отзыв он исполняет иначе — отказом выдать следующий лизинг. Лизинг есть
-    /// разрешение, и «вот ваше разрешение, оно отозвано» — объект осмысленный
-    /// ровно в одном случае: когда сервер способен ДОГНАТЬ уже выданное
-    /// разрешение. Такой канал появится с транспортом.
+    /// No producer currently sets this field: the server writes `false` because it
+    /// enforces revocation differently, refusing the next lease. A lease is
+    /// permission, and "here is your permission; it is revoked" makes sense
+    /// in exactly one case: the server can CATCH UP WITH already-issued
+    /// permission. That channel will arrive with the transport.
     ///
-    /// Поле поэтому резерв, а не мёртвая проверка, и держится оно не «на всякий
-    /// случай»: форма лизинга заморожена вектором `tests/kat/lease.kat`, и
-    /// убрать поле значило бы менять байты. Проверка ниже стоит заранее, чтобы
-    /// канал, когда он придёт, не потребовал править решатель.
+    /// Thus the field is reserved rather than a dead check, and is retained not "just in
+    /// case": the lease layout is frozen by `tests/kat/lease.kat`, and
+    /// removing it would change bytes. The check below is in place so
+    /// the channel, when it arrives, will not require changing the evaluator.
     pub revoked: bool,
-    /// Политика СЕРВЕРА, под его подписью, — то, чем он ужесточил политику автора.
+    /// SERVER policy under its signature: how it tightened the author's policy.
     ///
-    /// `None` — сервер ничего не ужесточал, и лизинг тот же, что до появления
-    /// поля (документ версии 1). `Some` приезжает только в лизинге версии 2.
+    /// `None` means no server tightening; the lease behaves as before the
+    /// field existed (document version 1). `Some` arrives only in a version 2 lease.
     ///
-    /// Поле живёт здесь, а не отдельным параметром решателя, ровно затем, чтобы
-    /// решатель был ОДИН: `check`, `unprotect`, просмотрщик и брокер зовут
-    /// `evaluate` с фактами лизинга, и ужесточение складывается внутри —
-    /// забыть его нельзя, потому что складывает не вызывающий.
+    /// The field lives here rather than as a separate evaluator parameter precisely
+    /// to keep ONE evaluator: `check`, `unprotect`, the viewer, and the broker call
+    /// `evaluate` with lease facts, and tightening is composed inside:
+    /// callers cannot forget it because they do not perform the composition.
     ///
-    /// Сервер не может этим РАСШИРИТЬ права: [`intersect`] монотонна в сторону
-    /// ужесточения, и политика автора остаётся верхней границей (И-10).
+    /// This cannot EXPAND permissions: [`intersect`] is monotonic toward
+    /// stricter policy, and author policy remains the upper bound (I-10).
     pub server_policy: Option<Policy>,
-    /// Аттестация ключа устройства, признанная сервером в разговоре выдачи (B6b,
+    /// Device key attestation accepted by the server during the issuance exchange (B6b,
     /// `docs/protocol.md` §9.11).
     ///
-    /// Единственный путь к ступени [`Binding::HardwareAttested`]: устройство само
-    /// себе аттестацию объявить не может — проверенную цепочку видел сервер, и
-    /// приезжает она под его подписью. См. [`effective_binding`].
+    /// The sole route to [`Binding::HardwareAttested`]: a device cannot
+    /// declare itself attested; the server saw the verified chain,
+    /// and it arrives under the server's signature. See [`effective_binding`].
     pub attested: Option<Attestation>,
     // Поля `max_offline_seconds` здесь намеренно НЕТ, хотя план Ф-7 перечисляет
     // его среди полей защиты от отката.
@@ -372,105 +372,105 @@ pub struct LeaseFacts {
     // тестов её никто не зовёт, и серверной политики не существует. Второе поле с
     // тем же смыслом в лизинге завело бы вопрос «какое из двух главнее», а вопрос
     // этот решается пересечением, а не приоритетом, — это и остаётся в силе.
-    /// Показания аппаратных часов устройства в момент выдачи.
+    /// Device hardware clock reading at issuance.
     ///
-    /// Ради того, от чего не спасают ни системные часы, ни «пол» монотонности:
-    /// откат снапшота виртуальной машины возвращает и файл состояния, и часы.
-    /// Счётчик TPM назад не идёт и снапшотом не возвращается — если TPM
-    /// настоящий.
+    /// Protects against what neither the system clock nor the monotonic floor can prevent:
+    /// VM snapshot rollback restores both the state file and clock.
+    /// A TPM counter does not move backward or revert with a snapshot, provided the TPM
+    /// is real.
     ///
-    /// `None` — лизинг выдан устройству без аппаратных часов. Это законно (на
-    /// программной ступени их взять негде), но и защиты не даёт.
+    /// `None` means the lease was issued to a device without hardware time. This is valid
+    /// (unavailable at software level), but provides no such protection.
     pub tpm_clock: Option<TpmClock>,
 }
 
-/// Показания аппаратных часов TPM: счётчик сбросов и время внутри него.
+/// TPM hardware clock reading: reset counter and time within it.
 ///
-/// Пара, а не одно число, и **сравниваются обе половины независимо**: откат
-/// объявляется, если уменьшилась ЛЮБАЯ из них.
+/// A pair, not one number, with **both components compared independently**:
+/// a decrease in EITHER means rollback.
 ///
-/// # Почему порядка у этого типа НЕТ
+/// # Why this type has NO ordering
 ///
-/// Здесь стояло `PartialOrd, Ord`, а докстрока объясняла лексикографику моделью
-/// «часы обнуляются при сбросе платформы, а счётчик при этом растёт». **Модель
-/// неверна**: по TPM 2.0 `clock` энергонезависим и переживает выключение
-/// питания, обнуляет его только `TPM2_Clear`, который обнуляет и счётчик.
-/// Обнуляется при включении другая величина, `time`, и продукт её не берёт —
-/// см. `cc_keystore::clock`.
+/// This once derived `PartialOrd, Ord`, with docs explaining lexicographic order through the model
+/// "the clock resets when the platform resets, while the counter increases". **That model
+/// is wrong**: under TPM 2.0, `clock` is nonvolatile and survives power
+/// loss; only `TPM2_Clear` resets it, also resetting the counter.
+/// A different value, `time`, resets on power-up; the product does not use it:
+/// see `cc_keystore::clock`.
 ///
-/// Цена ошибки была не в словах. При лексикографике пара «счётчик больше, часы
-/// меньше» проходила как законная перезагрузка, а получить её можно ровно одним
-/// способом: откатить снапшот и перезагрузиться. Проверка против отката снапшота
-/// пропускала откат снапшота. Дыру закрыли, а `derive` остался — и `a.max(b)`
-/// вернул бы её молча.
+/// This was more than a wording error. Lexicographic order accepted "higher counter,
+/// lower clock" as a legitimate reboot, obtainable in precisely one way:
+/// roll back a snapshot and reboot. The snapshot rollback check
+/// allowed snapshot rollback. The hole was fixed but the `derive` remained, and `a.max(b)`
+/// would silently restore it.
 ///
-/// Поэтому порядок СНЯТ, а не переопределён. Переопределённый порядок пришлось бы
-/// объяснять каждому читающему; снятый делает неверное сравнение невыразимым.
-/// Планка поднимается покомпонентно — образец в `cc_authority`.
+/// Ordering was therefore REMOVED, not redefined. A redefined order would need
+/// explanation to every reader; removing it makes the invalid comparison inexpressible.
+/// Raise the floor componentwise; see the example in `cc_authority`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TpmClock {
-    /// Сколько раз платформа сбрасывалась. Растёт, назад не идёт.
+    /// Number of platform resets. Increases, never decreases.
     pub reset_count: u32,
-    /// Миллисекунды НАРАСТАЮЩИМ ИТОГОМ с последней очистки TPM.
+    /// CUMULATIVE milliseconds since the last TPM clear.
     ///
-    /// Не «внутри текущего периода» — так было записано здесь раньше, и это
-    /// неправда, из которой следовал пропуск отката. По TPM 2.0 величина
-    /// энергонезависима и переживает выключение питания; обнуляет её только
-    /// `TPM2_Clear`, который заодно обнуляет [`Self::reset_count`].
+    /// Not "within the current period", as previously written here: that was
+    /// false and led to missed rollback. Under TPM 2.0 the value
+    /// is nonvolatile and survives power loss; only
+    /// `TPM2_Clear` resets it, also resetting [`Self::reset_count`].
     ///
-    /// Отсюда правило сравнения: **уменьшение `clock_ms` есть откат ВСЕГДА**,
-    /// независимо от счётчика сбросов. Честное железо уменьшить её не может.
+    /// Hence the comparison rule: **a decrease in `clock_ms` ALWAYS means rollback**,
+    /// regardless of reset count. Honest hardware cannot decrease it.
     ///
-    /// Обнуляется при включении питания другая величина — `time`, и её этот тип
-    /// не несёт намеренно: спутав их, мы объявили бы откатом обычную перезагрузку.
+    /// The value that resets at power-up is `time`; this type deliberately
+    /// excludes it, since confusing the two would classify an ordinary reboot as rollback.
     pub clock_ms: u64,
 }
 
-/// Всё, от чего зависит решение. Ничего не берётся из окружения.
+/// Everything the decision depends on. Nothing is taken from the environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Context {
     pub now: Timestamp,
-    /// Откуда взято `now`. **Решатель это поле НЕ читает.**
+    /// Source of `now`. **The evaluator does NOT read this field.**
     ///
-    /// Сказано прямо, потому что молчание здесь дороже обычного. Поле заполняется
-    /// клиентом честно, и в ревью читается как действующее самоограничение —
-    /// «время объявлено ненадёжным, значит на него полагаются меньше». Такого
-    /// правила в решении нет: `evaluate` не обращается к полю ни разу, и решения
-    /// по `Wall` и по `ServerAsserted` совпадают.
+    /// Stated explicitly because silence here is unusually costly. The client
+    /// populates it honestly, and reviewers read it as an effective self-imposed limit:
+    /// "time is declared unreliable, so it is trusted less". No such
+    /// rule exists: `evaluate` never accesses the field, and decisions
+    /// for `Wall` and `ServerAsserted` coincide.
     ///
-    /// Эксплуатируемой дыры здесь нет: источник и так всегда `Wall`, то есть
-    /// худший из возможных, и защищает от его отвода не это поле, а пол
-    /// монотонности с часами TPM. Опасно другое — ревьюер экономит внимание на
-    /// гарантии, которой не существует.
+    /// There is no exploitable hole: the source is always `Wall` anyway,
+    /// the worst possible source, and rollback protection comes from the monotonic
+    /// floor plus TPM time, not this field. The danger is a reviewer spending less attention
+    /// because of a nonexistent guarantee.
     ///
-    /// Потребитель у поля появится вместе с правилом, которое его потребует —
-    /// например «`HardwareAttested` требует времени не от системных часов». Это
-    /// новое правило политики, то есть отдельное решение, а не попутная работа.
+    /// The field will gain a consumer with a rule that requires it,
+    /// such as "`HardwareAttested` requires time independent of the system clock". That
+    /// is a new policy rule, a separate decision rather than incidental work.
     pub time_source: TimeSource,
-    /// Наибольшее время, которое клиент когда-либо видел. Часы не могут идти
-    /// назад: `now` меньше этого значения означает попытку отката.
+    /// Greatest time the client has ever seen. Time cannot move
+    /// backward: `now` below this value means a rollback attempt.
     pub monotonic_floor: Timestamp,
     pub first_open_at: Option<Timestamp>,
     pub opens_so_far: u32,
-    /// Сколько раз файл открывали ПОД ТЕКУЩИМ лизингом.
+    /// Number of opens UNDER THE CURRENT lease.
     ///
-    /// Отдельно от [`Context::opens_so_far`], и это не дубль: то — предел
-    /// АВТОРА за всё время (`Policy::max_opens`), это — бюджет ОДНОГО лизинга
-    /// (`LeaseFacts::opens_remaining`). Сервер выдаёт второй заново с каждым
-    /// лизингом, поэтому и считать его надо заново; общий счётчик отказал бы
-    /// после первого исчерпания навсегда.
+    /// Distinct from [`Context::opens_so_far`], not a duplicate: that is the AUTHOR'S
+    /// all-time limit (`Policy::max_opens`); this is ONE lease's budget
+    /// (`LeaseFacts::opens_remaining`). The server grants the latter anew with each
+    /// lease, so it must be counted anew; a shared counter would deny
+    /// access forever after the first exhaustion.
     ///
-    /// Сбрасывается тем, кто ведёт счёт, при смене `seq` лизинга.
+    /// Reset by the counter owner when the lease `seq` changes.
     pub opens_under_lease: u32,
     pub device: DeviceFacts,
-    /// Наибольший `seq`, который клиент когда-либо принимал для этого файла.
+    /// Greatest `seq` the client has ever accepted for this file.
     pub highest_seq_seen: u64,
     pub online: bool,
-    /// Хеш политики, вычисленный клиентом по подписанным байтам.
+    /// Policy hash computed by the client from signed bytes.
     pub policy_hash: [u8; 32],
 }
 
-/// Что клиент обязан сделать, если действие разрешено.
+/// What the client must do if the action is allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Obligations {
     pub watermark: bool,
@@ -478,76 +478,76 @@ pub struct Obligations {
     pub suppress_crash_dumps: bool,
 }
 
-/// Допустимый перекос часов между устройством и сервером, в секундах.
+/// Permitted device/server clock skew, in seconds.
 ///
-/// Пять минут — то же значение, которым обходятся Kerberos и одноразовые коды:
-/// его хватает несинхронизированным потребительским часам и на сетевую задержку
-/// выдачи лизинга, но оно на порядки меньше самого короткого осмысленного срока
-/// доступа (часы). Значение больше давало бы бесплатное продление лизинга ровно
-/// на свою величину, значение меньше — отказы законным пользователям, у которых
-/// часы уплыли на минуту.
+/// Five minutes, the same allowance used by Kerberos and one-time codes:
+/// sufficient for unsynchronized consumer clocks and network delay
+/// during lease issuance, yet orders of magnitude below the shortest meaningful
+/// access period (hours). A larger value would grant a free lease extension equal
+/// to itself; a smaller one would deny legitimate users whose
+/// clocks drifted by a minute.
 pub const MAX_CLOCK_SKEW_SECONDS: i64 = 300;
 
-/// Причина отказа. Разделены подробно: пользователю нужно понятное сообщение,
-/// а журналу — различимое событие.
+/// Denial reason. Deliberately detailed: the user needs a clear message,
+/// and the journal needs a distinguishable event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DenyReason {
     ActionNotPermitted(Action),
-    /// Действие РАЗРЕШЕНО автором и запрещено ужесточением сервера — строгим
-    /// профилем или правилом по держанию: в лизинге они едут одним полем, и
-    /// клиенту их не различить, а человеку и не нужно — адресат у обоих один.
+    /// The author ALLOWS the action, but server tightening denies it through a strict
+    /// profile or possession-based rule: both use one lease field, so
+    /// the client cannot distinguish them, and the person need not: both have the same contact.
     ///
-    /// Отдельная причина, а не оттенок предыдущей, потому что человеку отсюда
-    /// идти в разные стороны: в первом случае просить автора, во втором —
-    /// оператора сервера. Текст «не разрешено автором» на ужесточении сервера
-    /// был бы прямой неправдой, и распознать её по виду невозможно.
+    /// A separate reason, not a shade of the previous one, because the person must
+    /// contact different parties: the author in the first case, the
+    /// server operator in the second. "Not allowed by the author" for server tightening
+    /// would be plainly false, with no visible way to recognize that.
     ///
-    /// Различаются они решаемо: композиция запретила, а политика автора
-    /// разрешала — значит запретил второй член пересечения.
+    /// The distinction is decidable: composition denied what author policy
+    /// allowed, so the second intersection operand imposed the denial.
     ActionTightenedByServer(Action),
-    /// Политика содержит правила, которых этот клиент не знает.
+    /// The policy contains rules this client does not recognize.
     ///
-    /// Не «непонятное поле пропущено», а отказ целиком: понять политику частично
-    /// и исполнить понятую часть — значит исполнить не те правила, что задал
-    /// автор. Действие, добавленное будущей версией (`ai_ingest`, `ocr`,
-    /// `forward`), обязано запрещаться и старым клиентом тоже, а единственный
-    /// честный способ это обеспечить — не открывать файл вовсе.
+    /// Not "unknown field skipped", but complete rejection: understanding policy partly
+    /// and enforcing only that part enforces different rules from those the
+    /// author specified. An action added by a future version (`ai_ingest`, `ocr`,
+    /// `forward`) must also be denied by old clients; the only
+    /// honest way to ensure that is not to open the file at all.
     PolicyNotFullyUnderstood { unknown: u16 },
     ClockRollback,
     LeaseRollback { seen: u64, presented: u64 },
-    /// Аппаратные часы устройства показывают меньше, чем в момент выдачи лизинга.
+    /// Device hardware time is lower than at lease issuance.
     ///
-    /// Счётчик TPM назад не идёт. Меньшее показание означает, что вернули не
-    /// часы, а машину целиком — откат снапшота.
+    /// A TPM counter does not move backward. A lower reading means it was not
+    /// the clock but the whole machine that was restored: snapshot rollback.
     TpmClockRollback { issued: TpmClock, presented: TpmClock },
-    /// Лизинг требует аппаратных часов, а устройство их не предъявило.
+    /// The lease requires hardware time, but the device did not present it.
     ///
-    /// Отказ, а не пропуск проверки: лизинг, выданный под аппаратные часы, без
-    /// них не проверяем, и «не смогли проверить» обязано читаться как «нельзя»
-    /// (И-10).
+    /// Denial, not a skipped check: a lease bound to hardware time cannot be verified
+    /// without it, and "could not verify" must mean "not allowed"
+    /// (I-10).
     TpmClockMissing,
-    /// Лизинг требует аппаратных часов, а прочитать их не удалось.
+    /// The lease requires hardware time, but reading it failed.
     ///
-    /// Отдельно от [`Self::TpmClockMissing`]: решение то же — отказ, «не смогли
-    /// проверить» читается как «нельзя» (И-10), — но событие другое. Отсутствие
-    /// часов — свойство машины, и совет человеку «лизинг без часов»; сбой чтения —
-    /// событие этой минуты, и совет «повторить».
+    /// Distinct from [`Self::TpmClockMissing`]: the same decision, denial, with "could not
+    /// verify" meaning "not allowed" (I-10), but a different event. No clock
+    /// is a machine property, suggesting "lease without hardware time"; a read failure
+    /// is a transient event, suggesting "retry".
     TpmClockUnreadable,
-    /// Аппаратные часы обогнали системные — значит системные отвели назад.
+    /// Hardware time advanced faster than system time, indicating system clock rollback.
     ///
-    /// Часы TPM идут, только пока машина включена, поэтому обогнать настенные они
-    /// не могут ни при каком честном ходе событий. Превышение означает ровно одно:
-    /// отсчёт по системным часам укоротили.
+    /// TPM time advances only while the machine is powered on, so it cannot outpace wall
+    /// time under legitimate conditions. Exceeding it means precisely one thing:
+    /// elapsed system time was shortened.
     ///
-    /// Отдельно от [`Self::Expired`], и различие не косметическое. «Срок истёк» —
-    /// обычное событие. «Аппаратные часы обогнали системные» — отчёт об отводе, и
-    /// оператору надо знать именно его. Пользователю оба читаются одинаково,
-    /// диагносту — нет.
+    /// Distinct from [`Self::Expired`], substantively. "Expired" is
+    /// an ordinary event; "hardware time outpaced system time" reports clock manipulation,
+    /// which the operator needs to know. Users may read both alike;
+    /// diagnosticians do not.
     ///
-    /// Прежнее имя `ExpiredByHardwareClock` описывало прежнюю проверку — сравнение
-    /// аппаратного элапса с длиной лизинга. Та проверка отказывала законному
-    /// пользователю всякий раз, когда показания сняты задолго до выдачи, и
-    /// заменена; имя переименовано вместе с ней, чтобы поля не врали.
+    /// The former name `ExpiredByHardwareClock` described the former check: comparing
+    /// hardware elapsed time with lease length. It rejected legitimate
+    /// users whenever readings were taken long before issuance and was
+    /// replaced; the name changed with it so the fields would not lie.
     HardwareClockOutranWallClock { hardware_ms: u64, wall_ms: u64 },
     NotYetValid,
     Expired,
@@ -558,22 +558,22 @@ pub enum DenyReason {
     WrongDevice,
     PolicyHashMismatch,
     BindingTooWeak { required: Binding, actual: Binding },
-    /// Лизинг предъявлен раньше, чем сервер его якобы выдал.
+    /// The lease was presented before the server supposedly issued it.
     ///
-    /// Такой лизинг невозможно оценить: его `issued_at` — единственная отметка
-    /// о последнем разговоре с сервером, и если она в будущем, то и окно
-    /// оффлайна, и срок жизни лизинга отсчитываются от несуществующего момента.
+    /// Such a lease cannot be evaluated: `issued_at` is the only record
+    /// of the last server exchange. If it lies in the future, both the offline
+    /// window and lease lifetime count from a nonexistent moment.
     LeaseIssuedInTheFuture { issued_at: Timestamp, now: Timestamp },
-    /// Сервер выдал лизинг длиннее, чем автор разрешил в `Network::Lease`.
+    /// The server issued a lease longer than the author allowed in `Network::Lease`.
     ///
-    /// Ровно тот случай, ради которого политика и лизинг обязаны быть связаны:
-    /// иначе сервер (скомпрометированный или просто щедрый) выдаёт месяц там,
-    /// где автор разрешил восемь часов, и клиент это принимает.
+    /// Precisely why policy and lease must be bound:
+    /// otherwise a compromised or simply generous server grants a month
+    /// where the author allowed eight hours, and the client accepts it.
     LeaseOutlivesPolicy { allowed_seconds: i64, granted_seconds: i64 },
-    /// Устройство не связывалось с сервером дольше, чем автор разрешил быть
-    /// оффлайн (`max_offline_seconds`).
+    /// The device has gone without contacting the server longer than the author allowed
+    /// offline (`max_offline_seconds`).
     OfflineTooLong { allowed_seconds: i64, elapsed_seconds: i64 },
-    /// Автор отсчитывает срок от первого открытия, а записи о нём нет.
+    /// The author counts validity from first open, but no record of it exists.
     FirstOpenNotRecorded,
 }
 
@@ -640,7 +640,7 @@ impl fmt::Display for DenyReason {
     }
 }
 
-/// Решение.
+/// Verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Allow(Obligations),
@@ -653,10 +653,10 @@ impl Verdict {
     }
 }
 
-/// Единственная точка, где принимается решение о доступе.
+/// The sole point where access decisions are made.
 ///
-/// Порядок проверок выбран так, чтобы более общие отказы срабатывали раньше
-/// частных: пользователь должен узнать «доступ отозван», а не «нельзя печатать».
+/// Checks are ordered so general denials precede specific
+/// ones: the user should learn "access revoked", not "printing forbidden".
 pub fn evaluate(
     policy: &Policy,
     lease: Option<&LeaseFacts>,
@@ -965,11 +965,11 @@ pub fn evaluate(
     })
 }
 
-/// Пересечение политики автора с тем, что разрешил сервер.
+/// Intersection of author policy with what the server permits.
 ///
-/// Функция монотонна и работает **только** в сторону ужесточения. Это
-/// структурная гарантия: сервер не должен иметь возможности превратить `Deny` в
-/// `Allow`, даже если его скомпрометировали или он сам этого захотел.
+/// Monotonic, operating **only** toward stricter policy. This is a
+/// structural guarantee: the server must not turn `Deny` into
+/// `Allow`, even if compromised or acting deliberately.
 #[must_use]
 pub fn intersect(author: &Policy, server: &Policy) -> Policy {
     let mut result = author.clone();
@@ -1006,32 +1006,32 @@ pub fn intersect(author: &Policy, server: &Policy) -> Policy {
     result
 }
 
-/// Срок действия, при котором доступ невозможен ни в какой момент времени.
+/// Validity interval permitting access at no moment in time.
 ///
-/// Способ выразить «конъюнкция не представима» в типе, у которого нет члена
-/// «никогда». Окно с началом позже конца отвергается `evaluate` по первой же
-/// проверке, то есть отказ приходит от общей ветки, а не от особого случая.
+/// Represents "conjunction cannot be expressed" in a type without a
+/// "never" variant. A window starting after it ends is rejected by `evaluate` at the first
+/// check, so denial comes from the common branch, not a special case.
 const IMPOSSIBLE: Validity =
     Validity::Window { not_before: Timestamp(i64::MAX), not_after: Timestamp(i64::MIN) };
 
-/// Пересечь два срока действия, никогда не расширяя доступ.
+/// Intersect two validity periods without ever expanding access.
 ///
-/// `Always` — отсутствие ограничения, поэтому пересечение с ним отдаёт второй
-/// член. Однородные пары сужаются очевидным образом: окна — по максимуму начала
-/// и минимуму конца, отсчёты от первого открытия — по минимуму длительности.
+/// `Always` means no restriction, so intersecting it returns the other
+/// operand. Homogeneous pairs narrow naturally: windows use the later start
+/// and earlier end; first-open durations use the shorter duration.
 ///
-/// Разнородная пара (окно и отсчёт от первого открытия) конъюнкцией одного члена
-/// не выражается: это два независимых ограничения, и `Validity` не умеет нести
-/// оба сразу. Выбор любого из них был бы **расширением** относительно второго, а
-/// расширять `intersect` не вправе ни при каких обстоятельствах — на этом стоит
-/// обещание, что сервер не может ослабить политику автора, даже будучи
-/// скомпрометированным. Поэтому здесь отказ.
+/// A heterogeneous pair (window and first-open duration) cannot express its conjunction
+/// in one variant: the restrictions are independent, and `Validity` cannot carry
+/// both simultaneously. Choosing either **expands** access relative to the other,
+/// and `intersect` may never expand access: this underpins
+/// the promise that even a compromised server cannot weaken
+/// the author's policy. Hence denial here.
 ///
-/// Практического ограничения это сегодня не создаёт: лизинги ещё не выпускаются,
-/// а сервер, которому нечего ужесточать, присылает `Always`. Когда лизинги
-/// появятся (фаза 1) и понадобится разнородная пара, правильным решением будет
-/// член, несущий оба ограничения, — но это изменение формата политики, а значит
-/// отдельное решение с правкой `docs/format.md`, а не молчаливый выбор здесь.
+/// This currently imposes no practical restriction: leases are not issued yet,
+/// and a server with nothing to tighten sends `Always`. When leases
+/// arrive (phase 1) and a heterogeneous pair is needed, the correct solution is
+/// a variant carrying both restrictions. That changes policy format and thus
+/// requires a separate decision and `docs/format.md` update, not a silent choice here.
 fn tighten_validity(author: Validity, server: Validity) -> Validity {
     match (author, server) {
         (Validity::Always, other) | (other, Validity::Always) => other,
@@ -1054,12 +1054,12 @@ fn tighten_validity(author: Validity, server: Validity) -> Validity {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
 
-    /// ТРЕБОВАНИЕ НА ДЕЙСТВИЕ ПОДНИМАЕТ СТУПЕНЬ ИМЕННО ЭТОМУ ДЕЙСТВИЮ.
+    /// A PER-ACTION REQUIREMENT RAISES THE LEVEL FOR THAT ACTION SPECIFICALLY.
     ///
-    /// Смотреть с программной ступени можно, править — нельзя: подпись правки не
-    /// может быть прочнее ступени, на которой стоит машина. Одного `min_binding`
-    /// на всю политику для этого не хватает, и вот проба на то, что не хватает
-    /// именно так, как задумано.
+    /// Viewing can use software binding, editing cannot: the edit signature
+    /// cannot be stronger than the machine's binding level. A single policy-wide `min_binding`
+    /// cannot express this, and this probe verifies that the additional requirement
+    /// works exactly as intended.
     #[test]
     fn a_per_action_requirement_raises_the_bar_for_that_action_alone() {
         let mut policy = viewable();
@@ -1082,10 +1082,10 @@ mod tests {
         ));
     }
 
-    /// ПОЛЕ УМЕЕТ ТОЛЬКО УЖЕСТОЧАТЬ — И ОБЩЕЕ ТРЕБОВАНИЕ ОНО НЕ СНИМАЕТ.
+    /// THE FIELD CAN ONLY TIGHTEN; IT DOES NOT REMOVE THE GLOBAL REQUIREMENT.
     ///
-    /// Запись слабее `min_binding` не должна ослаблять: иначе `intersect`
-    /// перестал бы быть монотонным, а из `Deny` можно было бы сделать `Allow`.
+    /// An entry weaker than `min_binding` must not relax it, or `intersect`
+    /// would cease being monotonic and could turn `Deny` into `Allow`.
     #[test]
     fn the_field_only_tightens_and_never_lowers_the_overall_requirement() {
         let mut policy = viewable();
@@ -1094,7 +1094,7 @@ mod tests {
         assert_eq!(policy.binding_for(Action::View), Binding::Hardware);
     }
 
-    /// СЕРВЕР ВПРАВЕ ПОДНЯТЬ СТУПЕНЬ ДЕЙСТВИЮ И НЕ ВПРАВЕ ОПУСТИТЬ.
+    /// THE SERVER MAY RAISE AN ACTION'S BINDING LEVEL, NEVER LOWER IT.
     #[test]
     fn the_server_may_raise_a_per_action_bar_and_never_lower_it() {
         let mut author = Policy::deny_all();
@@ -1159,15 +1159,15 @@ mod tests {
     }
 
 
-    /// БЮДЖЕТ ОДНОГО ЛИЗИНГА ИСПОЛНЯЕТСЯ ПРИ ЛЮБОМ ЗНАЧЕНИИ, А НЕ ТОЛЬКО ПРИ НУЛЕ.
+    /// ONE LEASE'S BUDGET IS ENFORCED FOR EVERY VALUE, NOT ONLY ZERO.
     ///
-    /// Прежняя редакция писала `if let Some(0) = …`, то есть отказывала ровно на
-    /// точном нуле. `Some(3)` не отличался от «без ограничения»: значение никто
-    /// не уменьшал — ни клиент, ни сервер между лизингами, — и поле, названное в
-    /// сервере «бюджетом ОДНОГО лизинга», работало как булево «стоп».
-    /// Аудит 2026-08-26, находка В-9.
+    /// The former implementation used `if let Some(0) = …`, rejecting only at
+    /// exactly zero. `Some(3)` was indistinguishable from "unlimited": nobody
+    /// decremented it, neither client nor server between leases, and the field
+    /// the server called "ONE lease's budget" acted as a Boolean stop flag.
+    /// Audit 2026-08-26, finding V-9.
     ///
-    /// Проверяются все три точки, и средняя тут главная: на границе.
+    /// All three points are tested, with the middle, at the boundary, being crucial.
     #[test]
     fn the_per_lease_open_budget_is_spent_and_not_merely_checked_for_zero() {
         let policy = Policy::deny_all().allow(Action::View);
@@ -1204,11 +1204,11 @@ mod tests {
         );
     }
 
-    /// БЮДЖЕТ ЛИЗИНГА И ПРЕДЕЛ АВТОРА — РАЗНЫЕ ВЕЛИЧИНЫ.
+    /// LEASE BUDGET AND AUTHOR LIMIT ARE DIFFERENT QUANTITIES.
     ///
-    /// Сторож против сведения их в одну: `max_opens` считается за всё время
-    /// (`opens_so_far`), бюджет — под текущим лизингом (`opens_under_lease`).
-    /// Слей их — и новый лизинг перестал бы приносить новый бюджет.
+    /// A guard against merging them: `max_opens` counts all-time opens
+    /// (`opens_so_far`); the budget counts under the current lease (`opens_under_lease`).
+    /// Merge them, and a new lease would no longer bring a fresh budget.
     #[test]
     fn the_lease_budget_and_the_author_limit_count_different_things() {
         let policy = Policy { max_opens: Some(10), ..Policy::deny_all() }.allow(Action::View);
@@ -1258,16 +1258,16 @@ mod tests {
             .allow(Action::View)
     }
 
-    /// Перебор политик для проверки монотонности `intersect`.
+    /// Enumerate policies to check `intersect` monotonicity.
     ///
-    /// Не случайная выборка: пары строятся исчерпывающе по сетке, где каждое
-    /// поле принимает и «слабое», и «сильное» значение, а `validity` — все три
-    /// вида плюс по два представителя однородных. Ровно на разнородной паре
-    /// Лизинг, выданный под аппаратные часы, без них не проверяется — отказ.
+    /// Not random sampling: pairs are exhaustive over a grid where every
+    /// field takes both a "weak" and "strong" value, while `validity` takes all three
+    /// kinds plus two representatives of each homogeneous kind. Precisely on a heterogeneous pair
+    /// A lease issued with hardware time cannot be verified without it: denial.
     ///
-    /// Направление доктрины: «не смогли проверить» читается как «нельзя» (И-10).
-    /// Обратный выбор был бы обходом в одну строку — достаточно предъявить
-    /// устройство без часов, и проверка отката исчезала бы.
+    /// Doctrine: "could not verify" means "not allowed" (I-10).
+    /// The opposite would create a one-line bypass: merely present
+    /// a device without hardware time, and the rollback check disappears.
     #[test]
     fn a_lease_bound_to_hardware_clock_is_refused_without_one() {
         let policy = viewable();
@@ -1295,19 +1295,19 @@ mod tests {
         assert!(evaluate(&policy, Some(&lease()), Action::View, &c).is_allowed());
     }
 
-    /// Часы, показывающие меньше, чем при выдаче, — откат.
+    /// A clock lower than at issuance means rollback.
     ///
-    /// Проверяются обе половины пары, и КАЖДАЯ по отдельности: уменьшение любой
-    /// из них есть откат.
+    /// Both components are checked, EACH separately: decreasing either
+    /// means rollback.
     ///
-    /// Здесь стояло «меньшее время при БОЛЬШЕМ счётчике откатом не является:
-    /// платформа перезагрузилась, часы пошли заново». Подпись пережила
-    /// собственное опровержение: тело теста ниже требует для такой пары ОТКАЗА и
-    /// объясняет почему — честное железо такого входа не производит, а получить
-    /// его можно ровно одним способом, откатив снапшот и перезагрузившись.
+    /// This used to say "lower time with a HIGHER counter is not rollback:
+    /// the platform rebooted and the clock restarted". The caption outlived
+    /// its own refutation: the test body below requires DENIAL for that pair and
+    /// explains why: honest hardware cannot produce it, and there is exactly
+    /// one way to obtain it: roll back a snapshot and reboot.
     ///
-    /// Перезагрузка проходит не потому, что часы «пошли заново», а потому, что
-    /// растут ОБЕ величины: `clock` энергонезависим.
+    /// Reboot passes not because the clock "restarted", but because
+    /// BOTH values increase: `clock` is nonvolatile.
     #[test]
     fn hardware_clock_going_backwards_is_a_rollback_but_a_reboot_is_not() {
         let policy = viewable();
@@ -1368,10 +1368,10 @@ mod tests {
         assert!(evaluate(&policy, Some(&l), Action::View, &with_clock(issued)).is_allowed());
     }
 
-    /// Лизинг без часов не требует их от устройства, у которого они есть.
+    /// A lease without hardware time does not require it from a device that has it.
     ///
-    /// Проверка односторонности: сервер, не поставивший часы в лизинг, не должен
-    /// получать отказ от устройства, которое их предъявляет.
+    /// Checks the one-way requirement: a server that omitted hardware time from the lease
+    /// must not receive rejection from a device presenting it.
     #[test]
     fn a_lease_without_a_clock_ignores_the_one_the_device_has() {
         let policy = viewable();
@@ -1383,7 +1383,7 @@ mod tests {
         assert!(evaluate(&policy, Some(&l), Action::View, &c).is_allowed());
     }
 
-    /// (окно против отсчёта от первого открытия) прежняя реализация и молчала.
+    /// (window versus first-open duration) was where the former implementation stayed silent.
     fn grid() -> Vec<Policy> {
         let validities = [
             Validity::Always,
@@ -1761,11 +1761,11 @@ mod tests {
         );
     }
 
-    /// АТТЕСТАЦИЮ ОБЪЯВЛЯЕТ ТОЛЬКО ЛИЗИНГ (B6b).
+    /// ONLY THE LEASE DECLARES ATTESTATION (B6b).
     ///
-    /// Устройство, назвавшее себя аттестованным, остаётся аппаратным, пока
-    /// признак не приехал под подписью сервера; признак поднимает аппаратное
-    /// устройство и не поднимает программное.
+    /// A device calling itself attested remains hardware-bound until
+    /// the flag arrives under the server's signature; that flag raises a hardware-bound
+    /// device, never a software-bound one.
     #[test]
     fn only_the_lease_declares_attestation() {
         let policy = Policy { min_binding: Binding::HardwareAttested, ..viewable() };

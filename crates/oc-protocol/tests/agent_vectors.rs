@@ -13,20 +13,20 @@
     clippy::disallowed_types
 )]
 
-//! Замороженные векторы Agent Protocol: тела, транскрипты и подписи.
+//! Frozen Agent Protocol vectors: bodies, transcripts and signatures.
 //!
-//! Отдельным файлом, а не в модуле: здесь нужны настоящие подписывающие ключи,
-//! то есть `oc-crypto` целиком, — и здесь же читается файл вектора.
+//! A separate file rather than a module: these tests need real signing keys,
+//! meaning the complete `oc-crypto`, and read the vector file here too.
 //!
-//! # Что заморожено и почему ИМЕННО подпись, а не только тело
+//! # What is frozen, and why the SIGNATURE rather than only the body
 //!
-//! Тело само по себе ничего не значит: грант — это утверждение АВТОРА, а
-//! делегирование — утверждение ДВЕРИ. Заморозив только байты тела, мы оставили
-//! бы на свободе транскрипт, то есть то, ЧТО именно подписано; расхождение там
-//! молчаливо — подпись просто не сойдётся, и выглядеть это будет как «сервер
-//! сломался». Тот же довод, что у `lease.kat` и `control.kat`.
+//! The body means nothing by itself: a grant is an AUTHOR assertion,
+//! while delegation is a DOOR assertion. Freezing only body bytes would leave
+//! the transcript, exactly WHAT is signed, unfrozen; divergence there
+//! is silent: the signature simply fails to verify, making it look as though "the server
+//! broke". The same rationale as `lease.kat` and `control.kat`.
 //!
-//! Версии контейнера векторы не касаются: ни один их байт в `.cc` не лежит.
+//! These vectors do not affect the container version: none of their bytes reside in `.cc`.
 
 use oc_crypto::sign::{Ed25519Signer, Signer as _};
 use oc_protocol::access::Blob;
@@ -36,20 +36,20 @@ use oc_protocol::agent::{
     verify_grant_chain,
 };
 
-/// Ключ автора: тот, которым подписан заголовок контейнера.
+/// Author key: the one that signed the container header.
 fn author() -> Ed25519Signer {
     Ed25519Signer::from_seed(&[0xa1; 32])
 }
 
-/// Ключ ПОДПИСИ двери — им дверь заверяет делегирования.
+/// Door SIGNING key, used by the door to authenticate delegations.
 fn door() -> Ed25519Signer {
     Ed25519Signer::from_seed(&[0xd0; 32])
 }
 
-/// Согласовательный ключ двери. У X25519 отпечаток И ЕСТЬ ключ (K27).
+/// Door key-agreement public key. For X25519, the fingerprint IS the key (K27).
 const DOOR_PUBLIC: [u8; 32] = [0xd1; 32];
 
-/// Согласовательный ключ потомка, он же его отпечаток.
+/// Descendant key-agreement public key, also its fingerprint.
 const CHILD_PUBLIC: [u8; 32] = [0xc1; 32];
 
 fn child() -> Ed25519Signer {
@@ -110,7 +110,7 @@ fn delegation() -> Delegation {
     d
 }
 
-/// Грант сходится с замороженным вектором — ключ, тело и подпись.
+/// The grant matches the frozen vector: key, body and signature.
 #[test]
 fn the_grant_matches_its_frozen_vector() {
     let v = load_kat("agent_grant.kat");
@@ -135,7 +135,7 @@ fn the_grant_matches_its_frozen_vector() {
     assert_eq!(back, g);
 }
 
-/// Делегирование сходится с замороженным вектором.
+/// The delegation matches the frozen vector.
 #[test]
 fn the_delegation_matches_its_frozen_vector() {
     let v = load_kat("delegation.kat");
@@ -148,11 +148,11 @@ fn the_delegation_matches_its_frozen_vector() {
     assert_eq!(hex(&d.signature), v["delegation_signature"]);
 }
 
-/// Цепочка «грант + одно звено» проверяется по замороженным байтам.
+/// The "grant + one link" chain is verified from frozen bytes.
 ///
-/// Не пересказ модульных проб: здесь цепочка собирается из ТЕХ ЖЕ байтов,
-/// которые лежат в векторе, то есть проверяется ровно то, что вторая реализация
-/// увидит на проводе.
+/// Not a retelling of unit tests: the chain is assembled from the SAME bytes
+/// stored in the vector, testing exactly what a second implementation
+/// will see on the wire.
 #[test]
 fn the_frozen_chain_verifies_at_the_named_moment() {
     let grant_v = load_kat("agent_grant.kat");
@@ -201,10 +201,10 @@ fn load_kat(name: &str) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
-/// Выпустить векторы. Инструмент, не проверка.
+/// Generate vectors. A tool, not a test.
 ///
-/// Существует потому, что руками поправят ровно те строки, которые упали, и
-/// молча оставят рассогласованными остальные.
+/// Exists because manual edits would fix only the failing lines and
+/// silently leave the rest inconsistent.
 #[test]
 #[ignore = "инструмент перевыпуска векторов, а не проверка"]
 fn print_agent_vectors() {

@@ -1,601 +1,601 @@
-//! Документы активации: запрос устройства, выдача сервера, отказ.
+//! Activation documents: device request, server grant, refusal.
 //!
-//! # Почему документ отдельно от способа доставки
+//! # Why separate the document from its delivery mechanism
 //!
-//! Потому что это разные предметы, и путать их дорого. Документ — обязательство;
-//! сокет — перенос байтов. Лизинг уже устроен так (`подпись ‖ тело`) и потому
-//! переживает любую смену транспорта: он не знает, приехал ли по сети, файлом
-//! или на флешке.
+//! Because these are different things, and confusing them is costly. A document is a commitment;
+//! a socket carries bytes. The lease already works this way (`signature ‖ body`), so it
+//! survives any transport change: it does not know whether it arrived by network, file,
+//! or USB drive.
 //!
-//! Сделай мы наоборот — сперва провод, потом документ, — форма запроса оказалась
-//! бы задана тем, как её удобно послать, а менять её пришлось бы вместе с
-//! транспортом. Решение записано в `docs/protocol.md` §9.
+//! Had we done the reverse — wire first, document second — the request's shape would
+//! have been dictated by convenient transmission, and would have to change with
+//! the transport. The decision is recorded in `docs/protocol.md` §9.
 //!
-//! # Что эти документы НЕ несут
+//! # What these documents do NOT carry
 //!
-//! **Подписи устройства.** Её неоткуда взять: ключ устройства согласовательный,
-//! подписывать он не умеет, и в `cc-keystore` нет ни одной функции подписи.
-//! Доказательство владения строится запечатыванием — сервер шлёт вызов,
-//! устройство возвращает эхо (`docs/protocol.md` §9.4) — и это ОТДЕЛЬНЫЙ шаг,
-//! которого здесь ещё нет.
+//! **A device signature.** There is none to obtain: the device key is for agreement,
+//! cannot sign, and `cc-keystore` has no signing function.
+//! Proof of possession uses sealing: the server sends a challenge,
+//! the device returns an echo (`docs/protocol.md` §9.4) — a SEPARATE step,
+//! not yet present here.
 //!
-//! Отсюда прямое следствие, которое обязано быть сказано вслух: **запрос
-//! активации сегодня никем не аутентифицирован.** Пока его приносит человек,
-//! это неважно. В день, когда он приедет из сокета, отсутствие доказательства
-//! владения станет расходом чужих пределов по одному предъявлению чужого
-//! отпечатка — и потому по сети активация выставляется ТОЛЬКО вместе с §9.4.
+//! The direct consequence must be stated explicitly: **the activation
+//! request is currently authenticated by nobody.** While a human brings it,
+//! that does not matter. Once it arrives from a socket, lack of proof of
+//! possession lets someone consume another's limits merely by presenting their
+//! fingerprint — so network activation is exposed ONLY together with §9.4.
 //!
-//! # Правила разбора те же, что у остального формата
+//! # The same parsing rules as the rest of the format
 //!
-//! Теги строго возрастают (И-7), длина проверяется на точное соответствие типу
-//! (И-8), хвост после разобранного документа — отказ. Это разбор враждебного
-//! ввода: сообщение приходит от чужой стороны, и снисходительность к нему
-//! означает, что стороны понимают раскладку по-разному.
+//! Tags strictly increase (I-7), lengths must exactly match their types
+//! (I-8), and trailing bytes after the parsed document are rejected. This parses hostile
+//! input: messages come from another party, and leniency
+//! would mean the parties interpret the layout differently.
 //!
-//! # Конверт несёт и документы ЗАПРОСА ДОСТУПА
+//! # The envelope also carries ACCESS REQUEST documents
 //!
-//! Виды сообщений живут здесь ВСЕ — и активации, и запроса доступа
-//! (`crate::access`). Сокет один, и реестр видов на нём обязан быть один: заведи
-//! мы второй конверт, один и тот же первый байт означал бы разное в зависимости
-//! от того, чьим разбором его прочли, — а выбирает разбор именно этот байт, то
-//! есть решение принимается раньше, чем становится известно, чей документ
-//! приехал.
+//! ALL message kinds live here — both activation and access requests
+//! (`crate::access`). One socket must have one kind registry: if we introduced
+//! another envelope, the same first byte would mean different things depending
+//! on whose parser read it — yet this very byte chooses the parser, meaning
+//! the decision precedes knowing whose document
+//! has arrived.
 //!
-//! Сами документы запроса доступа остаются в `crate::access`: конверт знает их
-//! имена, но не их раскладку.
+//! Access-request documents themselves remain in `crate::access`: the envelope knows
+//! their names, not their layouts.
 
 use oc_format::tlv::{TlvReader, TlvWriter};
 use oc_format::{FormatError, MAX_HEADER_LEN};
 
-/// Теги запроса активации.
+/// Activation-request tags.
 pub mod req_tag {
-    /// Какой файл открывают. 16 байт.
+    /// The file being opened. 16 bytes.
     pub const FILE_ID: u16 = 1;
-    /// Хеш политики, посчитанный устройством по подписанным байтам. 32 байта.
+    /// Policy hash computed by the device from signed bytes. 32 bytes.
     ///
-    /// Сервер сверяет его со своим, записанным при регистрации. Подменённый
-    /// здесь хеш не даёт ничего: он не совпадёт, и активация будет отклонена.
+    /// The server compares it with its own, recorded at registration. Substituting
+    /// the hash gains nothing: it will not match, and activation will be rejected.
     pub const POLICY_HASH: u16 = 2;
-    /// Отпечаток устройства. 32 байта.
+    /// Device fingerprint. 32 bytes.
     pub const DEVICE_FPR: u16 = 3;
-    /// Механизм согласования ключа устройства. `u8`.
+    /// Device-key agreement mechanism. `u8`.
     pub const DEVICE_KEM: u16 = 4;
-    /// Публичный ключ устройства: 32 байта у X25519, 65 у P-256.
+    /// Device public key: 32 bytes for X25519, 65 for P-256.
     ///
-    /// Длина переменная и проверяется ПО механизму, а не «как пришло»: у
-    /// формата это правило уже есть для слотов (§2.0), и повторять его иначе
-    /// значило бы завести второе место, где длина ключа решается.
+    /// Variable length, checked BY mechanism rather than accepted as supplied: the
+    /// format already applies this rule to slots (§2.0); repeating it differently
+    /// would introduce a second place that determines key length.
     pub const DEVICE_PUBLIC: u16 = 5;
-    /// Слот сервера, вырезанный устройством из контейнера.
+    /// Server slot extracted by the device from the container.
     ///
-    /// Внутри — `u32le(len) ‖ enc ‖ nonce(24) ‖ u32le(len) ‖ ct`. Отдельным
-    /// документом слот не оформляется: он часть заголовка, а не самостоятельная
-    /// величина, и переизобретать его раскладку здесь незачем.
+    /// Contents: `u32le(len) ‖ enc ‖ nonce(24) ‖ u32le(len) ‖ ct`. The slot is not
+    /// a separate document: it is part of the header, not an independent
+    /// quantity, so its layout need not be reinvented here.
     pub const SERVER_SLOT: u16 = 6;
-    /// Сколько секунд лизинга просит устройство. `i64le`.
+    /// Lease duration requested by the device, in seconds. `i64le`.
     ///
-    /// Просьба, а не требование: сервер ужесточает её политикой автора и вправе
-    /// выдать меньше.
+    /// A request, not a demand: the server tightens it using the author's policy and may
+    /// issue less.
     pub const LEASE_SECONDS: u16 = 7;
-    /// Показания аппаратных часов: `u32le` reset_count ‖ `u64le` clock_ms ‖
-    /// `i64le` момент снятия. Необязательное — у машины без TPM его нет.
+    /// Hardware clock reading: `u32le` reset_count ‖ `u64le` clock_ms ‖
+    /// `i64le` sampling time. Optional — absent on a machine without a TPM.
     pub const DEVICE_CLOCK: u16 = 8;
-    /// Тождество операции (K28, `docs/protocol.md` §9.10). 32 байта.
-    /// Необязательное — запрос без него исполняется по-прежнему.
+    /// Operation identity (K28, `docs/protocol.md` §9.10). 32 bytes.
+    /// Optional — requests without it execute as before.
     ///
-    /// # Почему критичное (≤ `0x7FFF`)
+    /// # Why critical (≤ `0x7FFF`)
     ///
-    /// Потому что поле меняет СМЫСЛ повтора: с ним сервер обязан вернуть
-    /// сохранённый исход, а не исполнить заново. Сервер, который поля не знает и
-    /// молча его пропустил бы, исполнил бы повтор второй выдачей — ровно то, от
-    /// чего клиент поле и прислал. Критичное незнакомое поле — отказ разбора,
-    /// то есть прежний сервер НЕ исполняет запрос вовсе, и клиент узнаёт об
-    /// этом отказом без эха ([`super::grant_tag::OPERATION_ID`]).
+    /// Because the field changes the MEANING of retry: the server must return
+    /// the stored outcome rather than execute again. An unaware server that
+    /// silently skipped the field would retry by issuing a second grant — exactly
+    /// what the client sent the field to prevent. An unknown critical field fails parsing,
+    /// so an older server does NOT execute the request at all; the client learns
+    /// this through refusal without echo ([`super::grant_tag::OPERATION_ID`]).
     ///
-    /// Разбор документов активации необязательного диапазона и так не знает
-    /// (незнакомый тег — отказ при любом номере), и выбор записан не ради
-    /// поведения разборщика этой сборки, а ради смысла номера в реестре: поле,
-    /// без понимания которого запрос исполнять нельзя.
+    /// Activation-document parsing does not recognize the optional range anyway
+    /// (any unknown tag is rejected); this choice records not this build's parser
+    /// behavior but the number's meaning in the registry: a field without whose
+    /// meaning a request must not execute.
     pub const OPERATION_ID: u16 = 9;
 }
 
-/// Теги выдачи.
+/// Grant tags.
 pub mod grant_tag {
-    /// Доля сервера, перезапечатанная на ключ устройства.
+    /// Server share resealed to the device key.
     pub const SHARE: u16 = 1;
-    /// Подписанный лизинг: `подпись(64) ‖ тело`.
+    /// Signed lease: `signature(64) ‖ body`.
     pub const LEASE: u16 = 2;
-    /// Эхо тождества операции: сервер ЗАПИСАЛ операцию под этим тождеством той
-    /// же фиксацией, что и её исход. 32 байта.
+    /// Operation-identity echo: the server RECORDED this operation under this identity
+    /// in the same commit as its outcome. 32 bytes.
     ///
-    /// Приходит только на запрос, который нёс [`super::req_tag::OPERATION_ID`]:
-    /// прежний клиент поля не присылает и эха не получает, а его разборщик,
-    /// незнакомый с тегом, иначе отверг бы ответ.
+    /// Only returned for requests carrying [`super::req_tag::OPERATION_ID`]:
+    /// an old client sends no field and receives no echo; its parser, unaware
+    /// of the tag, would otherwise reject the response.
     ///
-    /// Эхо — сигнал ПОДДЕРЖКИ, а не доказательство: ответ провода не заверен
-    /// (§9.6), и посредник волен его вырезать или подставить. Вырезанное эхо
-    /// ведёт клиента в прежний путь без повторов — безопасное направление.
+    /// The echo signals SUPPORT, not proof: wire responses are unauthenticated
+    /// (§9.6), and an intermediary may remove or substitute it. A removed echo
+    /// sends the client down the old, non-retrying path — the safe direction.
     pub const OPERATION_ID: u16 = 3;
 }
 
-/// Теги отказа.
+/// Refusal tags.
 pub mod deny_tag {
-    /// Текст отказа.
+    /// Refusal text.
     pub const TEXT: u16 = 1;
-    /// Эхо тождества операции — как у выдачи ([`super::grant_tag::OPERATION_ID`]).
+    /// Operation-identity echo — as for grants ([`super::grant_tag::OPERATION_ID`]).
     ///
-    /// Отказ с эхом ОКОНЧАТЕЛЕН для этого тождества: он записан и на повтор
-    /// вернётся тем же. Отказ без эха на запрос с тождеством означает, что
-    /// операция под ним НЕ исполнялась — сервер тождества не знает или не принял.
+    /// Refusal with echo is FINAL for this identity: recorded and returned unchanged
+    /// on retry. Refusal without echo to an identified request means the operation
+    /// did NOT execute under it — the server does not know or did not accept the identity.
     pub const OPERATION_ID: u16 = 2;
 }
 
-/// Теги приветствия: устройство называет себя до всякой работы.
+/// Greeting tags: the device identifies itself before any work.
 pub mod hello_tag {
-    /// Отпечаток устройства. 32 байта.
+    /// Device fingerprint. 32 bytes.
     pub const DEVICE_FPR: u16 = 1;
-    /// Ключ согласования устройства (X25519). 32 байта.
+    /// Device agreement key (X25519). 32 bytes.
     pub const DEVICE_PUBLIC: u16 = 2;
-    /// Аппаратный ключ (P-256), если он есть. 65 байт SEC1.
+    /// Hardware key (P-256), if present. 65 SEC1 bytes.
     pub const DEVICE_TPM: u16 = 3;
-    /// Механизм гибридного ключа устройства: `u8`, номер из реестра `kem_id`.
+    /// Hybrid device-key mechanism: `u8`, number from the `kem_id` registry.
     ///
-    /// Идёт ПАРОЙ с [`DEVICE_HYBRID_PUBLIC`]: одно без другого бессмысленно, и
-    /// разбор требует обоих или ни одного. Длина ключа проверяется ПО этому
-    /// номеру, а не «как пришло» (И-8).
+    /// PAIRED with [`DEVICE_HYBRID_PUBLIC`]: either alone is meaningless;
+    /// parsing requires both or neither. Key length is checked BY this
+    /// number, not accepted as supplied (I-8).
     pub const DEVICE_HYBRID_KEM: u16 = 4;
-    /// Публичный гибридный ключ устройства. Длина — функция механизма:
-    /// 1216 у X-Wing, 1249 у MLKEM768-P256.
+    /// Hybrid device public key. Length depends on mechanism:
+    /// 1216 for X-Wing, 1249 for MLKEM768-P256.
     pub const DEVICE_HYBRID_PUBLIC: u16 = 5;
 }
 
-/// Теги вызова: одна или две запечатанные половины секрета.
+/// Challenge tags: one or two sealed components of the secret.
 pub mod challenge_tag {
-    /// Половина, запечатанная на ключ согласования. Раскладка как у слота.
+    /// Component sealed to the agreement key. Same layout as a slot.
     pub const SOFTWARE: u16 = 1;
-    /// Половина, запечатанная на аппаратный ключ.
+    /// Component sealed to the hardware key.
     pub const HARDWARE: u16 = 2;
-    /// Половина, запечатанная на ГИБРИДНЫЙ ключ устройства.
+    /// Component sealed to the HYBRID device key.
     ///
-    /// Появляется тогда и только тогда, когда устройство предъявило гибридную
-    /// пару в приветствии. Раскладка та же, что у прочих половин, но `enc`
-    /// длиннее: 1120 байт у X-Wing, 1153 у MLKEM768-P256.
+    /// Present if and only if the device presented a hybrid
+    /// pair in its greeting. Same layout as other components, but `enc`
+    /// is longer: 1120 bytes for X-Wing, 1153 for MLKEM768-P256.
     pub const HYBRID: u16 = 3;
 }
 
-/// Теги эха.
+/// Echo tags.
 pub mod proof_tag {
-    /// Открытый секрет вызова, склеенный по половинам в том же порядке.
+    /// Recovered challenge secret, components concatenated in the same order.
     pub const ECHO: u16 = 1;
 }
 
-/// Приветствие: кем устройство себя называет.
+/// Greeting: who the device claims to be.
 ///
-/// Отдельным документом, а не полями запроса активации, потому что вызов
-/// выдаётся ДО того, как сервер узнаёт, о каком файле речь. Проверяется владение
-/// ключом, а не право на файл, и смешивать эти два вопроса нельзя: право без
-/// владения не значит ничего, а владение без права — законное состояние.
+/// A separate document rather than activation-request fields because the challenge
+/// is issued BEFORE the server learns which file is involved. This verifies key
+/// possession, not file rights; these questions must not be confused: rights without
+/// possession mean nothing, while possession without rights is legitimate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     pub device_fpr: [u8; 32],
     pub device_public: [u8; 32],
     pub device_tpm: Option<Vec<u8>>,
-    /// Гибридная пара устройства: механизм и публичный ключ.
+    /// The device's hybrid pair: mechanism and public key.
     ///
-    /// Предъявляется затем, чтобы устройство могло ДОКАЗАТЬ владение гибридным
-    /// ключом, а не только назвать его. Без доказательства посредник подавал бы
-    /// чужую согласованную тройку `(fpr, kem, public)`: доли не получил бы, но
-    /// израсходовал бы чужие пределы и подписал журнал на жертву (Н-1).
+    /// Presented so the device can PROVE possession of the hybrid
+    /// key rather than merely name it. Without proof, an intermediary could submit
+    /// another party's consistent `(fpr, kem, public)` triple: it would obtain no share,
+    /// but consume the victim's limits and attribute journal entries to them (N-1).
     ///
-    /// Классическая пара остаётся обязательной и при гибридной: `device_fpr`
-    /// равен `device_public` и входит в `info` вызова, в лизинг и в журнал, а
-    /// формат лизинга заморожен. Гибрид — ДОПОЛНИТЕЛЬНАЯ доказываемая
-    /// идентичность, а не замена классической.
+    /// The classical pair remains mandatory even with a hybrid: `device_fpr`
+    /// equals `device_public` and enters challenge `info`, the lease, and the journal;
+    /// the lease format is frozen. The hybrid is an ADDITIONAL provable
+    /// identity, not a replacement for the classical one.
     pub device_hybrid: Option<(u8, Vec<u8>)>,
 }
 
-/// Вызов: половины секрета, запечатанные на предъявленные ключи.
+/// Challenge: secret components sealed to the presented keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Challenge {
     pub software: SlotBlob,
     pub hardware: Option<SlotBlob>,
-    /// Половина, запечатанная на гибридный ключ.
+    /// Component sealed to the hybrid key.
     ///
-    /// Есть тогда и только тогда, когда устройство предъявило гибридную пару.
-    /// Открыть обязано ВСЕ половины: эхо считается по склеенному секрету, и
-    /// доказательство владения гибридом неотделимо от доказательства владения
-    /// классикой — открыв одну, устройство не пройдёт.
+    /// Present if and only if the device presented a hybrid pair.
+    /// It must open ALL components: echo uses the concatenated secret, and
+    /// proof of hybrid possession is inseparable from proof of classical
+    /// possession — opening one alone cannot pass.
     pub hybrid: Option<SlotBlob>,
 }
 
-/// Эхо K23: ровно 32 байта HMAC.
-/// Аппаратная половина входит в ключ HMAC, поэтому даже вызов из 64 байт
-/// даёт эхо из 32; прежний сырой вызов никогда не принимается как доказательство.
+/// K23 echo: exactly 32 HMAC bytes.
+/// The hardware component enters the HMAC key, so even a 64-byte challenge
+/// yields a 32-byte echo; the old raw challenge is never accepted as proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proof {
     pub echo: Vec<u8>,
 }
 
-/// Сообщение устройства серверу.
+/// Device-to-server message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     Hello(Hello),
     Prove(Proof),
     Activate(Box<ActivateReq>),
-    /// Просьба о доступе: получатель, которому долю не выдавали, просит её.
+    /// Access request: a recipient not issued a share asks for it.
     Ask(Box<crate::access::AskAccess>),
-    /// Автор спрашивает, кто ждёт решения по его файлу.
+    /// The author asks who awaits a decision for their file.
     ///
-    /// Личность спрашивающего здесь не проверяется, и проверять её нечем: ключ
-    /// автора живёт в заголовке, а не у устройства. Очередь и так открыта —
-    /// отпечатки просителей лежат в ней без всякой тайны, а долю выдаёт
-    /// подпись, а не просмотр списка.
+    /// The asker's identity is not verified here, and there is no means to do so: the
+    /// author key lives in the header, not with the device. The queue is public anyway —
+    /// requester fingerprints in it are not secret; a share is issued through
+    /// a signature, not viewing the list.
     Requests { file_id: [u8; 16] },
-    /// Забрать решение автора, если оно уже принято.
+    /// Collect the author's decision, if already made.
     Collect(CollectReq),
-    /// Подписка на события файлов: сервер держит соединение и сообщает сам.
+    /// File-event subscription: server keeps the connection and announces events itself.
     ///
-    /// Подписка — ХВОСТ ЖУРНАЛА: `since` — номер первой записи, которой
-    /// подписчик ещё не видел (ноль — с самого начала), и сервер сначала
-    /// досылает всё от неё, а потом живое. Так обрыв ничего не теряет по построению:
-    /// переподписался с последним номером — получил пропущенное. Файлов до
-    /// [`MAX_WATCH_FILES`] за одну подписку: одно соединение на клиента, а не
-    /// на файл.
+    /// A subscription TAILS THE JOURNAL: `since` is the first record number
+    /// the subscriber has not seen (zero means from the beginning); the server first
+    /// sends everything from it, then live events. Disconnection thus loses nothing:
+    /// resubscribe with the last number and receive what was missed. Up to
+    /// [`MAX_WATCH_FILES`] files per subscription: one connection per client,
+    /// not per file.
     ///
-    /// Доказательства владения не требует, как и `Requests`: в извещениях нет
-    /// ничего, чего не видно в открытой очереди и журнале, а решение
-    /// по-прежнему забирается через `Collect` с доказательством. Разговор этим
-    /// запросом НЕ кончается: извещения идут, пока жива труба или пока сервер
-    /// не закроет подписку по сроку.
+    /// Requires no proof of possession, like `Requests`: notifications reveal
+    /// nothing absent from the public queue and journal; decisions
+    /// are still retrieved through `Collect` with proof. This request does NOT end
+    /// the conversation: notifications continue while the pipe lives or until the server
+    /// closes the subscription on expiry.
     Watch { files: Vec<[u8; 16]>, since: u64 },
-    /// Подписка по области «все файлы автора» (`docs/protocol.md` §9.9, B5).
+    /// Subscription to “all the author's files” (`docs/protocol.md` §9.9, B5).
     ///
-    /// В отличие от [`Request::Watch`], права здесь не выводятся из знания
-    /// номеров: `proof` — подписанное распоряжение вида `WatchAuthor`,
-    /// адресованное этому серверу и свежее. Область сервер вычисляет сам — из
-    /// файлов, за которыми этот ключ записан автором, — на каждом шаге, так что
-    /// новый файл автора приходит без переподписки.
+    /// Unlike [`Request::Watch`], authority does not derive from knowing
+    /// identifiers: `proof` is a fresh signed `WatchAuthor` order
+    /// addressed to this server. The server computes scope itself from
+    /// files recording this key as author, at every step, so new author files
+    /// arrive without resubscription.
     WatchAuthor { since: u64, proof: Vec<u8> },
-    /// Отзывная по файлу: подписанный сервером документ «файл отозван».
+    /// File revocation notice: server-signed “file revoked” document.
     ///
-    /// Без доказательства владения: тайны в ней нет — это правда о файле,
-    /// подписанная ключом сервера; распространить её значит распространить
-    /// правду. Клиент принимает её и по проводу, и файлом рядом с контейнером
+    /// No proof of possession: no secret here — truth about a file,
+    /// signed by the server; distributing it distributes
+    /// truth. Clients accept it over the wire or as a file beside the container
     /// (`oc_protocol::revocation`).
     Revocation { file_id: [u8; 16] },
-    /// Продление: тот же запрос, что активация, но для устройства, которое
-    /// уже активировано, — и без записи в журнал и без расхода предела выдач.
+    /// Renewal: same request as activation, for an already activated
+    /// device, without journal writes or grant-limit consumption.
     ///
-    /// Тело то же, что у [`Request::Activate`], и это не лень: доля
-    /// перезапечатывается на устройство производной с номером лизинга
-    /// (`u64be(seq)` в K11), поэтому новый номер требует новой доли, а её
-    /// сервер получает только из слота `Server` — то есть продлению нужны
-    /// ровно те же поля. Своим видом продление названо ради ЖУРНАЛА: сервер
-    /// обязан отличать «выдал впервые» от «продлил открытому документу»,
-    /// иначе журнал автора наполнялся бы двенадцатью записями в час на каждое
-    /// открытое окно, а предел выдач кончался бы от одного читателя.
-    /// Сервер отвечает тем же `Granted`, что и на активацию.
+    /// Same body as [`Request::Activate`], for a reason: the share
+    /// is resealed to the device with a derivation containing the lease number
+    /// (`u64be(seq)` in K11); a new number therefore requires a new share,
+    /// obtained by the server only from the `Server` slot — renewal needs
+    /// exactly the same fields. Its distinct kind serves the JOURNAL: the server
+    /// must distinguish “first issuance” from “renewal for an open document,”
+    /// or the author's journal would gain twelve entries per hour for each
+    /// open window, and one reader would exhaust the grant limit.
+    /// The server returns the same `Granted` as for activation.
     Renew(Box<ActivateReq>),
-    /// Регистрация файла распоряжением автора.
+    /// File registration by author order.
     ///
-    /// `header` — начало контейнера до конца подписи автора включительно:
-    /// магия, заголовок, подпись. Содержимого нет и быть не должно. Сервер
-    /// проверяет подпись заголовка, берёт из него ключ автора и им проверяет
-    /// `order` (`oc_protocol::order`) — так ключ автора сервер узнаёт из
-    /// документа, который получатель изменить не может, а не со слов
-    /// просителя. Ответ — `Accepted`.
+    /// `header` is the container prefix through the author's signature:
+    /// magic, header, signature. No content is present or permitted. The server
+    /// verifies the header signature, takes its author key, and uses it to verify
+    /// `order` (`oc_protocol::order`) — learning the author's key from
+    /// a document the recipient cannot alter, rather than from
+    /// the requester's word. Response: `Accepted`.
     Register { header: Vec<u8>, order: Vec<u8> },
-    /// Отзыв файла распоряжением автора; проверяется ключом, запомненным при
-    /// регистрации. Ответ — `Accepted`.
+    /// File revocation by author order; verified with the key remembered at
+    /// registration. Response: `Accepted`.
     Revoke { order: Vec<u8> },
-    /// Решение автора целиком, вместе с подписью.
+    /// The complete author decision, including signature.
     ///
-    /// Непрозрачные байты, а не разобранная [`crate::access::Decision`], и это
-    /// решение: подпись покрывает БАЙТЫ, и всякая пересборка документа по пути
-    /// заводит второе место, где эти байты складываются. Сервер обязан проверить
-    /// подпись ровно над тем, что приехало.
+    /// Opaque bytes rather than a parsed [`crate::access::Decision`],
+    /// deliberately: signatures cover BYTES, and reconstructing the document en route
+    /// introduces a second place assembling them. The server must verify
+    /// the signature over exactly what arrived.
     Decide(Vec<u8>),
-    /// Прочее распоряжение автора: наследник, признак жизни. Ответ — `Accepted`.
+    /// Other author order: heir, proof of life. Response: `Accepted`.
     ///
-    /// Байты те же и по той же причине, что у решения: подпись покрывает тело, и
-    /// пересобирать его по пути нельзя.
+    /// Bytes, for the same reason as decisions: the signature covers the body,
+    /// which must not be reconstructed in transit.
     Order(Vec<u8>),
-    /// Подпись соавтора под предложением: тело то же, подпись своя.
+    /// Co-author signature on a proposal: same body, their own signature.
     ///
-    /// Ключ подписавшего едет рядом, а не выводится перебором состава: перебор
-    /// означал бы, что число проверок подписи зависит от размера состава, и
-    /// молчаливо давал бы посреднику способ нагрузить сервер шестнадцатью
-    /// проверками на одно сообщение.
+    /// The signer's key travels alongside, not inferred by trying the roster:
+    /// enumeration would make signature-check count depend on roster size,
+    /// silently giving an intermediary a way to burden the server with sixteen
+    /// checks per message.
     Endorse { signer: [u8; 32], order: Vec<u8> },
-    /// Что сейчас стоит на файле. Ответ — [`Response::Standing`].
+    /// The file's current standing. Response: [`Response::Standing`].
     ///
-    /// Доказательства владения не требует, как и очередь просьб: всё, что там
-    /// есть, автор сообщил серверу сам, а получателю видно из очереди и журнала.
+    /// No proof of possession, like the request queue: the author supplied all of
+    /// this to the server, and the recipient can see it in the queue and journal.
     Standing { file_id: [u8; 16] },
-    /// Аттестация, шаг 1: устройство просит вызов (§9.11.1). Без тела.
+    /// Attestation, step 1: device requests a challenge (§9.11.1). No body.
     AttestOpen,
-    /// Аттестация, шаг 2: доказательство о ключе устройства целиком.
+    /// Attestation, step 2: complete evidence about the device key.
     AttestEvidence(Box<crate::attestation::Evidence>),
-    /// Аттестация, шаг 3: секрет, открытый активацией учётных данных.
+    /// Attestation, step 3: secret recovered through credential activation.
     AttestSecret([u8; crate::attestation::SECRET_LEN]),
-    /// Заявка о редакции (`oc_format::edit::EditionClaimDoc`, `docs/protocol.md`
-    /// §9.12). Непрозрачные байты по той же причине, что у решения: подпись
-    /// покрывает тело. Ответ — `Accepted` или отказ.
+    /// Edition claim (`oc_format::edit::EditionClaimDoc`, `docs/protocol.md`
+    /// §9.12). Opaque bytes for the same reason as decisions: the signature
+    /// covers the body. Response: `Accepted` or refusal.
     RegisterEdition(Vec<u8>),
-    /// Вид журнала для свидетеля (`crate::witness`, `docs/protocol.md`
-    /// §9.13): голова длины `upto` (ноль — текущая) и доказательство, что она
-    /// продолжает голову длины `since` (ноль — без доказательства). Ответ —
-    /// [`Response::LogView`] или отказ. Рукопожатия не требует: голова и
-    /// доказательство публичны.
+    /// Journal view for a witness (`crate::witness`, `docs/protocol.md`
+    /// §9.13): head at length `upto` (zero means current), with proof that it
+    /// extends the head at length `since` (zero means no proof). Response:
+    /// [`Response::LogView`] or refusal. No handshake: head and
+    /// proof are public.
     JournalView { since: u64, upto: u64 },
-    /// То же для журнала каталога ключей (D4, §9.14).
+    /// The same for the key-directory log (D4, §9.14).
     DirectoryView { since: u64, upto: u64 },
-    /// Запись каталога об участнике организации — в голове длины `size`
-    /// (ноль — текущей). Ответ — [`Response::DirectoryEntry`] или отказ
-    /// (записи нет — словом сервера, §9.14).
+    /// Directory record for an organization member, at head length `size`
+    /// (zero means current). Response: [`Response::DirectoryEntry`] or refusal
+    /// (record absence is the server's assertion, §9.14).
     DirectoryLookup { tenant: String, name: String, size: u64 },
-    /// Страница журнала каталога для монитора: `count` записей с номера
-    /// `from`. Ответ — [`Response::DirectoryRecords`].
+    /// Directory-log page for a monitor: `count` records starting at
+    /// `from`. Response: [`Response::DirectoryRecords`].
     DirectoryRecords { from: u64, count: u32 },
-    /// Намерение управляющих (`crate::control`, §9.16). Непрозрачные байты по
-    /// той же причине, что у решения автора: подписи покрывают тело, и
-    /// пересборка здесь их бы испортила. Ответ — [`Response::Receipt`] или
-    /// отказ.
+    /// Controllers' intent (`crate::control`, §9.16). Opaque bytes for
+    /// the same reason as author decisions: signatures cover the body,
+    /// and reconstruction here would break them. Response: [`Response::Receipt`] or
+    /// refusal.
     Control(Vec<u8>),
-    /// «Покажи привязку». Ответ — [`Response::Binding`] или отказ, если
-    /// привязка не заведена.
+    /// “Show the binding.” Response: [`Response::Binding`] or refusal if
+    /// no binding has been initialized.
     Binding,
-    /// Снимок состояния реплике (`crate::replica::Push`). Ответ —
-    /// [`Response::ReplicaAck`] или отказ с причиной реплики.
+    /// State snapshot for a replica (`crate::replica::Push`). Response:
+    /// [`Response::ReplicaAck`] or refusal with the replica's reason.
     ReplicaPush(Vec<u8>),
-    /// Грант агента от автора (`crate::agent::AgentGrant`), непрозрачными
-    /// байтами. Ответ — [`Response::ChainStored`] или отказ.
+    /// Author-issued agent grant (`crate::agent::AgentGrant`), as opaque
+    /// bytes. Response: [`Response::ChainStored`] or refusal.
     ///
-    /// Байты, а не разобранный документ, по той же причине, что у решения
-    /// автора: подпись покрывает БАЙТЫ, и всякая пересборка по пути заводит
-    /// второе место, где они складываются. Вдобавок ключа проверки у конверта
-    /// нет — его сервер берёт из записи файла.
+    /// Bytes rather than a parsed document for the same reason as author
+    /// decisions: the signature covers BYTES, and reconstruction in transit
+    /// introduces a second assembly point. Moreover, the envelope has no
+    /// verification key — the server obtains it from the file record.
     ///
-    /// Доказательства владения не требует, как и `Decide`: документ подписан
-    /// автором, и подпись — всё, что важно. Ключ двери назван ВНУТРИ подписанного
-    /// тела, поэтому принёсший грант посредник не может подменить получателя.
+    /// No proof of possession, like `Decide`: the document bears the author's
+    /// signature, which is all that matters. The door key is INSIDE the signed
+    /// body, so an intermediary delivering the grant cannot substitute its recipient.
     PutGrant(Vec<u8>),
-    /// Делегирование от двери-родителя (`crate::agent::Delegation`), байтами.
-    /// Ответ — [`Response::ChainStored`] или отказ.
+    /// Parent-door delegation (`crate::agent::Delegation`), as bytes.
+    /// Response: [`Response::ChainStored`] or refusal.
     ///
-    /// Тоже без доказательства владения: звено подписано ключом `door_verify`
-    /// родителя, названным в гранте под подписью автора.
+    /// Also without proof of possession: the link is signed by the parent's `door_verify`
+    /// key, named in the grant under the author's signature.
     PutDelegation(Vec<u8>),
-    /// Забрать свою цепочку: грант и звенья до названного держателя.
+    /// Collect one's chain: grant and links through the named holder.
     ///
-    /// Только после рукопожатия, и названный отпечаток сервер сверяет с
-    /// ДОКАЗАННЫМ — та же сверка, что у [`Request::Collect`]. Без неё цепочку
-    /// чужой двери забирал бы кто угодно: отпечаток публичен, а в звеньях лежат
-    /// доли B, запечатанные на её ключ.
+    /// Only after a handshake; the server compares the named fingerprint with the
+    /// PROVED one — the same check as [`Request::Collect`]. Without it, anyone
+    /// could collect another door's chain: fingerprints are public, and links contain
+    /// shares B sealed to its key.
     ///
-    /// Ответ — [`Response::Chain`] или [`Response::NoChain`].
+    /// Response: [`Response::Chain`] or [`Response::NoChain`].
     FetchChain { holder_fpr: [u8; 32] },
-    /// Грант ДЕЙСТВИЙ от автора (`crate::action::ActionGrant`), байтами.
-    /// Ответ — [`Response::ChainStored`] или отказ.
+    /// Author-issued ACTION grant (`crate::action::ActionGrant`), as bytes.
+    /// Response: [`Response::ChainStored`] or refusal.
     ///
-    /// Доказательства владения не требует по той же причине, что [`Self::PutGrant`]:
-    /// документ подписан автором, а ключ проверки сервер берёт из записи
-    /// ФАЙЛОВОГО гранта, к которому этот привязан, — у действия нет контейнера
-    /// с заголовком, поэтому якорь тут грант, а не файл.
+    /// No proof of possession for the same reason as [`Self::PutGrant`]:
+    /// the document bears the author's signature; the server obtains its verification key
+    /// from the FILE grant to which it is bound — an action has no container
+    /// header, so its anchor is the grant, not the file.
     ///
-    /// Ответ тот же `ChainStored`, а не свой: грант действий — часть ТОЙ ЖЕ
-    /// цепочки (тот же `grant_id`, тот же держатель, то же погашение), и второй
-    /// вид ответа обещал бы вторую сущность, которой нет.
+    /// The same `ChainStored` response, not a separate one: the action grant belongs
+    /// to THE SAME chain (same `grant_id`, holder, redemption); a second
+    /// response kind would promise a second entity that does not exist.
     PutActionGrant(Vec<u8>),
-    /// Просьба двери об исполнении действия (`crate::action::ActionRequest`),
-    /// байтами. Ответ — [`Response::ActionGranted`], [`Response::ActionPending`]
-    /// или [`Response::ActionRefused`].
+    /// Door request to execute an action (`crate::action::ActionRequest`),
+    /// as bytes. Response: [`Response::ActionGranted`], [`Response::ActionPending`],
+    /// or [`Response::ActionRefused`].
     ///
-    /// Просьба НЕ ПОДПИСАНА: ключ двери согласовательный, подписывать им
-    /// нечем. Имя просителя сервер берёт не из документа — названный
-    /// `door_fpr` сверяется с ДОКАЗАННЫМ в этом разговоре отпечатком
-    /// константным временем, как у [`Self::Collect`].
+    /// The request is UNSIGNED: the door has an agreement key, incapable
+    /// of signing. The server does not take requester identity from the document:
+    /// the named `door_fpr` is compared with the fingerprint PROVED in this conversation
+    /// in constant time, as for [`Self::Collect`].
     ///
-    /// Байтами, а не разобранным документом, по той же причине, что у решения
-    /// автора: разбирает его тот, кто им пользуется, и второй разбор в конверте
-    /// разошёлся бы с первым.
+    /// Bytes rather than a parsed document for the same reason as author
+    /// decisions: the consumer parses it; a second parser in the envelope
+    /// would diverge from the first.
     RequestAction(Vec<u8>),
-    /// Отчёт двери об исполнении: номер лизы, исход и хеш того, что исполнено.
+    /// Door execution report: lease number, outcome, and hash of what was executed.
     ///
-    /// Без TLV: все три поля обязательны и фиксированной длины, необязательных
-    /// нет вовсе — TLV дал бы здесь ровно одну новую возможность, прислать их в
-    /// другом порядке (тот же довод, что у [`CollectReq`]).
+    /// No TLV: all three fields are required and fixed-length; no optional fields
+    /// exist — TLV would add exactly one possibility here: sending them
+    /// in another order (same argument as [`CollectReq`]).
     ///
-    /// Хеш, а не содержимое: серверу незачем видеть, ЧТО дверь исполнила, а
-    /// привязать отчёт к исполненному хешем достаточно. Ответ — `Accepted`.
+    /// A hash, not content: the server need not see WHAT the door executed;
+    /// a hash sufficiently binds the report to execution. Response: `Accepted`.
     ReportAction { seq: u64, ok: bool, digest: [u8; 32] },
-    /// Владелец спрашивает, какие просьбы по этому гранту ждут его «да».
+    /// The owner asks which requests under this grant await their “yes.”
     ///
-    /// Доказательства владения не требует, как и [`Self::Requests`], и по той
-    /// же причине: решает владелец ПОДПИСЬЮ ключа автора, которого у устройства
-    /// нет вовсе, а в очереди лежит то, что дверь и так сообщила серверу.
-    /// Ответ — [`Response::ActionQueue`].
+    /// No proof of possession, like [`Self::Requests`], for the same
+    /// reason: the owner decides by SIGNING with the author key, which the device
+    /// does not have; the queue contains what the door already told the server.
+    /// Response: [`Response::ActionQueue`].
     ActionRequests { grant_id: [u8; 16] },
-    /// Решение владельца по просьбе (`crate::action::ActionDecision`), байтами.
+    /// Owner decision on a request (`crate::action::ActionDecision`), as bytes.
     ///
-    /// Байты, а не разобранный документ, по той же причине, что у
-    /// [`Self::Decide`]: подпись покрывает БАЙТЫ, и всякая пересборка по пути
-    /// заводит второе место, где они складываются. Ответ — `Accepted`.
+    /// Bytes rather than a parsed document for the same reason as
+    /// [`Self::Decide`]: signatures cover BYTES, and reconstruction in transit
+    /// introduces a second assembly point. Response: `Accepted`.
     DecideAction(Vec<u8>),
 }
 
-/// Кто и по какому файлу забирает решение.
+/// Who is collecting a decision, and for which file.
 ///
-/// Без TLV: оба поля обязательны, оба фиксированной длины, необязательных нет
-/// вовсе — TLV дал бы здесь ровно одну новую возможность, прислать их в другом
-/// порядке. Конверт уже несёт тела без документа (см. [`Response::Proven`]).
+/// No TLV: both fields required, both fixed-length, no optional fields at
+/// all — TLV would add exactly one possibility: sending them in another
+/// order. The envelope already carries documentless bodies (see [`Response::Proven`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CollectReq {
     pub file_id: [u8; 16],
-    /// Отпечаток того, кто забирает.
+    /// Collector fingerprint.
     ///
-    /// Сверяется принимающим с доказательством владения, добытым в том же
-    /// разговоре, — само по себе поле не свидетельствует ни о чём.
+    /// The receiver compares it with proof of possession obtained in the same
+    /// conversation — the field alone proves nothing.
     pub device_fpr: [u8; 32],
 }
 
-/// Сообщение сервера устройству.
+/// Server-to-device message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response {
     Challenge(Challenge),
-    /// Эхо сошлось. Своего содержимого у ответа нет — важен сам факт.
+    /// Echo matched. No response content of its own — the fact itself matters.
     Proven,
     Granted(Grant),
     Denied(Deny),
-    /// Просьба принята и встала в очередь под этим номером.
+    /// Request accepted and queued under this number.
     Asked { seq: u64 },
-    /// Очередь запросов: подряд `u32le длина ‖ документ Pending`.
+    /// Request queue: consecutive `u32le length ‖ document Pending`.
     ///
-    /// Непрозрачным телом, а не разобранным списком: разбирает её тот, кто
-    /// показывает её человеку, и делать это дважды — в конверте и у него —
-    /// значит завести два разбора одного, которые разойдутся.
+    /// An opaque body, not a parsed list: the party presenting it to the
+    /// user parses it; doing so twice — in the envelope and there —
+    /// creates two parsers for the same data that will diverge.
     ///
-    /// Пустое тело законно и означает «никто не просит», в отличие от решения,
-    /// где пустота была бы обещанием без исполнения.
+    /// An empty body is valid and means “nobody is asking,” unlike a decision,
+    /// where emptiness would be a promise without fulfillment.
     Queue(Vec<u8>),
-    /// Решение автора, как он его подписал. Одобрение и отказ — оба здесь:
-    /// различает их поле внутри документа, а не вид сообщения.
+    /// Author decision as signed. Both approval and refusal appear here:
+    /// a field inside the document distinguishes them, not the message kind.
     Decided(Vec<u8>),
-    /// Решения ещё нет.
+    /// No decision yet.
     ///
-    /// ОТДЕЛЬНЫЙ вид, а не отказ, и разница здесь несущая: автор вправе молчать,
-    /// и «не ответил» — это не «отказал». Приди ожидание отказом, получатель
-    /// сообщил бы человеку, что ему запретили, там, где его просто не
-    /// рассмотрели.
+    /// A SEPARATE kind, not a refusal; the distinction is essential: the author may remain silent,
+    /// and “has not answered” is not “refused.” If waiting arrived as refusal, the recipient
+    /// would tell the user they had been denied when they simply
+    /// had not been considered yet.
     Waiting,
-    /// Решение автора принято сервером. Своего содержимого нет — важен сам факт.
+    /// Server accepted the author's decision. No content — the fact itself matters.
     Accepted,
-    /// Извещение по подписке. Одно соединение — много извещений.
+    /// Subscription notification. One connection, many notifications.
     Notice(Notice),
-    /// Отзывная: `подпись(64) ‖ тело`, как у лизинга.
+    /// Revocation notice: `signature(64) ‖ body`, as for a lease.
     Revocation(Vec<u8>),
-    /// Файл не отозван (или серверу неизвестен — различать незачем, см.
-    /// `Waiting`: оракул «есть ли такой файл» здесь не нужен никому).
+    /// File not revoked (or unknown to the server — no need to distinguish; see
+    /// `Waiting`: nobody needs a “does this file exist?” oracle here).
     NotRevoked,
-    /// Положение файла: документ `oc_protocol::standing`.
+    /// File standing: `oc_protocol::standing` document.
     Standing(Vec<u8>),
-    /// Предложение поддержано, но подписей ещё не хватает.
+    /// Proposal endorsed, but still lacking enough signatures.
     ///
-    /// Отдельно от `Accepted`, и разница несущая: `Accepted` означает «сделано»,
-    /// а это — «принято к рассмотрению». Слив их в один ответ, автор считал бы
-    /// файл отозванным, когда отзыв ещё ждёт второй подписи.
+    /// Separate from `Accepted`; the distinction is essential: `Accepted` means “done,”
+    /// this means “accepted for consideration.” Combining them would make an author believe
+    /// a file revoked while revocation still awaited a second signature.
     Endorsed { have: u8, need: u8 },
-    /// Вызов аттестации этого разговора.
+    /// Attestation challenge for this conversation.
     AttestNonce([u8; crate::attestation::SECRET_LEN]),
-    /// Учётные данные для удостоверителя: `TPM2B_ID_OBJECT ‖ TPM2B_ENCRYPTED_SECRET`.
+    /// Credentials for the attestation key: `TPM2B_ID_OBJECT ‖ TPM2B_ENCRYPTED_SECRET`.
     AttestCredential(Vec<u8>),
-    /// Аттестация признана; основание — [`crate::attestation::basis`].
+    /// Attestation accepted; basis: [`crate::attestation::basis`].
     Attested { basis: u8 },
-    /// Вид журнала: `crate::witness::View`, разобранный при приёме.
+    /// Journal view: `crate::witness::View`, parsed on receipt.
     LogView(Box<crate::witness::View>),
-    /// Запись каталога с доказательством включения (D4).
+    /// Directory record with inclusion proof (D4).
     DirectoryEntry(Box<crate::directory::Lookup>),
-    /// Страница записей каталога; каждая разобрана при приёме.
+    /// Directory-record page; every record parsed on receipt.
     DirectoryRecords(Vec<Vec<u8>>),
-    /// Квитанция управляющей операции (`crate::control::Receipt`).
+    /// Control-operation receipt (`crate::control::Receipt`).
     Receipt(Vec<u8>),
-    /// Привязка сервера (`crate::control::Binding`).
+    /// Authority binding (`crate::control::Binding`).
     Binding(Vec<u8>),
-    /// Подтверждение реплики (`crate::replica::Ack`).
+    /// Replica acknowledgment (`crate::replica::Ack`).
     ReplicaAck(Vec<u8>),
-    /// Грант или звено приняты и записаны. Своего содержимого нет — важен факт.
+    /// Grant or link accepted and recorded. No content — the fact matters.
     ChainStored,
-    /// Цепочка держателя и, необязательно, ключ подписи лиз этого сервера.
+    /// Holder's chain and, optionally, this server's lease-signing key.
     ///
-    /// `documents` — грант и звенья по порядку, каждый с `u32 le` длиной
-    /// впереди ([`join_chain`], [`split_chain`]). Непрозрачным телом, а не
-    /// разобранными документами, и по той же причине, что у очереди просьб:
-    /// разбирает их тот, кто ими пользуется, и второй разбор в конверте
-    /// разошёлся бы с первым. Подписи в звеньях покрывают байты — пересобрать
-    /// их по дороге нельзя.
+    /// `documents`: grant and links in order, each preceded by a `u32 le` length
+    /// ([`join_chain`], [`split_chain`]). Opaque body rather than
+    /// parsed documents, for the same reason as the request queue:
+    /// their consumer parses them; a second parser in the envelope
+    /// would diverge. Link signatures cover bytes — they must not be rebuilt
+    /// in transit.
     ///
-    /// `lease_verify_key` — `authority.lease_verify_key`, которым дверь
-    /// проверяет лизу ДЕЙСТВИЯ (`crate::action::ActionLease`, этап 2, §4.3).
-    /// Обычно дверь берёт его из заголовка любого файла гранта, где он
-    /// закреплён подписью автора; у двери, которой выданы ОДНИ ДЕЙСТВИЯ, файлов
-    /// нет вовсе, и взять его неоткуда. Необязательный он потому, что сервер
-    /// первого этапа его не слал, а читатель второго обязан читать и прежние
-    /// ответы; доверия он при этом не добавляет — сервер называет собственный
-    /// открытый ключ, и дверь, у которой есть хоть один файл гранта, обязана
-    /// сверить названное с заголовком.
+    /// `lease_verify_key` is `authority.lease_verify_key`, used by the door to
+    /// verify an ACTION lease (`crate::action::ActionLease`, stage 2, §4.3).
+    /// Usually the door obtains it from any grant file's header, where the author's
+    /// signature pins it; a door granted ONLY ACTIONS has no files,
+    /// so nowhere to obtain it. Optional because the stage-one server
+    /// did not send it, and a stage-two reader must read older
+    /// responses too; it adds no trust — the server names its own
+    /// public key, and a door with at least one grant file must
+    /// compare that value with the header.
     ///
-    /// `action_grant` — байты `crate::action::ActionGrant` этой цепочки, если он
-    /// есть. Подписан ключом автора и проверяется дверью самостоятельно; без
-    /// него дверь не знает своих правил и не может отказать ДО сети
-    /// (см. [`chain_tag::ACTION_GRANT`]).
+    /// `action_grant`: this chain's `crate::action::ActionGrant` bytes, if
+    /// present. Signed with the author key and independently verified by the door;
+    /// without it, the door does not know its rules and cannot deny BEFORE networking
+    /// (see [`chain_tag::ACTION_GRANT`]).
     Chain {
         documents: Vec<u8>,
         lease_verify_key: Option<[u8; 32]>,
         action_grant: Option<Vec<u8>>,
     },
-    /// Цепочки у этого держателя нет.
+    /// This holder has no chain.
     ///
-    /// ОТДЕЛЬНЫЙ вид, а не отказ, по тому же доводу, что у [`Response::Waiting`]:
-    /// «гранта тебе не выдавали» — законное положение вещей, а не провинность, и
-    /// дверь по нему сообщает человеку «грант не выдан», а не «сервер отказал».
+    /// A SEPARATE kind, not refusal, for the same reason as [`Response::Waiting`]:
+    /// “you were not issued a grant” is a legitimate state, not misconduct;
+    /// the door tells the user “no grant issued,” not “server refused.”
     NoChain,
-    /// Лиза действия целиком (`подпись(64) ‖ тело`): исполняй ЭТО.
+    /// Complete action lease (`signature(64) ‖ body`): execute THIS.
     ActionGranted(Vec<u8>),
-    /// Просьба встала в очередь на живое «да» владельца под этим номером.
+    /// Request queued under this number for the owner's live “yes.”
     ///
-    /// ОТДЕЛЬНЫЙ вид, а не отказ, и по тому же доводу, что у [`Self::Waiting`]:
-    /// владелец вправе ещё не ответить, и «не ответил» — это не «отказал».
-    /// Дверь по нему повторяет просьбу ТЕМ ЖЕ `nonce`, пока не получит лизу или
-    /// отказ; ждать ответа в самом вызове нельзя — вызов агента не должен
-    /// висеть минуты.
+    /// A SEPARATE kind, not refusal, for the same reason as [`Self::Waiting`]:
+    /// the owner may not have answered yet; “no answer” is not “refused.”
+    /// The door retries the request with THE SAME `nonce` until receiving a lease or
+    /// refusal; it must not wait for a response within the call itself — an agent call
+    /// must not hang for minutes.
     ActionPending { seq: u64 },
-    /// Действие не разрешено, и вот почему — словами.
+    /// Action not allowed, with a reason in words.
     ///
-    /// Отдельно от [`Self::Denied`], и разница несущая: `Denied` отвечает про
-    /// РАЗГОВОР (рукопожатия нет, имя чужое), а этот — про САМО действие, и
-    /// ответ этот окончателен: повторять просьбу с теми же аргументами
-    /// бессмысленно. Слив их в один вид, дверь не могла бы отличить «сервер
-    /// меня не слушает» от «этого тебе не разрешали».
+    /// Separate from [`Self::Denied`]; the distinction is essential: `Denied` concerns the
+    /// CONVERSATION (no handshake, wrong identity), this concerns the ACTION itself,
+    /// and is final: repeating the request with the same arguments
+    /// is pointless. Merging them would prevent the door from distinguishing
+    /// “server will not listen to me” from “you were not allowed to do this.”
     ///
-    /// Причина ОБЯЗАТЕЛЬНА и непуста: отказ без причины не даёт ни человеку
-    /// понять, что случилось, ни агенту — исправить просьбу. Пустую строку
-    /// отвергает сам кодек, то есть произвести её наша сторона не может.
+    /// Reason is REQUIRED and nonempty: without it, neither the user can understand
+    /// what happened nor the agent correct its request. The codec itself rejects an
+    /// empty string, so our side cannot produce one.
     ActionRefused { why: String },
-    /// Очередь просьб, ждущих «да» владельца: подряд `u32le длина ‖ документ
+    /// Queue of requests awaiting the owner's “yes”: consecutive `u32le length ‖ document
     /// PendingAction` (`crate::action::split_action_queue`).
     ///
-    /// Непрозрачным телом и пустое тело законно — всё по тем же доводам, что у
+    /// Opaque body, with empty body valid — the same reasoning as
     /// [`Self::Queue`].
     ActionQueue(Vec<u8>),
 }
 
-/// Что случилось с файлом, на который подписались.
+/// What happened to a subscribed file.
 ///
-/// Извещение — СИГНАЛ, а не содержимое: оно говорит «спросите», а спросить
-/// надо тем же запросом, что и без подписки. Так подписка ничего не добавляет
-/// к тому, что уже выдаётся, и не заводит второго пути к решению.
+/// A notification is a SIGNAL, not content: it says “ask,” using
+/// the same request as without a subscription. Thus subscribing adds nothing
+/// to what is already issued and introduces no second path to a decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
-    /// Сервер жив, событий нет. Шлётся, чтобы подписчик отличал тишину от
-    /// обрыва: без сердцебиения молчание и мёртвая труба выглядят одинаково.
+    /// Server alive, no events. Sent so the subscriber can distinguish silence from
+    /// disconnection: without heartbeats, silence and a dead pipe look alike.
     Heartbeat,
-    /// Запись журнала сервера по одному из файлов подписки.
+    /// Server journal entry for one of the subscribed files.
     ///
-    /// `seq` — номер записи; подписчик запоминает `seq + 1` и называет в
-    /// следующей подписке как `since`: номера идут с нуля. `event` — вид события по реестру
-    /// [`journal_event`]; незнакомый вид подписчик пропускает, а не отвергает:
-    /// журнал сервера вправе расти, и новое событие — не поломка провода.
+    /// `seq` is the record number; the subscriber remembers `seq + 1` and supplies it
+    /// as `since` in the next subscription: numbering starts at zero. `event` is the event kind in
+    /// [`journal_event`]; unknown kinds are skipped, not rejected:
+    /// the server journal may grow; a new event is not wire corruption.
     Event { seq: u64, event: u8, file_id: [u8; 16], device_fpr: Option<[u8; 32]> },
 }
 
-/// Сколько файлов принимает одна подписка.
+/// How many files one subscription accepts.
 pub const MAX_WATCH_FILES: usize = 32;
 
-/// Виды событий журнала сервера — те, что уезжают в извещениях.
+/// Server journal event kinds transmitted in notifications.
 ///
-/// Числа — те же, что у журнала (`cc_authority::journal::Event`), и это
-/// сторожится пробой там: реестр на проводе один, а журнал живёт в закрытом
-/// крейте, поэтому открытая половина названа здесь.
+/// Numbers match the journal (`cc_authority::journal::Event`), guarded
+/// by a test there: the wire registry is singular, while the journal lives in a private
+/// crate, so its public counterpart is defined here.
 pub mod journal_event {
     pub const FILE_REGISTERED: u8 = 1;
     pub const DEVICE_ACTIVATED: u8 = 2;
@@ -614,20 +614,20 @@ pub mod journal_event {
     pub const PROPOSAL_ENDORSED: u8 = 19;
     pub const FROZEN: u8 = 20;
     pub const THAWED: u8 = 21;
-    /// Agent Protocol, этап 1: грант выдан двери, звено выдано потомку, грант
-    /// погашен. Отпечаток в извещении — держателя, а не получателя файла.
+    /// Agent Protocol, stage 1: grant issued to door, link issued to descendant, grant
+    /// redeemed. Notification fingerprint belongs to the holder, not file recipient.
     pub const AGENT_GRANT_REGISTERED: u8 = 29;
     pub const DELEGATION_REGISTERED: u8 = 30;
     pub const AGENT_GRANT_REVOKED: u8 = 31;
-    /// Agent Protocol, этап 2: грант действий записан, дверь попросила
-    /// исполнения, лиза выдана, исполнение удалось, исполнение не удалось.
+    /// Agent Protocol, stage 2: action grant recorded, door requested
+    /// execution, lease issued, execution succeeded, execution failed.
     ///
-    /// Файла у этих записей НЕТ (нули, как у держаний атрибутов), и это не
-    /// упущение: у действия нет файла — предмет у него аргументы, а не
-    /// контейнер. Цена названа вслух: подписка идёт по файлам, и до подписчика
-    /// по файлу эти записи не доходят; владелец видит их видом журнала и
-    /// очередью `ActionRequests`, а грант восстанавливается по отпечатку
-    /// держателя — одна дверь держит ровно одну цепочку.
+    /// These records have NO file (zeros, as for attribute holdings), deliberately:
+    /// an action has no file — its subject is arguments,
+    /// not a container. The cost is explicit: subscriptions filter by file, so
+    /// file subscribers never receive these records; owners see them through journal views
+    /// and the `ActionRequests` queue; the grant is recovered using its holder's
+    /// fingerprint — one door holds exactly one chain.
     pub const ACTION_GRANT_REGISTERED: u8 = 32;
     pub const ACTION_REQUESTED: u8 = 33;
     pub const ACTION_LEASED: u8 = 34;
@@ -651,119 +651,119 @@ const KIND_ASKED: u8 = 11;
 const KIND_DECIDED: u8 = 12;
 const KIND_WAITING: u8 = 13;
 const KIND_ACCEPTED: u8 = 14;
-/// Автор спрашивает очередь по своему файлу.
+/// The author queries their file's queue.
 ///
-/// # Почему это в ОБЩЕМ реестре, а не у спрашивающего
+/// # Why in the COMMON registry, not the caller's
 ///
-/// Первая редакция стороны автора завела этот вид У СЕБЯ, в `cc-cli`, потому что
-/// общий конверт был ей недоступен. Собралось это без единого предупреждения, и
-/// каждая сторона проходила собственные тесты — а на живом прогоне сервер
-/// ответил «неизвестное критичное поле 15».
+/// The first author-side revision defined this kind LOCALLY in `cc-cli`, because
+/// the common envelope was unavailable. It built without warnings;
+/// both sides passed their own tests — yet in a live run the server
+/// answered “unknown critical field 15.”
 ///
-/// Реестр видов на одном сокете обязан быть ОДИН: разбор выбирается первым
-/// байтом раньше, чем известно, чей документ приехал. Поймано не тестом, а
-/// сквозным прогоном двух сторон — стороны проверяли себя, а расходились между
-/// собой.
+/// One socket must have ONE kind registry: the first byte chooses parsing
+/// before the document's owner is known. Caught by an end-to-end run, not a unit
+/// test — each side verified itself while diverging from the
+/// other.
 const KIND_REQUESTS: u8 = 15;
-/// Ответ на него: очередь как последовательность `u32le длина ‖ документ`.
+/// Its response: queue as consecutive `u32le length ‖ document`.
 const KIND_QUEUE: u8 = 16;
-/// Подписка на события файла. Заведена 2026-09-02 (Ф-17, пункт 10) вместо
-/// опроса: сервер сообщает сам, а не ждёт вопроса.
+/// File-event subscription. Introduced 2026-09-02 (F-17, item 10) instead of
+/// polling: the server announces events rather than waiting for a query.
 pub const KIND_WATCH: u8 = 17;
-/// Извещение по подписке. Тело: байт вида, у события — его раскладка.
+/// Subscription notification. Body: kind byte; events also carry their layout.
 const KIND_NOTICE: u8 = 18;
-/// Запрос отзывной и два ответа на него. Ф-18, ярус 3.
+/// Revocation-notice request and its two responses. F-18, tier 3.
 const KIND_REVOCATION_REQ: u8 = 19;
 const KIND_REVOCATION: u8 = 20;
 const KIND_NOT_REVOKED: u8 = 21;
-/// Продление лизинга открытого документа. Ф-18, продолжение яруса 1.
+/// Lease renewal for an open document. F-18, continuation of tier 1.
 pub const KIND_RENEW: u8 = 22;
-/// Распоряжения автора по проводу: регистрация и отзыв. 2026-09-03.
+/// Author orders over the wire: registration and revocation. 2026-09-03.
 const KIND_REGISTER: u8 = 23;
 const KIND_REVOKE: u8 = 24;
-/// Прочие распоряжения автора одним видом: наследник, признак жизни, а дальше и
-/// кворум.
+/// Other author orders under one kind: heir, proof of life, later also
+/// quorum.
 ///
-/// Одним, а не по виду на каждое, и это решение. Реестр видов сообщений общий на
-/// сокет и потому дорог: каждый номер здесь навсегда. Внутри же едет `order`,
-/// у которого СВОЙ реестр видов, растущий свободно, — и сервер всё равно обязан
-/// разобрать тело, чтобы узнать, что велено. Отдельный номер сообщения на каждое
-/// распоряжение добавил бы второй ответ на тот же вопрос, и однажды эти два
-/// ответа разошлись бы.
+/// One kind rather than one per order, deliberately. Message-kind numbers share
+/// a socket registry and are costly: each number is permanent. The enclosed `order`
+/// has its OWN freely growing kind registry, and the server must parse
+/// its body anyway to know the command. A separate message number for every
+/// order would provide a second answer to the same question; eventually the two
+/// would diverge.
 ///
-/// Регистрация и отзыв остаются при своих номерах: первой нужен заголовок рядом
-/// с распоряжением, второй отвечает эпохой — оба не «просто распоряжение».
+/// Registration and revocation keep their numbers: the first needs a header beside
+/// the order, the second returns an epoch — neither is “just an order.”
 const KIND_ORDER: u8 = 25;
-/// Подпись соавтора под предложением: тело распоряжения плюс ключ подписавшего.
+/// Co-author signature on a proposal: order body plus signer key.
 const KIND_ENDORSE: u8 = 26;
-/// Автор спрашивает, что сейчас стоит на его файле.
+/// The author queries their file's current standing.
 const KIND_STANDING_REQ: u8 = 27;
-/// Подписка по области «файлы автора» с доказательством владения ключом. B5.
+/// Subscription to the “author's files” scope with key-possession proof. B5.
 pub const KIND_WATCH_AUTHOR: u8 = 30;
-/// Ответ «предложение поддержано, ждём остальных».
+/// Response: “proposal endorsed, waiting for the others.”
 const KIND_ENDORSED: u8 = 28;
-/// Ответ на вопрос о положении: документ `oc_protocol::standing`.
+/// Standing-query response: `oc_protocol::standing` document.
 const KIND_STANDING: u8 = 29;
-/// Аттестация ключа устройства, три запроса и три ответа (B6b, §9.11.1).
+/// Device-key attestation: three requests and three responses (B6b, §9.11.1).
 ///
-/// Запросы идут под MAC сессии, как активация: вердикт аттестации меняет, что
-/// сервер выдаст этому разговору, и незаверенные байты выбирать его не должны.
+/// Requests use a session MAC, like activation: the attestation verdict changes
+/// what the server issues to this conversation; unauthenticated bytes must not choose it.
 pub const KIND_ATTEST_OPEN: u8 = 31;
 pub const KIND_ATTEST_EVIDENCE: u8 = 32;
 pub const KIND_ATTEST_SECRET: u8 = 33;
 const KIND_ATTEST_NONCE: u8 = 34;
 const KIND_ATTEST_CREDENTIAL: u8 = 35;
 const KIND_ATTESTED: u8 = 36;
-/// Заявка о редакции (D1, §9.12).
+/// Edition claim (D1, §9.12).
 pub const KIND_REGISTER_EDITION: u8 = 37;
-/// Вид журнала для свидетеля и ответ на него (D3, §9.13).
+/// Journal-view request for a witness and its response (D3, §9.13).
 pub const KIND_JOURNAL_VIEW_REQ: u8 = 38;
-/// Ответ-вид: общий для обоих журналов — какой именно, говорит подпись головы.
+/// View response shared by both logs — the head signature identifies which.
 const KIND_LOG_VIEW: u8 = 39;
-/// Каталог ключей (D4, §9.14): вид журнала, запись, страница записей.
+/// Key directory (D4, §9.14): log view, record, record page.
 pub const KIND_DIRECTORY_VIEW_REQ: u8 = 40;
 pub const KIND_DIRECTORY_LOOKUP_REQ: u8 = 41;
 const KIND_DIRECTORY_ENTRY: u8 = 42;
 pub const KIND_DIRECTORY_RECORDS_REQ: u8 = 43;
 const KIND_DIRECTORY_RECORDS: u8 = 44;
-/// Управление сервером (E2, B2, §9.16): намерение управляющих и квитанция,
-/// запрос привязки и она сама.
+/// Authority control (E2, B2, §9.16): controllers' intent and receipt,
+/// binding query and binding.
 ///
-/// Рукопожатия не требуют, и это не послабление: намерение подписано составом
-/// управляющих, привязка — ключом сервера, а сессионный MAC доказывает владение
-/// ключом УСТРОЙСТВА, которого у управляющего может не быть вовсе.
+/// No handshake, without weakening security: intent is signed by the controller
+/// roster, binding by the server key, while a session MAC proves possession
+/// of a DEVICE key, which a controller may not have at all.
 pub const KIND_CONTROL: u8 = 45;
 const KIND_RECEIPT: u8 = 46;
 pub const KIND_BINDING_REQ: u8 = 47;
 const KIND_BINDING: u8 = 48;
-/// Реплика состояния (E2, B4, §9.17): снимок и подтверждение.
+/// State replica (E2, B4, §9.17): snapshot and acknowledgment.
 pub const KIND_REPLICA_PUSH: u8 = 49;
 const KIND_REPLICA_ACK: u8 = 50;
-/// Agent Protocol, этап 1 (`docs/agent-protocol/stage-1-door.md` §3.4): грант
-/// агента, делегирование потомку и забор своей цепочки.
+/// Agent Protocol, stage 1 (`docs/agent-protocol/stage-1-door.md` §3.4): agent
+/// grant, descendant delegation, and collection of one's own chain.
 ///
-/// Три номера, а не один «документ Agent Protocol» с видом внутри: у гранта и
-/// звена РАЗНЫЕ ключи проверки (автор и родительская дверь), и выбирать ключ
-/// сервер обязан до разбора тела. Общий номер заставил бы разобрать тело, чтобы
-/// узнать, чем его проверять, — то есть разбирать незаверенные байты.
+/// Three numbers, not one “Agent Protocol document” with an embedded kind:
+/// grant and link have DIFFERENT verification keys (author and parent door),
+/// which the server must choose before body parsing. One number would require
+/// parsing the body to discover its verification key — parsing unauthenticated bytes.
 pub const KIND_PUT_GRANT: u8 = 51;
 pub const KIND_PUT_DELEGATION: u8 = 52;
 pub const KIND_FETCH_CHAIN: u8 = 53;
 const KIND_CHAIN_STORED: u8 = 54;
 const KIND_CHAIN: u8 = 55;
 const KIND_NO_CHAIN: u8 = 56;
-/// Agent Protocol, этап 2 (`docs/agent-protocol/stage-2-actions.md` §4.4):
-/// дверь действий.
+/// Agent Protocol, stage 2 (`docs/agent-protocol/stage-2-actions.md` §4.4):
+/// action door.
 ///
-/// Пять запросов и четыре ответа, и номера у каждого свои по тому же доводу,
-/// что у трёх номеров этапа 1: разбор выбирается первым байтом РАНЬШЕ, чем
-/// известно, чей документ приехал, и у грантa действий, просьбы, отчёта и
-/// решения владельца разные ключи проверки (автор, никакой, никакой, автор) и
-/// разные доказательства (никакого, доказанное имя двери, оно же, никакого).
-/// Общий номер заставил бы разобрать тело, чтобы узнать, чем его проверять.
+/// Five requests and four responses, each with its own number for the same reason
+/// as stage 1's three numbers: the first byte chooses parsing BEFORE the document's
+/// owner is known. Action grant, request, report, and owner
+/// decision have different verification keys (author, none, none, author) and
+/// proofs (none, proved door identity, same, none).
+/// One number would require parsing the body to discover how to verify it.
 ///
-/// `PutActionGrant` отвечает прежним `ChainStored` (54), `ReportAction` и
-/// `DecideAction` — прежним `Accepted` (14): новых обещаний у них нет.
+/// `PutActionGrant` returns the existing `ChainStored` (54); `ReportAction` and
+/// `DecideAction` return the existing `Accepted` (14): they make no new promises.
 pub const KIND_PUT_ACTION_GRANT: u8 = 57;
 pub const KIND_REQUEST_ACTION: u8 = 58;
 pub const KIND_REPORT_ACTION: u8 = 59;
@@ -774,55 +774,55 @@ const KIND_ACTION_PENDING: u8 = 63;
 const KIND_ACTION_REFUSED: u8 = 64;
 const KIND_ACTION_QUEUE: u8 = 65;
 
-/// Теги тела ответа [`Response::Chain`].
+/// Body tags for [`Response::Chain`].
 ///
-/// До этапа 2 тело было ГОЛЫМ потоком документов, без обрамления. Поток остался
-/// ровно тем же и лежит теперь под тегом [`chain_tag::DOCUMENTS`]: ключ подписи
-/// лиз приписать к потоку было некуда — у него нет ни тегов, ни места под
-/// необязательное поле, а дописанная в хвост запись неотличима от лишнего
-/// документа.
+/// Before stage 2, the body was a BARE document stream without framing. The stream
+/// remains identical, now under [`chain_tag::DOCUMENTS`]: there was nowhere to
+/// append the lease-signing key — no tags or optional-field
+/// space; a record appended to its tail is indistinguishable from an extra
+/// document.
 pub mod chain_tag {
-    /// Поток документов цепочки: подряд `u32le длина ‖ документ`. Критичный.
+    /// Chain document stream: consecutive `u32le length ‖ document`. Critical.
     pub const DOCUMENTS: u16 = 1;
-    /// Ключ подписи лиз сервера, 32 байта. НЕОБЯЗАТЕЛЬНЫЙ (тег > `0x7FFF`):
-    /// сервер первого этапа его не слал, и читатель обязан принимать ответ без
-    /// него (И-7).
+    /// Server lease-signing key, 32 bytes. OPTIONAL (tag > `0x7FFF`):
+    /// the stage-one server did not send it; readers must accept responses
+    /// without it (I-7).
     pub const LEASE_VERIFY_KEY: u16 = 0x8001;
-    /// Грант ДЕЙСТВИЙ этой цепочки целиком, подписанный автором.
-    /// НЕОБЯЗАТЕЛЬНЫЙ (тег > `0x7FFF`): гранта действий у цепочки может не быть
-    /// вовсе, а читатель первого этапа обязан принимать ответ без него (И-7).
+    /// This chain's complete author-signed ACTION grant.
+    /// OPTIONAL (tag > `0x7FFF`): the chain may have no action grant
+    /// at all; stage-one readers must accept responses without it (I-7).
     ///
-    /// # Зачем он двери
+    /// # Why the door needs it
     ///
-    /// Затем, что иначе дверь не знает, что ей разрешено, — и отказ «этого тебе
-    /// не выдавали» приходил бы только от сервера, то есть ПОСЛЕ разговора.
-    /// Спека этапа 2 (§5, шаг 2) требует обратного: аргументы проверяются
-    /// локально и отказ приходит словами ДО сети. Правила держателя живут в
-    /// подписанном гранте действий и в необязательном теге звеньев
-    /// (`agent::link_tag::ACTIONS`); звенья дверь получает потоком документов,
-    /// а корневой грант действий — отсюда.
+    /// Otherwise the door does not know its permissions; “you were not granted this”
+    /// would come only from the server, AFTER the conversation.
+    /// The stage 2 specification (§5, step 2) requires the reverse: validate arguments
+    /// locally and return refusal with words BEFORE networking. Holder rules reside
+    /// in the signed action grant and optional link tag
+    /// (`agent::link_tag::ACTIONS`); the door receives links in the document stream,
+    /// and the root action grant here.
     ///
-    /// Доверия это не добавляет: байты приходят подписанные ключом автора, и
-    /// дверь проверяет подпись сама (`agent::verify_grant_chain_with_actions`).
+    /// This adds no trust: bytes arrive signed by the author key, and the
+    /// door verifies them itself (`agent::verify_grant_chain_with_actions`).
     pub const ACTION_GRANT: u16 = 0x8002;
 }
 
-/// Сколько документов несёт цепочка: грант и звенья до держателя.
+/// Number of documents in a chain: grant and links through the holder.
 ///
-/// Считается от потолка глубины делегирования, а не назначается: два числа об
-/// одном разошлись бы при первой же смене потолка, и разошлись бы молча — ответ
-/// длиннее предела выглядел бы как порча провода.
+/// Derived from maximum delegation depth, not chosen independently: two numbers
+/// for the same limit would diverge on its first change, silently — an oversized
+/// response would look like wire corruption.
 pub const MAX_CHAIN_DOCUMENTS: usize = 1usize.saturating_add(crate::agent::MAX_GRANT_DEPTH as usize);
 
-/// Сложить грант и звенья в тело [`Response::Chain`].
+/// Assemble grant and links into a [`Response::Chain`] body.
 ///
-/// Одна функция на обе стороны провода: раскладка потока написана здесь и
-/// только здесь. Две сборки одного потока разошлись бы на первом же документе
-/// нестандартной длины.
+/// One function for both wire endpoints: stream layout is defined here,
+/// and only here. Two assemblers of one stream would diverge at the first
+/// nonstandard-length document.
 ///
 /// # Errors
-/// [`FormatError`], если документов нет вовсе, их больше
-/// [`MAX_CHAIN_DOCUMENTS`] или какой-то из них пуст либо длиннее
+/// [`FormatError`] if there are no documents, more than
+/// [`MAX_CHAIN_DOCUMENTS`], or any document is empty or exceeds
 /// [`MAX_DOCUMENT`].
 pub fn join_chain(documents: &[&[u8]]) -> Result<Vec<u8>, FormatError> {
     if documents.is_empty() || documents.len() > MAX_CHAIN_DOCUMENTS {
@@ -840,14 +840,14 @@ pub fn join_chain(documents: &[&[u8]]) -> Result<Vec<u8>, FormatError> {
     Ok(body)
 }
 
-/// Разобрать тело [`Response::Chain`] на документы.
+/// Parse a [`Response::Chain`] body into documents.
 ///
-/// Строго: обрыв внутри записи и хвост после последней — отказ, а не «почти
-/// правильно». Потолок числа документов проверяется В ЦИКЛЕ, до выделения
-/// следующего: длину потока называет чужая сторона.
+/// Strict: truncation inside a record or trailing bytes after the last are rejected,
+/// not “nearly correct.” Check the document-count limit WITHIN THE LOOP, before allocating
+/// the next document: another party supplies the stream length.
 ///
 /// # Errors
-/// [`FormatError`] при обрыве, хвосте, пустом потоке и превышении потолка.
+/// [`FormatError`] on truncation, trailing bytes, an empty stream, or exceeding the limit.
 pub fn split_chain(body: &[u8]) -> Result<Vec<&[u8]>, FormatError> {
     let bad = |len: usize| FormatError::BadFieldLength { tag: 0, len };
     let mut out: Vec<&[u8]> = Vec::new();
@@ -886,12 +886,12 @@ fn decode_view_request(body: &[u8]) -> Result<(u64, u64), FormatError> {
 }
 
 const NOTICE_HEARTBEAT: u8 = 0;
-/// Виды 1–3 первой редакции («просьба», «решение», «отзыв») сожжены 2026-09-02
-/// вместе с ней: извещение стало записью журнала, и различать виды на проводе
-/// незачем — их различает `event`.
+/// Kinds 1–3 of the first revision (“request,” “decision,” “revocation”) were discarded
+/// with it on 2026-09-02: notifications became journal records, making separate
+/// wire kinds unnecessary — `event` distinguishes them.
 const NOTICE_EVENT: u8 = 4;
-/// Тело события: номер (8) ‖ вид (1) ‖ файл (16) ‖ есть-ли-отпечаток (1) ‖
-/// отпечаток (32, нули без него). Раскладка фиксированная, длина точная.
+/// Event body: number (8) ‖ kind (1) ‖ file (16) ‖ has-fingerprint (1) ‖
+/// fingerprint (32, zeros if absent). Fixed layout, exact length.
 const NOTICE_EVENT_LEN: usize = 8 + 1 + 16 + 1 + 32;
 
 fn encode_notice(notice: &Notice) -> Vec<u8> {
@@ -918,8 +918,8 @@ fn encode_notice(notice: &Notice) -> Vec<u8> {
     }
 }
 
-/// Длины точные (И-8): сердцебиение — ровно один байт, событие — ровно
-/// пятьдесят девять. Хвост не «лишнее», а разночтение раскладки.
+/// Exact lengths (I-8): heartbeat exactly one byte, event exactly
+/// fifty-nine. Trailing bytes mean layout disagreement, not “extra data.”
 fn decode_notice(bytes: &[u8]) -> Result<Notice, FormatError> {
     let (kind, body) = split_kind(bytes)?;
     match kind {
@@ -945,7 +945,7 @@ fn decode_notice(bytes: &[u8]) -> Result<Notice, FormatError> {
     }
 }
 
-/// Подписка: `since` (8) ‖ число файлов (1) ‖ файлы по 16. Длина точная.
+/// Subscription: `since` (8) ‖ file count (1) ‖ 16-byte files. Exact length.
 fn encode_watch(files: &[[u8; 16]], since: u64) -> Result<Vec<u8>, FormatError> {
     if files.is_empty() || files.len() > MAX_WATCH_FILES {
         return Err(FormatError::BadFieldLength { tag: 0, len: files.len() });
@@ -977,16 +977,16 @@ fn decode_watch(body: &[u8]) -> Result<Request, FormatError> {
     Ok(Request::Watch { files, since })
 }
 
-/// Длина тела [`CollectReq`]: `file_id(16) ‖ device_fpr(32)`.
+/// [`CollectReq`] body length: `file_id(16) ‖ device_fpr(32)`.
 const COLLECT_LEN: usize = 48;
 
-/// Наибольший размер документа активации.
+/// Maximum activation-document size.
 ///
-/// Взят от предельного заголовка, а не назначен: самое крупное здесь — слот
-/// сервера, а он часть заголовка и больше него быть не может.
+/// Derived from maximum header size, not chosen arbitrarily: the largest item here
+/// is a server slot, part of a header and therefore no larger than one.
 pub const MAX_DOCUMENT: usize = MAX_HEADER_LEN as usize;
 
-/// Показания аппаратных часов устройства на проводе.
+/// Device hardware-clock reading on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClockReport {
     pub reset_count: u32,
@@ -994,7 +994,7 @@ pub struct ClockReport {
     pub read_at: i64,
 }
 
-/// Слот сервера, как он приезжает от устройства.
+/// Server slot as received from the device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotBlob {
     pub enc: Vec<u8>,
@@ -1002,7 +1002,7 @@ pub struct SlotBlob {
     pub ct: Vec<u8>,
 }
 
-/// Запрос активации.
+/// Activation request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivateReq {
     pub file_id: [u8; 16],
@@ -1013,35 +1013,35 @@ pub struct ActivateReq {
     pub server_slot: SlotBlob,
     pub lease_seconds: i64,
     pub device_clock: Option<ClockReport>,
-    /// Тождество операции (K28). `None` — прежний запрос без тождества.
+    /// Operation identity (K28). `None` means an old request without identity.
     pub operation_id: Option<[u8; 32]>,
 }
 
-/// Выдача: доля и подписанный лизинг.
+/// Grant: share and signed lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
     pub share: Vec<u8>,
     pub lease: Vec<u8>,
-    /// Эхо тождества операции — [`grant_tag::OPERATION_ID`].
+    /// Operation-identity echo — [`grant_tag::OPERATION_ID`].
     pub operation_id: Option<[u8; 32]>,
 }
 
-/// Отказ.
+/// Refusal.
 ///
-/// Текстом, а не кодом, и это решение, а не небрежность. У сервера своя
-/// таксономия отказов; перенося её через провод, мы завели бы ВТОРОЙ реестр
-/// номеров, который разойдётся с первым. Клиенту же различать нечего: любой
-/// отказ означает «лизинга нет», и по И-10 это запрет. Тот же выбор сделан у
-/// провода движка, и по той же причине.
+/// Text rather than a code, deliberately, not carelessly. The server has its own
+/// refusal taxonomy; transmitting it would introduce a SECOND numbered
+/// registry that would diverge from the first. The client has nothing to distinguish:
+/// every refusal means “no lease,” hence denial under I-10. The engine wire
+/// makes the same choice for the same reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deny {
     pub text: String,
-    /// Эхо тождества операции — [`deny_tag::OPERATION_ID`].
+    /// Operation-identity echo — [`deny_tag::OPERATION_ID`].
     pub operation_id: Option<[u8; 32]>,
 }
 
 impl Deny {
-    /// Отказ без эха — всякий отказ, не записанный под тождеством операции.
+    /// Refusal without echo: any refusal not recorded under an operation identity.
     #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
         Self { text: text.into(), operation_id: None }
@@ -1052,10 +1052,10 @@ fn put_blob(w: &mut TlvWriter, tag: u16, value: &[u8]) -> Result<(), FormatError
     w.put(tag, value)
 }
 
-/// Закодировать запрос активации.
+/// Encode an activation request.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`], если значение не помещается в объявленную длину.
+/// Returns [`FormatError`] if a value does not fit the declared length.
 pub fn encode_req(req: &ActivateReq) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
     put_blob(&mut w, req_tag::FILE_ID, &req.file_id)?;
@@ -1092,11 +1092,11 @@ pub fn encode_req(req: &ActivateReq) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать запрос активации.
+/// Parse an activation request.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`] при обрезанном документе, неизвестном теге, неверной
-/// длине поля или отсутствии обязательного поля.
+/// Returns [`FormatError`] on truncation, an unknown tag, incorrect
+/// field length, or a missing required field.
 pub fn decode_req(bytes: &[u8]) -> Result<ActivateReq, FormatError> {
     if bytes.len() > MAX_DOCUMENT {
         return Err(FormatError::OffsetOverflow);
@@ -1216,10 +1216,10 @@ fn exact32(tag: u16, value: &[u8]) -> Result<[u8; 32], FormatError> {
     value.try_into().map_err(|_| FormatError::BadFieldLength { tag, len: value.len() })
 }
 
-/// Закодировать выдачу.
+/// Encode a grant.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`], если значение не помещается в объявленную длину.
+/// Returns [`FormatError`] if a value does not fit the declared length.
 pub fn encode_grant(grant: &Grant) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
     put_blob(&mut w, grant_tag::SHARE, &grant.share)?;
@@ -1230,11 +1230,11 @@ pub fn encode_grant(grant: &Grant) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать выдачу.
+/// Parse a grant.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`] при обрезанном документе, неизвестном теге или
-/// отсутствии обязательного поля.
+/// Returns [`FormatError`] on truncation, an unknown tag, or
+/// a missing required field.
 pub fn decode_grant(bytes: &[u8]) -> Result<Grant, FormatError> {
     if bytes.len() > MAX_DOCUMENT {
         return Err(FormatError::OffsetOverflow);
@@ -1256,10 +1256,10 @@ pub fn decode_grant(bytes: &[u8]) -> Result<Grant, FormatError> {
     })
 }
 
-/// Закодировать отказ.
+/// Encode a refusal.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`], если текст не помещается в объявленную длину.
+/// Returns [`FormatError`] if the text does not fit the declared length.
 pub fn encode_deny(deny: &Deny) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
     put_blob(&mut w, deny_tag::TEXT, deny.text.as_bytes())?;
@@ -1269,11 +1269,11 @@ pub fn encode_deny(deny: &Deny) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать отказ.
+/// Parse a refusal.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`] при обрезанном документе, неизвестном теге, тексте не
-/// в UTF-8 или отсутствии обязательного поля.
+/// Returns [`FormatError`] on truncation, an unknown tag, non-UTF-8
+/// text, or a missing required field.
 pub fn decode_deny(bytes: &[u8]) -> Result<Deny, FormatError> {
     if bytes.len() > MAX_DOCUMENT {
         return Err(FormatError::OffsetOverflow);
@@ -1295,10 +1295,10 @@ pub fn decode_deny(bytes: &[u8]) -> Result<Deny, FormatError> {
     Ok(Deny { text: text.ok_or(FormatError::MissingField { tag: deny_tag::TEXT })?, operation_id })
 }
 
-/// Закодировать приветствие.
+/// Encode a greeting.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`], если значение не помещается в объявленную длину.
+/// Returns [`FormatError`] if a value does not fit the declared length.
 pub fn encode_hello(hello: &Hello) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
     w.put(hello_tag::DEVICE_FPR, &hello.device_fpr)?;
@@ -1313,11 +1313,11 @@ pub fn encode_hello(hello: &Hello) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать приветствие.
+/// Parse a greeting.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`] при обрезанном документе, неизвестном теге, неверной
-/// длине поля или отсутствии обязательного поля.
+/// Returns [`FormatError`] on truncation, an unknown tag, incorrect
+/// field length, or a missing required field.
 pub fn decode_hello(bytes: &[u8]) -> Result<Hello, FormatError> {
     let mut reader = TlvReader::new(bytes);
     let (mut fpr, mut public, mut tpm) = (None, None, None);
@@ -1407,10 +1407,10 @@ fn encode_slot(slot: &SlotBlob) -> Result<Vec<u8>, FormatError> {
     Ok(out)
 }
 
-/// Закодировать вызов.
+/// Encode a challenge.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`], если значение не помещается в объявленную длину.
+/// Returns [`FormatError`] if a value does not fit the declared length.
 pub fn encode_challenge(challenge: &Challenge) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
     w.put(challenge_tag::SOFTWARE, &encode_slot(&challenge.software)?)?;
@@ -1423,11 +1423,11 @@ pub fn encode_challenge(challenge: &Challenge) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать вызов.
+/// Parse a challenge.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`] при обрезанном документе, неизвестном теге или
-/// отсутствии обязательного поля.
+/// Returns [`FormatError`] on truncation, an unknown tag, or
+/// a missing required field.
 pub fn decode_challenge(bytes: &[u8]) -> Result<Challenge, FormatError> {
     let mut reader = TlvReader::new(bytes);
     let (mut software, mut hardware, mut hybrid) = (None, None, None);
@@ -1447,21 +1447,21 @@ pub fn decode_challenge(bytes: &[u8]) -> Result<Challenge, FormatError> {
     })
 }
 
-/// Закодировать эхо.
+/// Encode an echo.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`], если значение не помещается в объявленную длину.
+/// Returns [`FormatError`] if a value does not fit the declared length.
 pub fn encode_proof(proof: &Proof) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
     w.put(proof_tag::ECHO, &proof.echo)?;
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать эхо.
+/// Parse an echo.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`] при обрезанном документе, неизвестном теге или
-/// отсутствии обязательного поля.
+/// Returns [`FormatError`] on truncation, an unknown tag, or
+/// a missing required field.
 pub fn decode_proof(bytes: &[u8]) -> Result<Proof, FormatError> {
     let mut reader = TlvReader::new(bytes);
     let mut echo = None;
@@ -1479,14 +1479,14 @@ pub fn decode_proof(bytes: &[u8]) -> Result<Proof, FormatError> {
     Ok(Proof { echo: echo.ok_or(FormatError::MissingField { tag: proof_tag::ECHO })? })
 }
 
-/// Длина хвостового MAC протокола; внешняя длина кадра в MAC не входит.
+/// Protocol trailing-MAC length; the outer frame length is not MAC-covered.
 pub const REQUEST_MAC_LEN: usize = 32;
 
-/// Заверяется ли запрос этого вида MAC сессии (K25).
+/// Whether this request kind is authenticated by the session MAC (K25).
 ///
-/// Одна таблица на обе стороны провода: сервер по ней решает, сверять ли MAC
-/// до разбора, клиент — ставить ли его. Две таблицы для одной величины уже
-/// расходились (B6b: клиент не заверял шаги аттестации, которых ждал сервер).
+/// One table for both endpoints: the server uses it to decide whether to verify a MAC
+/// before parsing; the client, whether to add one. Two tables for one value have already
+/// diverged (B6b: client failed to authenticate attestation steps the server expected).
 #[must_use]
 pub const fn is_session_sealed(kind: u8) -> bool {
     matches!(
@@ -1495,9 +1495,9 @@ pub const fn is_session_sealed(kind: u8) -> bool {
     )
 }
 
-/// Отделить MAC до разбора полей: незаверенные TLV не должны влиять на ответ.
+/// Separate MAC before parsing fields: unauthenticated TLV must not affect the response.
 /// # Errors
-/// Отказывает, если нет байта вида и полного хвоста MAC.
+/// Rejects missing kind byte or incomplete MAC trailer.
 pub fn split_request_mac(framed: &[u8]) -> Result<(&[u8], &[u8; 32]), FormatError> {
     let len = framed.len().checked_sub(REQUEST_MAC_LEN).filter(|n| *n > 0)
         .ok_or(FormatError::Truncated { need: 33, have: framed.len() as u64 })?;
@@ -1506,10 +1506,10 @@ pub fn split_request_mac(framed: &[u8]) -> Result<(&[u8], &[u8; 32]), FormatErro
     Ok((body, mac))
 }
 
-/// Закодировать сообщение устройства: вид ‖ тело.
+/// Encode a device message: kind ‖ body.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`], если тело не кодируется.
+/// Returns [`FormatError`] if the body cannot be encoded.
 pub fn encode_request(request: &Request) -> Result<Vec<u8>, FormatError> {
     let (kind, body) = match request {
         Request::Hello(h) => (KIND_HELLO, encode_hello(h)?),
@@ -1571,11 +1571,11 @@ pub fn encode_request(request: &Request) -> Result<Vec<u8>, FormatError> {
     Ok(out)
 }
 
-/// Разобрать сообщение устройства.
+/// Parse a device message.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`] при пустом сообщении, неизвестном виде или
-/// неразбираемом теле.
+/// Returns [`FormatError`] on an empty message, unknown kind, or
+/// unparseable body.
 pub fn decode_request(bytes: &[u8]) -> Result<Request, FormatError> {
     let (kind, body) = split_kind(bytes)?;
     match kind {
@@ -1683,10 +1683,10 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, FormatError> {
     }
 }
 
-/// Подпись соавтора: ключ (32) ‖ подписанное распоряжение.
+/// Co-author signature: key (32) ‖ signed order.
 ///
-/// Без TLV: оба поля обязательны, первое фиксированной длины, необязательных
-/// нет. Тот же довод, что у [`CollectReq`].
+/// No TLV: both fields required, first fixed-length, no optional fields.
+/// Same rationale as [`CollectReq`].
 fn encode_endorse(signer: &[u8; 32], order: &[u8]) -> Result<Vec<u8>, FormatError> {
     let body = opaque(order)?;
     let mut out = Vec::with_capacity(body.len().saturating_add(32));
@@ -1729,15 +1729,15 @@ fn decode_collect(bytes: &[u8]) -> Result<CollectReq, FormatError> {
     Ok(CollectReq { file_id, device_fpr })
 }
 
-/// Тело, которое конверт переносит НЕ РАЗБИРАЯ.
+/// A body carried by the envelope WITHOUT PARSING.
 ///
-/// Пустое отвергается: подписанного решения нулевой длины не бывает, и принять
-/// его значило бы отложить отказ до разбора, который к тому времени уже сообщил
-/// бы отправителю, докуда мы дочитали. Потолок — тот же, что у документов
-/// активации: решение это документ, а не поток.
-/// Регистрация: `u32le(len) ‖ header ‖ order`. Длина одна — второй документ
-/// идёт до конца сообщения, и лишний байт в хвосте был бы частью распоряжения,
-/// а значит, сломал бы его подпись.
+/// Empty is rejected: no signed decision can have zero length; accepting
+/// it would defer refusal until parsing, by which time the sender would already
+/// have learned how far we read. Same limit as activation
+/// documents: a decision is a document, not a stream.
+/// Registration: `u32le(len) ‖ header ‖ order`. One length — the second document
+/// runs to message end; an extra trailing byte would become part of the order
+/// and therefore break its signature.
 fn encode_register(header: &[u8], order: &[u8]) -> Result<Vec<u8>, FormatError> {
     if header.is_empty() || header.len() > MAX_DOCUMENT {
         return Err(FormatError::BadFieldLength { tag: 0, len: header.len() });
@@ -1779,7 +1779,7 @@ fn opaque(bytes: &[u8]) -> Result<Vec<u8>, FormatError> {
     Ok(bytes.to_vec())
 }
 
-/// Тело отчёта об исполнении: `u64le seq ‖ u8 ok ‖ digest(32)` — ровно 41 байт.
+/// Execution-report body: `u64le seq ‖ u8 ok ‖ digest(32)` — exactly 41 bytes.
 fn encode_report(seq: u64, ok: bool, digest: &[u8; 32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(41);
     out.extend_from_slice(&seq.to_le_bytes());
@@ -1788,7 +1788,7 @@ fn encode_report(seq: u64, ok: bool, digest: &[u8; 32]) -> Vec<u8> {
     out
 }
 
-/// Разобрать отчёт. Длина ТОЧНАЯ, исход строго 0 или 1.
+/// Parse a report. EXACT length, outcome strictly 0 or 1.
 fn decode_report(body: &[u8]) -> Result<Request, FormatError> {
     let bad = || FormatError::BadFieldLength { tag: 0, len: body.len() };
     let seq: [u8; 8] = body.get(..8).and_then(|s| s.try_into().ok()).ok_or_else(bad)?;
@@ -1803,15 +1803,15 @@ fn decode_report(body: &[u8]) -> Result<Request, FormatError> {
     Ok(Request::ReportAction { seq: u64::from_le_bytes(seq), ok, digest })
 }
 
-/// Причина отказа годна: непуста, не длиннее потолка, без символов, которыми
-/// подделывают показ.
+/// Valid refusal reason: nonempty, within the limit, without characters used
+/// to spoof display.
 ///
-/// Пустая — отказ, и это половина правила «отказ несёт слова»: вторая половина
-/// в том, что проверка стоит и на отправке, то есть наша сторона произвести
-/// пустой отказ не может (мутация «причина → пустая строка» роняет кодек).
+/// Empty means refusal: half of “refusal carries words”; the other half
+/// is checking on send too, making our side incapable of producing an
+/// empty refusal (mutating “reason → empty string” fails the codec).
 ///
-/// Набор отсекаемых категорий — общий (`oc_format::text`), тот же, что у
-/// записки: текст показывают человеку рядом со строками, которым он верит.
+/// Rejected character categories are shared (`oc_format::text`), as for
+/// notes: the text is displayed beside lines the user trusts.
 fn check_refusal(why: &str) -> Result<(), FormatError> {
     if why.is_empty() || why.len() > crate::action::MAX_REFUSAL {
         return Err(FormatError::BadFieldLength { tag: 0, len: why.len() });
@@ -1822,15 +1822,15 @@ fn check_refusal(why: &str) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Собрать тело ответа [`Response::Chain`]: поток документов и, если он есть,
-/// ключ подписи лиз.
+/// Build a [`Response::Chain`] response body: document stream and, if present,
+/// lease-signing key.
 ///
-/// Потолок потока проверяется и здесь, на ОТПРАВКЕ: наш писатель не должен
-/// уметь произвести ответ, который наш же читатель обязан отвергнуть.
+/// The stream limit is checked here on SEND too: our writer must not
+/// be able to produce a response our reader must reject.
 ///
 /// # Errors
-/// [`FormatError`], если поток не проходит [`split_chain`] или тело не
-/// собирается.
+/// [`FormatError`] if the stream fails [`split_chain`] or the body cannot
+/// be assembled.
 fn encode_chain_reply(
     documents: &[u8],
     lease_verify_key: Option<&[u8; 32]>,
@@ -1853,14 +1853,14 @@ fn encode_chain_reply(
     Ok(w.finish().to_vec())
 }
 
-/// Разобрать тело ответа [`Response::Chain`].
+/// Parse a [`Response::Chain`] response body.
 ///
-/// Потолок числа документов проверяется ДО всякого обращения к содержимому:
-/// тело приходит от чужой стороны.
+/// Document-count limit is checked BEFORE any content access:
+/// the body comes from another party.
 ///
 /// # Errors
-/// [`FormatError`] при обрыве, незнакомом критичном теге, отсутствии потока
-/// документов и неверной длине ключа.
+/// [`FormatError`] on truncation, an unknown critical tag, missing document
+/// stream, or incorrect key length.
 #[allow(clippy::type_complexity)]
 fn decode_chain_reply(
     body: &[u8],
@@ -1895,7 +1895,7 @@ fn decode_chain_reply(
     ))
 }
 
-/// У вида без содержимого хвост — не «лишнее», а разночтение раскладки.
+/// For a contentless kind, trailing bytes mean layout disagreement, not “extra data.”
 fn no_body(body: &[u8]) -> Result<(), FormatError> {
     if body.is_empty() {
         Ok(())
@@ -1904,10 +1904,10 @@ fn no_body(body: &[u8]) -> Result<(), FormatError> {
     }
 }
 
-/// Закодировать сообщение сервера.
+/// Encode a server message.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`], если тело не кодируется.
+/// Returns [`FormatError`] if the body cannot be encoded.
 pub fn encode_response(response: &Response) -> Result<Vec<u8>, FormatError> {
     let (kind, body) = match response {
         Response::Challenge(c) => (KIND_CHALLENGE, encode_challenge(c)?),
@@ -1966,11 +1966,11 @@ pub fn encode_response(response: &Response) -> Result<Vec<u8>, FormatError> {
     Ok(out)
 }
 
-/// Разобрать сообщение сервера.
+/// Parse a server message.
 ///
 /// # Errors
-/// Отдаёт [`FormatError`] при пустом сообщении, неизвестном виде или
-/// неразбираемом теле.
+/// Returns [`FormatError`] on an empty message, unknown kind, or
+/// unparseable body.
 pub fn decode_response(bytes: &[u8]) -> Result<Response, FormatError> {
     let (kind, body) = split_kind(bytes)?;
     match kind {
@@ -2066,12 +2066,12 @@ mod tests {
         }
     }
 
-    /// ТОЖДЕСТВО ОПЕРАЦИИ ПЕРЕЖИВАЕТ ПРОВОД, И ПРЕЖНИЕ ДОКУМЕНТЫ ОСТАЮТСЯ ЗАКОННЫМИ.
+    /// OPERATION IDENTITY SURVIVES THE WIRE, AND OLD DOCUMENTS REMAIN VALID.
     ///
-    /// Три половины одного свойства: запрос с тождеством, выдача и отказ с эхом
-    /// разбираются в то, что закодировано; документ без поля — ровно прежний
-    /// документ (байт в байт тот же, что кодировала сборка без поля); поле стоит
-    /// последним и ломает порядок тегов, если его переставить (И-7).
+    /// Three aspects of one property: an identified request, echoed grant, and echoed refusal
+    /// parse back to what was encoded; a document without the field is exactly the old
+    /// document (byte-identical to encoding by the build without this field); the field
+    /// comes last and breaks tag order if moved (I-7).
     #[test]
     fn the_operation_id_survives_the_wire_and_documents_without_it_are_unchanged() {
         let mut r = req();
@@ -2099,11 +2099,11 @@ mod tests {
         }
     }
 
-    /// ДЛИНА ТОЖДЕСТВА И ЭХА — ТОЧНАЯ (И-8), и в запросе, и в ответах.
+    /// IDENTITY AND ECHO LENGTHS ARE EXACT (I-8), IN REQUESTS AND RESPONSES.
     ///
-    /// Короткое, дополненное нулями, совпало бы с чужим тождеством; длинное,
-    /// обрезанное, — тоже. Проверяется именно `BadFieldLength` с тегом поля, на
-    /// полном документе: отказ по отсутствию обязательных полей сюда не годится.
+    /// A short value padded with zeros would match another identity; a long,
+    /// truncated one would too. Require specifically `BadFieldLength` with the field tag,
+    /// on a complete document: missing-required-field refusal is not adequate here.
     #[test]
     fn the_operation_id_and_its_echo_check_their_length_exactly() {
         let mut r = req();
@@ -2151,7 +2151,7 @@ mod tests {
         assert!(matches!(decode_req(&bytes), Err(FormatError::UnknownCriticalField { tag: 10 })));
     }
 
-    /// Распоряжения автора переживают провод; обрубок и пустое отвергаются.
+    /// Author orders survive the wire; truncation and empty input are rejected.
     #[test]
     fn author_orders_survive_a_round_trip_and_damage_is_refused() {
         let register = Request::Register { header: vec![0x88; 300], order: vec![0x99; 120] };
@@ -2172,8 +2172,8 @@ mod tests {
         assert!(encode_request(&Request::Revoke { order: vec![] }).is_err());
     }
 
-    /// Аттестация: три запроса и три ответа переживают провод; длины точные,
-    /// основание вердикта — только из реестра (B6b).
+    /// Attestation: three requests and three responses survive the wire; exact lengths,
+    /// verdict basis strictly from the registry (B6b).
     #[test]
     fn attestation_messages_survive_the_wire_and_damage_is_refused() {
         let evidence = crate::attestation::Evidence {
@@ -2214,8 +2214,8 @@ mod tests {
         assert!(decode_response(&[KIND_ATTEST_NONCE; 32]).is_err());
     }
 
-    /// Подписка по области автора: курсор ровно 8 байт, за ним подписанный
-    /// документ длиннее подписи; обрубки и пустое отвергаются (B5).
+    /// Author-scope subscription: exactly 8 cursor bytes, followed by a signed
+    /// document longer than its signature; truncation and empty input rejected (B5).
     #[test]
     fn an_author_scope_subscription_survives_the_wire_and_damage_is_refused() {
         let watch = Request::WatchAuthor { since: 42, proof: vec![0x5c; 140] };
@@ -2228,8 +2228,8 @@ mod tests {
         assert!(encode_request(&Request::WatchAuthor { since: 0, proof: Vec::new() }).is_err());
     }
 
-    /// Продление — тело активации под своим видом: кодируется, разбирается,
-    /// и с активацией не путается ни в одну сторону.
+    /// Renewal uses the activation body under its own kind: encodes and parses,
+    /// never confused with activation in either direction.
     #[test]
     fn a_renewal_is_an_activation_body_under_its_own_kind() {
         let renew = Request::Renew(Box::new(req()));
@@ -2241,7 +2241,7 @@ mod tests {
         assert_ne!(decode_request(&activate).unwrap(), renew);
     }
 
-    /// Подписка и извещения переживают провод; обрезанное и лишнее отвергаются.
+    /// Subscriptions and notifications survive the wire; truncation and extra bytes are rejected.
     #[test]
     fn watch_and_notices_survive_a_round_trip_and_damage_is_refused() {
         let watch = Request::Watch { files: vec![[0x5a; 16], [0x5b; 16]], since: 77 };
@@ -2281,7 +2281,7 @@ mod tests {
         assert!(encode_response(&Response::Revocation(vec![])).is_err());
     }
 
-    /// Документы переживают провод без потерь, с часами и без них.
+    /// Documents survive the wire losslessly, with clocks and without.
     #[test]
     fn the_documents_survive_a_round_trip() {
         for clock in [None, Some(ClockReport { reset_count: 0, clock_ms: 0, read_at: 0 })] {
@@ -2297,11 +2297,11 @@ mod tests {
         assert_eq!(decode_deny(&encode_deny(&d).unwrap()).unwrap(), d);
     }
 
-    /// ОБРЕЗАННОЕ, ЛИШНЕЕ И НЕИЗВЕСТНОЕ ОТВЕРГАЮТСЯ, А НЕ ДОГАДЫВАЮТСЯ.
+    /// TRUNCATED, EXTRA, AND UNKNOWN DATA ARE REJECTED, NOT GUESSED AT.
     ///
-    /// Документ приходит от чужой стороны, то есть это разбор враждебного ввода.
-    /// Снисходительность здесь означает, что стороны понимают раскладку
-    /// по-разному, а отправитель волен дописывать в сообщение что угодно.
+    /// A document comes from another party: this is hostile-input parsing.
+    /// Leniency would mean the parties interpret the layout
+    /// differently, and the sender can append anything to the message.
     #[test]
     fn a_damaged_document_is_refused_rather_than_guessed() {
         let bytes = encode_req(&req()).unwrap();
@@ -2351,11 +2351,11 @@ mod tests {
         assert!(decode_req(&w.finish()).is_err(), "документ без обязательных полей принят");
     }
 
-    /// Полный корректный запрос, у которого значение одного поля заменено.
+    /// Complete valid request with one field's value replaced.
     ///
-    /// Порядок полей сохраняется: [`TlvWriter`] принимает только возрастающие
-    /// теги (И-7), и пересборка через читателя — единственный способ поменять
-    /// одно значение, не тронув раскладку.
+    /// Field order is preserved: [`TlvWriter`] accepts only increasing
+    /// tags (I-7); reconstruction through the reader is the only way to change
+    /// one value without touching the layout.
     fn req_with_field(tag: u16, value: &[u8]) -> Vec<u8> {
         let bytes = encode_req(&req()).unwrap();
         let mut reader = TlvReader::new(&bytes);
@@ -2373,18 +2373,18 @@ mod tests {
         w.finish().to_vec()
     }
 
-    /// ДЛИНЫ ПРОВЕРЯЮТСЯ ТОЧНО (И-8): короткое не дополняется, длинное не режется.
+    /// EXACT LENGTH CHECKS (I-8): short values are not padded, long ones not truncated.
     ///
-    /// Испорченное поле стоит в ПОЛНОМ документе, и это существенно. Прежняя
-    /// редакция клала в документ одно-единственное поле неправильной длины, а
-    /// такой документ отвергается по ОТСУТСТВИЮ обязательных полей — то есть
-    /// проба зеленела бы и при полностью снятых проверках длин. Тот же класс,
-    /// что у соседней пробы про неизвестный тег, и та же починка: портить ровно
-    /// одно свойство корректного документа.
+    /// The corrupted field is in a COMPLETE document, importantly. The previous
+    /// revision put a single wrong-length field in a document,
+    /// which is rejected for MISSING required fields — the
+    /// test would therefore pass with length checks entirely removed. Same class
+    /// as the neighboring unknown-tag test, same repair: corrupt exactly
+    /// one property of a valid document.
     ///
-    /// Отсюда же требование ИМЕННО `BadFieldLength` с ИМЕННО этим тегом:
-    /// `is_err()` — та формулировка, которая позволяла отказу приходить откуда
-    /// угодно.
+    /// This also requires EXACTLY `BadFieldLength` with EXACTLY this tag:
+    /// `is_err()` was the formulation that allowed failure to arise from
+    /// anywhere.
     #[test]
     fn every_fixed_field_checks_its_length_exactly() {
         for (tag, wrong) in [
@@ -2425,10 +2425,10 @@ mod tests {
         );
     }
 
-    /// ХВОСТ ВНУТРИ СЛОТА — ОТКАЗ.
+    /// TRAILING BYTES INSIDE A SLOT ARE REJECTED.
     ///
-    /// Слот несёт две длины и nonce между ними; лишние байты после шифротекста
-    /// означают, что отправитель считает раскладку другой.
+    /// A slot carries two lengths with a nonce between them; extra bytes after ciphertext
+    /// mean the sender assumes a different layout.
     #[test]
     fn trailing_bytes_inside_the_slot_are_refused() {
         let mut r = req();
@@ -2456,10 +2456,10 @@ mod tests {
         assert!(decode_req(&w.finish()).is_err(), "хвост внутри слота принят");
     }
 
-    /// КОНВЕРТ РАЗЛИЧАЕТ ВИДЫ И НЕ ПРИНИМАЕТ НЕИЗВЕСТНЫЕ.
+    /// THE ENVELOPE DISTINGUISHES KINDS AND REJECTS UNKNOWN ONES.
     ///
-    /// Вид сообщения — первый байт; у документов активации необязательного
-    /// диапазона нет вовсе, это разговор двух сторон одной сборки.
+    /// Message kind is the first byte; activation documents have no optional
+    /// range at all: this is a conversation between peers of the same build.
     #[test]
     fn the_envelope_round_trips_and_refuses_unknown_kinds() {
         let hello = Hello {
@@ -2501,11 +2501,11 @@ mod tests {
         assert!(decode_response(&[5, 1]).is_err(), "хвост при подтверждении принят");
     }
 
-    /// КОНВЕРТ НЕСЁТ И ЗАПРОС ДОСТУПА, И ОЖИДАНИЕ ОТЛИЧИМО ОТ ОТКАЗА.
+    /// THE ENVELOPE ALSO CARRIES ACCESS REQUESTS; WAITING IS DISTINCT FROM REFUSAL.
     ///
-    /// Последнее — главное здесь. `Waiting` и `Denied` обязаны быть РАЗНЫМИ
-    /// видами: автор вправе молчать, и получатель, прочитавший молчание как
-    /// запрет, сообщит человеку неправду.
+    /// The latter is essential. `Waiting` and `Denied` must be DIFFERENT
+    /// kinds: authors may remain silent; a recipient interpreting silence as
+    /// denial would misinform the user.
     #[test]
     fn the_envelope_carries_the_access_request_and_tells_waiting_from_refusal() {
         let ask = Request::Ask(Box::new(crate::access::AskAccess {
@@ -2560,11 +2560,11 @@ mod tests {
         }
     }
 
-    /// ДЛИНА АППАРАТНОГО КЛЮЧА ПРОВЕРЯЕТСЯ ТОЧНО.
+    /// HARDWARE-KEY LENGTH IS CHECKED EXACTLY.
     ///
-    /// SEC1 без сжатия — 65 байт, и «почти столько» здесь не бывает (И-8).
-    /// Приняв короче, мы отдали бы в запечатывание величину, которой управляет
-    /// отправитель.
+    /// Uncompressed SEC1 is 65 bytes; “nearly that much” is invalid (I-8).
+    /// Accepting a shorter value would pass a sender-controlled
+    /// quantity into sealing.
     #[test]
     fn the_hardware_key_length_is_checked_exactly() {
         for wrong in [1usize, 32, 64, 66] {
@@ -2576,10 +2576,10 @@ mod tests {
         }
     }
 
-    /// ДОКУМЕНТЫ AGENT PROTOCOL ПЕРЕЖИВАЮТ ПРОВОД, А ПОВРЕЖДЁННОЕ ОТВЕРГАЕТСЯ.
+    /// AGENT PROTOCOL DOCUMENTS SURVIVE THE WIRE; CORRUPTED INPUT IS REJECTED.
     ///
-    /// Круговой проход по каждому новому виду; пустое непрозрачное тело, хвост
-    /// при теле без содержимого и отпечаток не той длины — отказ.
+    /// Round-trip every new kind; reject an empty opaque body, trailing bytes
+    /// on a contentless body, and wrong-length fingerprint.
     #[test]
     fn the_agent_protocol_messages_survive_the_wire_and_damage_is_refused() {
         for request in [
@@ -2637,13 +2637,13 @@ mod tests {
         assert!(decode_response(&[KIND_NO_CHAIN, 0]).is_err(), "хвост при «цепочки нет» принят");
     }
 
-    /// ПОТОЛОК И РАСКЛАДКА ЦЕПОЧКИ ПРОВЕРЯЮТСЯ НА ПРИЁМЕ.
+    /// CHAIN LIMIT AND LAYOUT ARE CHECKED ON RECEIPT.
     ///
-    /// Длину потока называет чужая сторона: без проверки «разобрать всё, потом
-    /// посчитать» означало бы выделить столько, сколько скажет собеседник.
-    /// Положительный контроль рядом — цепочка ровно в потолок ПРИНИМАЕТСЯ:
-    /// пустой отказ одинаково выглядит и при сломанной проверке, и при сломанной
-    /// сборке.
+    /// Another party supplies stream length: without checks, “parse everything, then
+    /// count” would allocate as much as the peer says.
+    /// Positive control alongside: a chain exactly at the limit is ACCEPTED;
+    /// an unconditional refusal looks the same with a broken check and with broken
+    /// assembly.
     #[test]
     fn a_chain_body_is_refused_above_the_ceiling_and_when_it_does_not_add_up() {
         let full: Vec<Vec<u8>> = (0..MAX_CHAIN_DOCUMENTS).map(|n| vec![n as u8; 40]).collect();
@@ -2696,20 +2696,20 @@ mod tests {
         assert!(split_chain(&0u32.to_le_bytes()).is_err(), "пустой документ в потоке принят");
     }
 
-    /// Поток документов в обрамлении ответа — БЕЗ проверки его самого.
+    /// Document stream framed as a response, WITHOUT checking the stream itself.
     ///
-    /// Ради отрицательных проб: `encode_chain_reply` негодный поток не
-    /// выпускает, а проверить надо именно приём.
+    /// For negative tests: `encode_chain_reply` will not emit an invalid stream,
+    /// while receipt is precisely what must be tested.
     fn wrap_chain(documents: &[u8]) -> Vec<u8> {
         let mut w = TlvWriter::new();
         w.put(chain_tag::DOCUMENTS, documents).unwrap();
         w.finish().to_vec()
     }
 
-    /// ВИДЫ ДВЕРИ ДЕЙСТВИЙ ПЕРЕЖИВАЮТ ПРОВОД, И КАЖДЫЙ ПРОВЕРЯЕТ СВОЮ ФОРМУ.
+    /// ACTION-DOOR KINDS SURVIVE THE WIRE; EACH CHECKS ITS OWN SHAPE.
     ///
-    /// Круговой проход по всем девяти; хвост у видов с точной длиной; пустое
-    /// непрозрачное тело; точные длины имени гранта и номера.
+    /// Round-trip all nine; trailing bytes for exact-length kinds; empty
+    /// opaque body; exact grant-name and number lengths.
     #[test]
     fn the_action_door_kinds_survive_the_wire_and_check_their_shapes() {
         for request in [
@@ -2782,12 +2782,12 @@ mod tests {
         assert!(decode_response(&[KIND_ACTION_GRANTED]).is_err(), "пустая лиза принята");
     }
 
-    /// ОТКАЗ БЕЗ ПРИЧИНЫ НЕ ПРОИЗВОДИТСЯ И НЕ ПРИНИМАЕТСЯ.
+    /// A REASONLESS REFUSAL IS NEITHER PRODUCED NOR ACCEPTED.
     ///
-    /// Мутация «причина → пустая строка» роняет КОДЕК, а не только пробу
-    /// сервера: правило «отказ несёт слова» не должно держаться на
-    /// внимательности того, кто составляет текст. Рядом — положительный
-    /// контроль: непустая причина проходит.
+    /// Mutating “reason → empty string” fails the CODEC, not merely the server
+    /// test: “refusal carries words” must not depend on the
+    /// text writer's care. Alongside is the positive
+    /// control: a nonempty reason passes.
     #[test]
     fn a_refusal_without_a_reason_is_neither_written_nor_read() {
         assert!(
@@ -2811,11 +2811,11 @@ mod tests {
         assert_eq!(decode_response(&encode_response(&ok).unwrap()).unwrap(), ok);
     }
 
-    /// КЛЮЧ ПОДПИСИ ЛИЗ — НЕОБЯЗАТЕЛЬНЫЙ ТЕГ, И ОТВЕТ БЕЗ НЕГО ОСТАЁТСЯ ПРЕЖНИМ.
+    /// LEASE-SIGNING KEY IS AN OPTIONAL TAG; A RESPONSE WITHOUT IT REMAINS UNCHANGED.
     ///
-    /// Три половины одного свойства: ответ без ключа разбирается в `None`;
-    /// байты ответа без ключа — ПРЕФИКС байтов с ключом, то есть тег стоит
-    /// последним и порядок не ломает (И-7); длина ключа точная (И-8).
+    /// Three aspects of one property: response without key parses to `None`;
+    /// its bytes are a PREFIX of those with key, so the tag
+    /// comes last and preserves order (I-7); key length is exact (I-8).
     #[test]
     fn the_lease_verify_key_is_an_optional_tag_and_the_reply_without_it_is_unchanged() {
         let documents = join_chain(&[&[0x11; 64]]).unwrap();
@@ -2849,14 +2849,14 @@ mod tests {
         }
     }
 
-    /// ГРАНТ ДЕЙСТВИЙ — ТОЖЕ НЕОБЯЗАТЕЛЬНЫЙ ТЕГ, И ТОЖЕ НЕ СДВИГАЕТ ПРЕЖНИХ.
+    /// ACTION GRANT IS ALSO AN OPTIONAL TAG AND DOES NOT SHIFT PREVIOUS ONES.
     ///
-    /// Те же три половины, что у ключа подписи лиз, и по тем же доводам: ответ
-    /// без гранта действий разбирается в `None` (цепочке действий может не быть
-    /// выдано вовсе); байты ответа без него — ПРЕФИКС байтов с ним, то есть тег
-    /// стоит последним и порядок возрастания не ломает (И-7); пустое значение
-    /// отвергается, потому что отсутствие обозначается отсутствием тега, а не
-    /// пустотой.
+    /// Same three aspects and reasons as the lease-signing key: a response
+    /// without action grant parses to `None` (the chain may have been granted
+    /// no actions at all); bytes without it are a PREFIX of bytes with it, so the tag
+    /// comes last and preserves increasing order (I-7); an empty value
+    /// is rejected because absence is represented by an absent tag,
+    /// not emptiness.
     #[test]
     fn the_action_grant_is_an_optional_tag_and_the_reply_without_it_is_unchanged() {
         let documents = join_chain(&[&[0x11; 64]]).unwrap();

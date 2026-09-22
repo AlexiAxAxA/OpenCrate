@@ -1,44 +1,44 @@
-//! Единое правило крейта для незнакомого тега (И-7, решение 2026-09-21).
+//! The crate's shared rule for unknown tags (I-7, decision of 2026-09-21).
 //!
-//! Решение о теге принимает `oc_format::tlv::unknown_tag_action` — та же
-//! функция, что у контейнера, и второй её здесь нет намеренно: два места,
-//! считающие границу критичного диапазона, разошлись бы молча, и разошлись бы
-//! ровно в сторону «пропустили то, что обязаны были отвергнуть».
+//! Tag decisions are made by `oc_format::tlv::unknown_tag_action`, the same
+//! function the container uses. There is deliberately no second implementation here: two places
+//! computing the critical-range boundary would silently diverge, and do so
+//! in exactly the direction of "skipped what should have been rejected".
 //!
-//! # Почему помощник, а не строка в каждом разборщике
+//! # Why a helper rather than a line in every parser
 //!
-//! Разборщиков документов в крейте четырнадцать, и три строки `match`, дословно
-//! повторённые четырнадцать раз, — это известная болезнь репозитория: один путь
-//! чинят, соседний забывают. Здесь забыть нечего: правило одно и лежит в одном
-//! месте.
+//! The crate has fourteen document parsers; three `match` lines repeated verbatim
+//! fourteen times are a known repository problem: one path
+//! gets fixed while its neighbor is forgotten. Here there is nothing to forget: one rule in
+//! one place.
 //!
-//! # Почему у второго помощника есть ПАМЯТЬ о пропущенном
+//! # Why the second helper REMEMBERS skipped entries
 //!
-//! Часть документов крейта сверяется сама с собой: разобранная структура
-//! кодируется заново и обязана дать ИСХОДНЫЕ байты (`control::Binding`,
-//! `ControlRequest`, `Receipt`, `Transfer`, `directory::Record`). Проверка эта
-//! стоит не зря — она и есть каноничность: тело, которое наш кодировщик не
-//! воспроизводит, не имеет единственного представления, а именно по его байтам
-//! считается подпись, соподпись и лист журнала каталога.
+//! Some documents check themselves: the parsed structure
+//! is re-encoded and must reproduce the ORIGINAL bytes (`control::Binding`,
+//! `ControlRequest`, `Receipt`, `Transfer`, `directory::Record`). This check
+//! is deliberate: it establishes canonicality. A body our encoder does not
+//! reproduce lacks a unique representation, yet its exact bytes determine
+//! the signature, countersignature and directory journal leaf.
 //!
-//! Пропущенный необязательный тег ломает сверку: перекодирование его теряет.
-//! Поэтому сверяется не всё тело, а тело БЕЗ пропущенных записей — каноничность
-//! ЗНАКОМЫХ полей остаётся под сторожем, а незнакомое необязательное поле
-//! проезжает мимо неё. Вырезаются записи целиком (тег, длина, значение) — тем же
-//! приёмом, что у И-3.
+//! A skipped optional tag breaks this comparison: re-encoding loses it.
+//! Thus the comparison uses the body WITHOUT skipped entries rather than the entire body:
+//! canonicality of KNOWN fields remains guarded, while unknown optional fields
+//! bypass that check. Entire entries (tag, length, value) are removed using the same
+//! technique as I-3.
 
 use core::ops::Range;
 use oc_format::FormatError;
 use oc_format::tlv::{FIELD_PREFIX_LEN, Field, UnknownTag, unknown_tag_action};
 
-/// Решение по незнакомому тегу: критичный — отказ, необязательный — пропуск.
+/// Decision for an unknown tag: reject critical, skip optional.
 ///
-/// Вариант ошибки тот же, каким крейт отвечал на ЛЮБОЙ незнакомый тег до
-/// решения 2026-09-21: для критичного диапазона поведение не изменилось ничем,
-/// включая текст отказа.
+/// The error variant is the one the crate returned for EVERY unknown tag before
+/// the decision of 2026-09-21: behavior for the critical range is entirely unchanged,
+/// including the rejection text.
 ///
 /// # Errors
-/// [`FormatError::UnknownCriticalField`] — тег из критичного диапазона.
+/// [`FormatError::UnknownCriticalField`]: a tag from the critical range.
 pub(crate) fn refuse_if_critical(tag: u16) -> Result<(), FormatError> {
     match unknown_tag_action(tag) {
         UnknownTag::Refuse => Err(FormatError::UnknownCriticalField { tag }),
@@ -46,18 +46,18 @@ pub(crate) fn refuse_if_critical(tag: u16) -> Result<(), FormatError> {
     }
 }
 
-/// То же решение, но с памятью о том, какие записи пропущены.
+/// The same decision, but remembering which entries were skipped.
 #[derive(Debug, Default)]
 pub(crate) struct Skipped {
-    /// Диапазоны ЗАПИСЕЙ (тег, длина, значение) в теле, переданном разборщику.
+    /// Ranges of ENTRIES (tag, length, value) in the body passed to the parser.
     spans: Vec<Range<usize>>,
 }
 
 impl Skipped {
-    /// Увидеть незнакомое поле: критичное — отказ, необязательное — запомнить.
+    /// Observe an unknown field: reject critical, remember optional.
     ///
     /// # Errors
-    /// [`FormatError::UnknownCriticalField`] — тег из критичного диапазона.
+    /// [`FormatError::UnknownCriticalField`]: a tag from the critical range.
     pub(crate) fn see(&mut self, field: &Field<'_>) -> Result<(), FormatError> {
         refuse_if_critical(field.tag)?;
         // Граница ЗАПИСИ, а не значения: длина префикса берётся у формата, а не
@@ -68,11 +68,11 @@ impl Skipped {
         Ok(())
     }
 
-    /// Тело без пропущенных записей — то, с чем сверяется перекодирование.
+    /// The body without skipped entries, against which re-encoding is compared.
     ///
-    /// Диапазоны идут по возрастанию по построению: теги строго растут (И-7), а
-    /// значит растут и смещения. Порядок здесь не восстанавливается и не
-    /// проверяется — он свойство обхода, а не этих данных.
+    /// Ranges ascend by construction: tags strictly increase (I-7),
+    /// so offsets do too. Ordering is neither restored nor
+    /// checked here: it is a property of traversal, not of this data.
     pub(crate) fn strip(&self, body: &[u8]) -> Vec<u8> {
         if self.spans.is_empty() {
             return body.to_vec();
@@ -106,7 +106,7 @@ mod tests {
         assert!(refuse_if_critical(u16::MAX).is_ok());
     }
 
-    /// Вырезанное тело — ровно то, что написал бы кодировщик без лишних полей.
+    /// The trimmed body is exactly what the encoder would write without extra fields.
     #[test]
     fn stripping_gives_back_the_body_the_writer_would_have_written() {
         let mut w = TlvWriter::new();

@@ -11,35 +11,35 @@
     clippy::arithmetic_side_effects
 )]
 
-//! Список меток домена в спеке обязан совпадать с `label::ALL` байт в байт.
+//! The specification's domain-label list must match `label::ALL` byte for byte.
 //!
-//! # Почему этого теста не было и почему он нужен
+//! # Why this test was missing and why it is needed
 //!
-//! И-12 состоит из двух половин. Первую — уникальность и беспрефиксность —
-//! стерегут тесты внутри `oc-crypto`, но все они берут список **из кода**. Вторую
-//! — «список в `docs/format.md` §3.6 обязан совпадать с `label::ALL`» — не
-//! проверяло НИЧТО: тестов, читающих `.md`, в репозитории не было вовсе.
+//! I-12 has two halves. The first, uniqueness and prefix-freeness,
+//! is guarded by tests inside `oc-crypto`, but all obtain their list **from code**. The second,
+//! "the list in `docs/format.md` §3.6 must match `label::ALL`", was checked by
+//! NOTHING: the repository had no tests reading `.md` files.
 //!
-//! Пока списки сходятся, отсутствие проверки незаметно. Промахнётся следующий,
-//! кто добавит метку: метка в коде без спеки — неразделённый домен у второй
-//! реализации, метка в спеке без кода — мёртвая строка, которую сам документ
-//! называет дефектом. Спека объявлена побеждающей при конфликте, а конфликт
-//! обнаружился бы атакой или сравнением байтов вручную.
+//! While lists agree, the missing check is invisible. The next person adding
+//! a label may miss: code without specification means an unseparated domain for the second
+//! implementation; specification without code means a dead line the document itself
+//! calls a defect. The specification wins conflicts, but a conflict would
+//! be discovered only through an attack or manual byte comparison.
 //!
-//! # Почему `include_str!`, а не чтение файла
+//! # Why `include_str!` instead of reading a file
 //!
-//! Строка вклеивается компилятором, то есть рантайм-обращения к файловой системе
-//! нет: запрет часов, файлов и сети в этом крейте остаётся нетронутым. Побочная
-//! выгода — тест не может «пройти» из-за того, что файл не нашёлся.
+//! The compiler embeds the string, avoiding runtime filesystem access:
+//! this crate's ban on clocks, files, and networking remains intact. A side
+//! benefit: the test cannot "pass" because the file was not found.
 
 const SPEC: &str = include_str!("../../../docs/format.md");
 
-/// Выдрать метки из блока `### 3.6 Метки домена`.
+/// Extract labels from the `### 3.6 Domain labels` section.
 ///
-/// Берётся именно блок, а не весь документ: метки упоминаются и в прозе, и
-/// собрав их отовсюду, тест сверял бы список с самим собой.
+/// Only that section, not the entire document: prose also mentions labels,
+/// and collecting all mentions would compare the list with itself.
 fn labels_from_spec() -> Vec<&'static str> {
-    let start = SPEC.find("### 3.6 Метки домена").expect("раздел §3.6 не найден");
+    let start = SPEC.find("### 3.6 ").expect("раздел §3.6 не найден");
     let rest = &SPEC[start..];
     let open = rest.find("```").expect("блок меток не найден");
     let after_open = &rest[start_of_next_line(rest, open)..];
@@ -61,11 +61,11 @@ fn start_of_next_line(s: &str, from: usize) -> usize {
     s[from..].find('\n').map_or(s.len(), |n| from + n + 1)
 }
 
-/// Оба списка совпадают как множества, и расхождение называется поимённо.
+/// Both lists match as sets; discrepancies are named individually.
 ///
-/// Сравниваются множества, а не порядок: в спеке метки разложены по строкам для
-/// чтения, и требовать того же порядка в коде значило бы запретить перестановку,
-/// которая ничего не меняет.
+/// Compare sets rather than order: the specification arranges labels in rows for
+/// readability, and demanding identical code order would prohibit rearrangement
+/// that changes nothing.
 #[test]
 fn the_spec_label_list_matches_the_code_byte_for_byte() {
     let from_spec: std::collections::BTreeSet<&str> = labels_from_spec().into_iter().collect();
@@ -94,12 +94,12 @@ fn the_spec_label_list_matches_the_code_byte_for_byte() {
     assert_eq!(from_spec.len(), from_code.len());
 }
 
-/// Разбор блока действительно достаёт метки, а не пустоту.
+/// Section parsing actually extracts labels rather than nothing.
 ///
-/// Проверка на вырожденность самого теста: если бы `labels_from_spec` начала
-/// возвращать пустой список — скажем, после переименования заголовка раздела, —
-/// сравнение множеств выше прошло бы... нет, не прошло бы, но диагноз был бы
-/// про «мёртвые строки», а не про сломанный разбор. Здесь он назван прямо.
+/// Checks the test itself for degeneration: if `labels_from_spec` began
+/// returning an empty list, say after a section-heading rename,
+/// the set comparison above would pass… no, it would not, but its diagnosis
+/// would concern "dead lines" rather than broken parsing. Here that is stated directly.
 #[test]
 fn the_extraction_actually_finds_labels() {
     let labels = labels_from_spec();
@@ -107,14 +107,14 @@ fn the_extraction_actually_finds_labels() {
     assert!(labels.iter().all(|l| l.starts_with("CC/v1/")), "выдрано что-то помимо меток");
 }
 
-/// Исходный текст крейта — чтобы спросить его о том, чего нет в значениях.
+/// Crate source text: to ask questions values cannot answer.
 const CODE: &str = include_str!("../src/lib.rs");
 
-/// Тело модуля `label` целиком, по счёту скобок.
+/// Entire `label` module body, found by counting braces.
 ///
-/// Счёт, а не поиск конца по отступу: отступ — соглашение о форматировании, и
-/// тест, опирающийся на него, однажды пройдёт мимо половины модуля, ничего об
-/// этом не сказав.
+/// Counting rather than finding its end by indentation: indentation is a formatting convention,
+/// and a test relying on it could someday skip half the module without
+/// saying so.
 fn label_module_body() -> &'static str {
     let at = CODE.find("pub mod label {").expect("модуля label нет — тест устарел");
     let open = at + CODE[at..].find('{').expect("нет открывающей скобки");
@@ -134,14 +134,14 @@ fn label_module_body() -> &'static str {
     panic!("модуль label не закрыт");
 }
 
-/// Имена всех `pub const`, объявленных в модуле меток.
+/// Names of all `pub const` declarations in the label module.
 ///
-/// `pub const fn` отсеивается отдельно, и это не придирка к синтаксису: с
-/// появлением типа `Label` в модуле живут `const fn as_bytes`, `len`,
-/// `is_empty` и `ad_hoc`, а прежний разбор («всё после `pub const ` до
-/// двоеточия») считал их именами меток и требовал внести в `ALL`. Разбор здесь
-/// намеренно щедр — лишнее имя дороже недостающего, — но щедрость до ложного
-/// ПРОВАЛА доходить не должна: сторож, краснеющий на ровном месте, снимают.
+/// `pub const fn` is filtered separately, not as syntactic nitpicking: with
+/// `Label`, the module contains `const fn as_bytes`, `len`,
+/// `is_empty`, and `ad_hoc`; the old parser ("everything after `pub const ` up to
+/// the colon") treated them as label names and demanded their inclusion in `ALL`. Parsing here
+/// is deliberately inclusive, since an extra name is costlier than a missing one, but not to the point
+/// of false FAILURE: a guard that fails for no reason gets removed.
 fn declared_constants(body: &str) -> Vec<&str> {
     let mut names = Vec::new();
     for line in body.lines() {
@@ -155,29 +155,29 @@ fn declared_constants(body: &str) -> Vec<&str> {
     names
 }
 
-/// КАЖДАЯ ОБЪЯВЛЕННАЯ МЕТКА ВНЕСЕНА В `ALL`.
+/// EVERY DECLARED LABEL APPEARS IN `ALL`.
 ///
-/// # Дыра в проверках, которую этот тест закрывает
+/// # The gap this test closes
 ///
-/// И-12 стерегут три теста: уникальность, беспрефиксность и совпадение со
-/// спекой. Все три берут список ИЗ `label::ALL` — и потому метка, объявленная
-/// рядом с остальными и не внесённая в `ALL`, минует их разом. Ни один не
-/// заметит ни её самой, ни её отсутствия в §3.6.
+/// Three tests guard I-12: uniqueness, prefix-freeness, and specification
+/// agreement. All obtain their list FROM `label::ALL`, so a label declared
+/// beside the others but omitted from `ALL` bypasses all of them. None
+/// notices either the label or its absence from §3.6.
 ///
-/// Это ровно тот класс, который в этом репозитории срабатывал одиннадцать раз:
-/// проверка написана и покрыта тестами, но величину, которую она смотрит,
-/// производит не то, что кажется. Здесь величина — список, и производит его
-/// человек вручную, дописывая имя в конец массива.
+/// This is precisely the class that occurred eleven times in this repository:
+/// a check is written and tested, but the inspected value
+/// is produced by something other than what it appears. Here the value is a list, manually
+/// produced by a person appending a name to an array.
 ///
-/// Сегодня расхождений нет; тест заведён на завтра, когда кто-то добавит метку и
-/// забудет вторую строчку.
+/// There are no discrepancies today; the test is for tomorrow, when someone adds a label
+/// and forgets the second line.
 ///
-/// # Почему разбор исходника, а не значений
+/// # Why parse source rather than values
 ///
-/// Потому что вопрос именно про исходник: значение непопавшей константы в
-/// программу не приходит, спросить его через `ALL` нельзя по определению.
-/// `include_str!` вклеивает текст компилятором — рантайм-обращения к файловой
-/// системе нет, чистота крейта не нарушена.
+/// Because the question concerns source: an omitted constant's value never enters
+/// the program, and by definition cannot be queried through `ALL`.
+/// `include_str!` embeds text through the compiler, without runtime filesystem
+/// access, preserving crate purity.
 #[test]
 fn every_declared_label_is_listed_in_all() {
     let body = label_module_body();

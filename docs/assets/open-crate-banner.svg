@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">Open Crate</title>
+  <desc id="desc">Rust libraries for encrypted documents. Format, Crypto, Protocol, Policy and Engine form a layered core.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101b31"/><stop offset="1" stop-color="#172940"/></linearGradient>
+    <linearGradient id="blue" x2="1" y2="1"><stop stop-color="#76d9f7"/><stop offset="1" stop-color="#5289ef"/></linearGradient>
+    <linearGradient id="warm" x2="1" y2="1"><stop stop-color="#ffc487"/><stop offset="1" stop-color="#ed8e62"/></linearGradient>
+  </defs>
+  <rect width="1200" height="360" rx="24" fill="url(#bg)"/>
+  <circle cx="1080" cy="-80" r="320" fill="#5c98cf" opacity=".06"/>
+  <circle cx="1040" cy="0" r="225" fill="none" stroke="#80ccf4" opacity=".12"/>
+  <g font-family="Segoe UI,Arial,sans-serif">
+    <text x="62" y="65" font-size="14" font-weight="600" letter-spacing="3" fill="#92c8ed">THE DOCUMENT SECURITY CORE</text>
+    <text x="58" y="145" font-size="66" font-weight="700" fill="#f5f8ff">Open Crate</text>
+    <text x="62" y="190" font-size="23" fill="#c1cee1">Encrypted documents. Explicit access decisions.</text>
+    <text x="62" y="231" font-size="18" fill="#93a8c5">Five Rust libraries. Your application. Your infrastructure.</text>
+    <rect x="62" y="274" width="70" height="31" rx="15" fill="#243a56"/>
+    <text x="97" y="295" text-anchor="middle" font-size="14" fill="#c4e6ff">Rust</text>
+    <rect x="143" y="274" width="160" height="31" rx="15" fill="#243a56"/>
+    <text x="223" y="295" text-anchor="middle" font-size="14" fill="#c4e6ff">Source available</text>
+    <rect x="314" y="274" width="154" height="31" rx="15" fill="#243a56"/>
+    <text x="391" y="295" text-anchor="middle" font-size="14" fill="#c4e6ff">WASM buildable</text>
+  </g>
+  <g stroke-linejoin="round">
+    <path d="M790 243 918 172 1046 243 918 314Z" fill="#213c5c" stroke="#426c95"/>
+    <path d="M790 209 918 138 1046 209 918 280Z" fill="#2b507a" stroke="#5885b1"/>
+    <path d="M790 175 918 104 1046 175 918 246Z" fill="#376897" stroke="#70a1cf"/>
+    <path d="M790 141 918 70 1046 141 918 212Z" fill="url(#blue)" stroke="#a4e5ff"/>
+    <path d="M871 109 918 83 965 109 918 136Z" fill="url(#warm)" stroke="#ffd0a5"/>
+    <path d="M871 109 918 136 918 164 871 137Z" fill="#cb7554"/>
+    <path d="M918 136 965 109 965 137 918 164Z" fill="#e99365"/>
+  </g>
+  <g font-family="Segoe UI,Arial,sans-serif" font-size="12" fill="#b8d2eb" text-anchor="middle">
+    <text x="918" y="341">FORMAT · CRYPTO · PROTOCOL · POLICY · ENGINE</text>
+  </g>
+</svg>

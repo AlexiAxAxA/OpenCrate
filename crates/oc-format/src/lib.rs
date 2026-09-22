@@ -8,57 +8,57 @@
 // типа (например, деление на `NonZeroU32`), и каждый обязан нести объяснение.
 #![deny(clippy::arithmetic_side_effects)]
 
-//! Разбор и сборка контейнера `.cc`.
+//! Parsing and assembling the `.cc` container.
 //!
-//! Крейт режет байты и считает смещения. В нём нет **ввода-вывода, часов и
-//! генератора случайных чисел** — именно поэтому его можно проверять чистыми
-//! данными и собирать под `wasm32`.
+//! The crate slices bytes and computes offsets. It has no **I/O, clocks, or
+//! random number generator**, which is why it can be tested with pure
+//! data and built for `wasm32`.
 //!
-//! Точная граница, потому что прежняя формулировка («ничего не знает ни о
-//! криптографии…») расходилась с `Cargo.toml`: крейт зависит от `oc-crypto` и
-//! `oc-policy` **по типам** — идентификаторы алгоритмов, структура политики, типы
-//! ключей. Зависимость осознанная: без неё разбор возвращал бы сырые `u8` вместо
-//! проверенных перечислений, и проверка «умеет ли сборка исполнить объявленный
-//! алгоритм» переехала бы к вызывающему, то есть повторялась бы в каждом. Чего
-//! крейт действительно не делает — так это криптографических операций: он не
-//! шифрует, не подписывает и не выводит ключи.
+//! The boundary is precise because the previous wording ("knows nothing of
+//! cryptography...") contradicted `Cargo.toml`: the crate depends on `oc-crypto` and
+//! `oc-policy` **for types**: algorithm identifiers, policy structure, and key
+//! types. This dependency is deliberate: otherwise parsing would return raw `u8` values
+//! instead of validated enums, and checking "can this build execute the declared
+//! algorithm" would move to callers and be repeated in each. What
+//! the crate truly does not do is cryptographic operations: it does not
+//! encrypt, sign, or derive keys.
 //!
-//! Всё, что он возвращает, — заимствованные срезы исходного буфера, потому что
-//! подпись проверяется по сырым байтам, а не по результату повторной
-//! сериализации (см. `docs/format.md`, раздел 5).
+//! Everything it returns consists of borrowed slices of the original buffer, because
+//! signatures are verified over raw bytes rather than the result of
+//! reserialization (see `docs/format.md`, section 5).
 //!
-//! Точка входа — [`Prologue::split`]. Она тотальна: любой буфер либо разбирается,
-//! либо даёт ошибку, но никогда не паникует.
+//! The entry point is [`Prologue::split`]. It is total: every buffer either parses
+//! or yields an error, but never panics.
 //!
-//! # Что здесь НЕ живёт: протокол продукта
+//! # What does NOT live here: the product protocol
 //!
-//! Документы, ходящие между клиентом, сервером и свидетелем — активация,
-//! распоряжение автора, положение файла, запрос доступа, лиз, отзывная,
-//! аттестация, журнал, каталог, правило по атрибутам, управляющие операции и
-//! реплика, — вынесены в `oc-protocol` решением Р-2 (`docs/plan.md`,
-//! «Д-ядро-к-заморозке»). Это был ПЕРЕНОС: байты на проводе не изменились.
+//! Documents exchanged between client, server, and witness: activation,
+//! author orders, file status, access requests, leases, revocations,
+//! attestation, journal, catalog, attribute rules, administrative operations, and
+//! replication were moved to `oc-protocol` by decision R-2 (`docs/plan.md`,
+//! "D-core-freeze"). This was a MOVE: wire bytes did not change.
 //!
-//! Граница проведена по темпу изменения, и это единственный довод, который её
-//! держит. Формат контейнера ЗАМИРАЕТ: после первого файла, ушедшего наружу,
-//! каждый байт заголовка обещан навсегда, и менять его можно только новой
-//! версией формата вместе с записанным решением (И-14). Протокол продукта
-//! РАСТЁТ вместе с сервером — новый вид запроса появляется тогда же, когда
-//! появляется механизм. Пока оба рода лежали в одном крейте, снаружи они были
-//! неразличимы, и обещание «этот крейт заморожен и открыт» относилось заодно к
-//! восьми с половиной тысячам строк, меняющихся каждую неделю.
+//! The boundary follows the rate of change, the only argument that
+//! sustains it. The container format FREEZES: once the first file goes outside,
+//! every header byte is promised forever and can change only through a new
+//! format version and a recorded decision (I-14). The product protocol
+//! GROWS with the server: a new request type appears when its mechanism
+//! appears. While both kinds lived in one crate, they were indistinguishable
+//! from outside, and the promise "this crate is frozen and open" also applied to
+//! eight and a half thousand lines changing every week.
 //!
-//! Стрелка зависимости одна: `oc-protocol` → `oc-format`. Обратной нет —
-//! ни один разборщик контейнера не зовёт ни один документ протокола. Общим
-//! остаётся [`FormatError`]: делить тип ошибки решение Р-2 не требовало, и
-//! несколько его вариантов (`UnsupportedLeaseVersion` и соседи) сегодня
-//! означают события чисто протокольные.
+//! There is one dependency direction: `oc-protocol` → `oc-format`. No reverse edge:
+//! no container parser calls any protocol document. [`FormatError`] remains
+//! shared: decision R-2 did not require splitting the error type, and
+//! several variants (`UnsupportedLeaseVersion` and neighbors) now
+//! represent purely protocol events.
 //!
-//! Деление оценено 2026-09-20 и ОТКЛОНЕНО — числа и довод в докстроке
-//! [`FormatError::BadHeaderSignature`]. Коротко: чисто протокольных вариантов
-//! три (`UnsupportedLeaseVersion`, `BadNoteChar`, `NotUtf8`), и ни один из них
-//! `oc-format` изнутри не возвращает, но четвёртый — `BadHeaderSignature` —
-//! общий по существу, и увести его нельзя, не сменив тип ошибки у всего
-//! `oc-protocol` и не задев тексты отказов и коды возврата `cc-cli`.
+//! Splitting was evaluated on 2026-09-20 and REJECTED: figures and rationale are in the docs for
+//! [`FormatError::BadHeaderSignature`]. Briefly, three variants are purely protocol-related:
+//! `UnsupportedLeaseVersion`, `BadNoteChar`, and `NotUtf8`. None is returned
+//! internally by `oc-format`, but a fourth, `BadHeaderSignature`, is
+//! inherently shared and cannot move without changing the error type across
+//! `oc-protocol` and affecting `cc-cli` denial messages and exit codes.
 
 pub mod content;
 pub mod edit;
@@ -75,45 +75,45 @@ use core::fmt;
 use core::num::NonZeroU32;
 use core::ops::Range;
 
-/// Магия версии 1. Ломающее изменение формата меняет её, и старый клиент
-/// отказывает, не пытаясь разобрать содержимое.
+/// Version 1 magic. A breaking format change changes it, causing old clients
+/// to reject the file without attempting to parse its content.
 pub const MAGIC: [u8; 8] = *b"CLOSECR1";
 
-/// Длина подписи Ed25519.
+/// Ed25519 signature length.
 pub const SIG_LEN: usize = 64;
 
-/// Длина хранимого nonce XChaCha20-Poly1305.
+/// Stored XChaCha20-Poly1305 nonce length.
 pub const NONCE_LEN: u64 = 24;
 
-/// Длина тега Poly1305.
+/// Poly1305 tag length.
 pub const TAG_LEN: u64 = 16;
 
-/// Верхняя граница заголовка. Проверяется до выделения памяти, поэтому
-/// объявленная длина не может стать вектором исчерпания памяти.
+/// Upper bound on header size. Checked before allocation so that
+/// the declared length cannot become a memory-exhaustion vector.
 pub const MAX_HEADER_LEN: u32 = 1 << 20;
 
-/// Верхняя граница числа слотов ключа.
+/// Upper bound on the number of key slots.
 pub const MAX_KEY_SLOTS: usize = 1024;
 
-/// Допустимый диапазон размера чанка. Нижняя граница — размер страницы, верхняя
-/// выбрана так, чтобы усиление чтения оставалось терпимым (`docs/format.md` 6.2).
+/// Allowed chunk size range. The lower bound is the page size; the upper bound
+/// keeps read amplification tolerable (`docs/format.md` 6.2).
 pub const MIN_CHUNK_SIZE: u32 = 4 * 1024;
-/// Верхняя граница размера чанка.
+/// Upper bound on chunk size.
 pub const MAX_CHUNK_SIZE: u32 = 1024 * 1024;
 
-/// Единственное место, где записано, какой размер чанка допустим.
+/// The single definition of which chunk sizes are valid.
 ///
-/// Публичная намеренно: проверять размер обязан и тот, кто собирает заголовок, и
-/// тот, кто его разбирает, и тот, кто принимает его от пользователя в командной
-/// строке. Условие, записанное в трёх местах, разъезжается при первой же правке
-/// границ, и разъедется оно молча — файл, принятый одной проверкой, окажется
-/// отвергнут другой.
+/// Deliberately public: the header assembler, the parser, and the code
+/// accepting the user's command-line value must all check the size.
+/// A condition written in three places diverges at the first boundary change,
+/// and does so silently: a file accepted by one check ends up
+/// rejected by another.
 ///
-/// Проверка на стороне ввода — не удобство, а защита: значение попадает в
-/// `SecretBuf::with_capacity`, то есть в выделение и обнуление буфера, ещё до
-/// того, как заголовок будет собран. `--chunk-size 4000000000` без этой проверки
-/// означал бы попытку выделить четыре гигабайта, а отказ выделения в Rust — это
-/// `abort` процесса, а не ошибка, которую можно показать пользователю.
+/// Input validation is protection, not convenience: the value reaches
+/// `SecretBuf::with_capacity`, allocating and zeroing a buffer, even before
+/// the header is assembled. Without this check, `--chunk-size 4000000000`
+/// would attempt a four-gigabyte allocation, and allocation failure in Rust means
+/// process `abort`, not an error that can be shown to the user.
 pub fn check_chunk_size(size: u32) -> Result<u32, FormatError> {
     if (MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&size) && size.is_power_of_two() {
         Ok(size)
@@ -122,15 +122,15 @@ pub fn check_chunk_size(size: u32) -> Result<u32, FormatError> {
     }
 }
 
-/// Смещение поля длины заголовка.
+/// Offset of the header length field.
 const HEADER_LEN_OFFSET: usize = MAGIC.len();
-/// Смещение самого заголовка.
+/// Offset of the header itself.
 const HEADER_OFFSET: usize = HEADER_LEN_OFFSET + 4;
 
-/// Идентичность защищённого файла: 16 случайных байт.
+/// Protected file identity: 16 random bytes.
 ///
-/// Намеренно не UUIDv7 — тот вкладывает в себя время создания и раскрыл бы дату
-/// упаковки любому, кто держит контейнер, но ещё не может его открыть.
+/// Deliberately not UUIDv7: it embeds creation time and would reveal the packaging
+/// date to anyone holding a container even before they can open it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileId(pub [u8; 16]);
 
@@ -144,135 +144,135 @@ impl fmt::Debug for FileId {
     }
 }
 
-/// Ошибки структурного разбора. Все они означают «этот буфер не наш контейнер»
-/// и ни одна не несёт данных из содержимого.
+/// Structural parsing errors. All mean "this buffer is not our container",
+/// and none carries data from the content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatError {
-    /// Первые восемь байт не совпали с [`MAGIC`].
+    /// The first eight bytes do not match [`MAGIC`].
     BadMagic,
-    /// Объявленная длина заголовка превышает [`MAX_HEADER_LEN`].
+    /// Declared header length exceeds [`MAX_HEADER_LEN`].
     HeaderTooLarge { declared: u32 },
-    /// Буфер короче, чем требует объявленная структура.
+    /// The buffer is shorter than the declared structure requires.
     Truncated { need: u64, have: u64 },
-    /// Смещения не помещаются в `usize` на этой платформе.
+    /// Offsets do not fit in `usize` on this platform.
     OffsetOverflow,
-    /// Размер чанка вне диапазона или не степень двойки.
+    /// Chunk size is out of range or not a power of two.
     BadChunkSize { got: u32 },
-    /// Число чанков не соответствует общей длине.
+    /// Chunk count does not match the total length.
     ChunkCountMismatch { expected: u32, got: u32 },
-    /// Обращение к чанку за пределами файла.
+    /// Access to a chunk beyond the file.
     ChunkOutOfRange { index: u32, count: u32 },
-    /// Длина значения поля не соответствует его типу.
+    /// A field value's length does not match its type.
     BadFieldLength { tag: u16, len: usize },
-    /// Теги полей идут не по возрастанию: дубликат или перестановка.
+    /// Field tags are not increasing: a duplicate or reordering.
     FieldsOutOfOrder { previous: u16, found: u16 },
-    /// Встречен неизвестный тег из критичного диапазона: файл использует
-    /// семантику, которой этот клиент не знает, и открывать его нельзя.
+    /// An unknown tag in the critical range was encountered: the file uses
+    /// semantics this client does not understand and must not be opened.
     UnknownCriticalField { tag: u16 },
-    /// Обязательное поле заголовка отсутствует.
+    /// A required header field is missing.
     MissingField { tag: u16 },
-    /// Ключ в поле присутствует, но состоит из нулей.
+    /// A key field is present but consists entirely of zeros.
     ///
-    /// Отдельно от [`FormatError::MissingField`] намеренно: «поля нет» и «поле
-    /// есть, но пустое» — разные события. Второе опаснее, потому что выглядит
-    /// заполненным и проходит все структурные проверки; именно так поле
-    /// закреплённого ключа подписи лизинга и оказалось нулевым во всех
-    /// выпущенных контейнерах.
+    /// Deliberately distinct from [`FormatError::MissingField`]: "field absent" and "field
+    /// present but empty" are different events. The latter is more dangerous because it appears
+    /// populated and passes all structural checks; that is precisely how the pinned
+    /// lease signing key field ended up zero in every
+    /// issued container.
     DegenerateKey { tag: u16 },
-    /// Адрес сервера содержит байт вне печатной части US-ASCII.
+    /// The server address contains a byte outside printable US-ASCII.
     ///
-    /// Отдельно от [`FormatError::BadFieldLength`] намеренно: длина здесь верна,
-    /// а негодно СОДЕРЖИМОЕ. Причина запрета — не эстетика: этот адрес печатается
-    /// человеку, чтобы он сравнил его с тем, куда собирается идти, и сравнение
-    /// имеет смысл ровно до тех пор, пока строка не умеет двигать курсор,
-    /// переворачивать порядок символов и притворяться другой буквой.
+    /// Deliberately distinct from [`FormatError::BadFieldLength`]: the length is correct
+    /// but the CONTENT is invalid. The ban is not aesthetic: this address is displayed
+    /// for a person to compare with their intended destination, and that comparison
+    /// is meaningful only while the string cannot move the cursor,
+    /// reverse character order, or masquerade as another letter.
     BadAddressByte { tag: u16, byte: u8 },
-    /// Записка содержит символ, который нельзя показывать человеку.
+    /// The note contains a character that must not be displayed to a person.
     ///
-    /// Отдельно от [`FormatError::BadAddressByte`], хотя обе про содержимое:
-    /// правила РАЗНЫЕ. Адрес обязан быть печатным ASCII — у него есть проводная
-    /// форма, и она такова. Записка — фраза на любом языке, и запрещены в ней
-    /// только управляющие символы и двунаправленные метки. Пока отказ был один
-    /// на двоих, человек с русской запиской читал «в адресе байт 0x00».
+    /// Distinct from [`FormatError::BadAddressByte`] although both concern content:
+    /// the rules DIFFER. An address must be printable ASCII: that is its wire
+    /// representation. A note is a phrase in any language; only control
+    /// characters and bidirectional marks are forbidden. While both shared one error,
+    /// a person with a Russian note would read "byte 0x00 in the address".
     ///
-    /// Хранится КОД, а не сам символ, и печатается тоже код: вывести
-    /// отвергнутый символ в текст ошибки значило бы пропустить его на экран
-    /// ровно тем путём, который проверка и закрывает.
+    /// The CODE is stored and printed, not the character itself: printing
+    /// a rejected character in an error message would let it onto the screen
+    /// through precisely the path the check closes.
     BadNoteChar { tag: u16, code: u32 },
-    /// Значение поля объявлено текстом, но текстом не является.
+    /// A field value is declared to be text but is not text.
     ///
-    /// Отдельно от [`FormatError::BadFieldLength`], и это исправление того же
-    /// класса, что и [`FormatError::BadNoteChar`]. Неудача `from_utf8`
-    /// сообщалась как ошибка ДЛИНЫ, хотя длина была верна, а негодны байты.
-    /// Правка, заводившая `BadNoteChar`, сняла одну заимствованную этикетку и
-    /// оставила рядом вторую — на том же самом поле.
+    /// Distinct from [`FormatError::BadFieldLength`], fixing the same class of
+    /// problem as [`FormatError::BadNoteChar`]. A `from_utf8` failure
+    /// was reported as a LENGTH error even though the length was correct and the bytes invalid.
+    /// The change introducing `BadNoteChar` removed one borrowed label
+    /// while leaving a second beside it on the very same field.
     NotUtf8 { tag: u16 },
-    /// Файл требует более новую версию клиента: так заявил ПИСАТЕЛЬ в
+    /// The file requires a newer client version, as declared by the WRITER in
     /// `min_reader_version`.
     ReaderTooOld { need: u16, have: u16 },
-    /// Класс защиты, которого эта сборка не исполняет.
+    /// A protection class this build does not implement.
     ///
-    /// Отдельно от версии формата: класс может быть добавлен и без смены версии, и
-    /// принять незнакомый класс значило бы читать файл по правилам нулевого.
+    /// Distinct from the format version: a class can be added without changing the version,
+    /// and accepting an unknown class would mean reading under class-zero rules.
     UnsupportedClass { class: u8 },
-    /// Версия самого ФОРМАТА вне того диапазона, который этот код умеет читать.
+    /// The FORMAT version itself is outside the range this code can read.
     ///
-    /// Отдельно от [`FormatError::ReaderTooOld`], и это не косметика. Там номер
-    /// означает версию клиента, здесь — версию формата, и раньше обе величины
-    /// уходили в одну структуру: наружу приходило «файлу нужен клиент версии 999»
-    /// для файла, объявившего `container_version = 999` и `min_reader_version = 1`.
-    /// Номер версии формата в поле, означающем версию клиента, — ровно та подмена
-    /// смыслов, которую этот репозиторий не допускает в байтах и не должен допускать
-    /// в диагностике.
+    /// Distinct from [`FormatError::ReaderTooOld`], not cosmetically. There the number
+    /// means client version; here it means format version. Previously both values
+    /// entered one structure, reporting "this file requires client version 999"
+    /// for a file declaring `container_version = 999` and `min_reader_version = 1`.
+    /// A format version in a field meaning client version is precisely the substitution
+    /// of meanings this repository forbids in bytes and must also forbid
+    /// in diagnostics.
     ///
-    /// `first` и `max` — границы ЧИТАЕМОГО диапазона, а не история формата.
-    /// Имя `first` осталось с тех пор, когда нижняя граница совпадала с первой
-    /// существовавшей версией; решение Р-1 (2026-09-19) их развело — версии 1–4
-    /// больше не читаются, — и поле несёт
-    /// `header::MIN_READABLE_CONTAINER_VERSION`, а не
-    /// `header::FIRST_CONTAINER_VERSION`. Переименование поля здесь стоило бы
-    /// правок в местах, не имеющих к решению отношения; неправда в докстроке
-    /// стоила бы дороже.
+    /// `first` and `max` bound the READABLE range, not the format's history.
+    /// The name `first` dates from when the lower bound matched the first
+    /// version ever created; decision R-1 (2026-09-19) separated them: versions 1–4
+    /// are no longer readable, and the field carries
+    /// `header::MIN_READABLE_CONTAINER_VERSION`, rather than
+    /// `header::FIRST_CONTAINER_VERSION`.
+    /// Renaming the field here would require edits unrelated to that decision;
+    /// a false doc comment would cost more.
     UnsupportedContainerVersion { version: u16, first: u16, max: u16 },
-    /// Версия документа лизинга, которой эта сборка не знает.
+    /// A lease document version this build does not recognize.
     ///
-    /// Отдельно от версии контейнера: документы независимы и меняются в разном
-    /// темпе, а один код ошибки на оба заставил бы пользователя гадать, что
-    /// именно новее — файл или разрешение к нему.
+    /// Distinct from the container version: the documents are independent and evolve at different
+    /// rates. A shared error would leave the user guessing which is
+    /// newer: the file or its permission.
     UnsupportedLeaseVersion { version: u16 },
-    /// Объявленная длина изменяемой области превышает
-    /// [`content::MAX_CONTENT_DESC_LEN`]. Проверяется до любого выделения памяти.
+    /// The declared mutable region length exceeds
+    /// [`content::MAX_CONTENT_DESC_LEN`]. Checked before any allocation.
     ContentDescTooLarge { declared: u32 },
-    /// MAC изменяемой области не сошёлся: её правил не владелец ключа
-    /// содержимого, либо она перенесена из другого файла. Деталей нет намеренно —
-    /// какая именно проверка не прошла, противнику знать незачем.
+    /// The mutable region MAC does not match: it was modified by someone other than the content
+    /// key holder, or moved from another file. Details are deliberately absent:
+    /// the attacker has no need to know precisely which check failed.
     BadContentMac,
-    /// Подпись заголовка не сходится.
+    /// Header signature mismatch.
     ///
-    /// Отдельный вариант от [`FormatError::BadContentMac`], хотя оба означают
-    /// «подлинность не подтверждена»: заголовок и изменяемая область заверены
-    /// разными ключами и разными сторонами, и пользователю это надо сказать
-    /// по-разному. «Файл подписан не тем, кем должен» и «файл правил не владелец
-    /// ключа содержимого» — разные события и разные действия в ответ.
+    /// Distinct from [`FormatError::BadContentMac`] although both mean
+    /// "authenticity not established": the header and mutable region are authenticated
+    /// by different keys and parties, and the user needs
+    /// different explanations. "The file was not signed by the expected signer" and "the file was edited
+    /// by someone other than the content key holder" are different events requiring different responses.
     ///
-    /// # Имя ШИРЕ смысла, и это осознано
+    /// # The name is BROADER than the meaning, deliberately acknowledged
     ///
-    /// `oc-protocol` возвращает этот же вариант, когда не сходится подпись
-    /// СВОЕГО документа — лизинга, распоряжения, отзывной, толчка реплики,
-    /// управляющей операции, — а заголовка там нет вовсе. Имя осталось от того
-    /// времени, когда все эти документы жили в `oc-format` рядом с заголовком.
+    /// `oc-protocol` returns this same variant when a signature on ITS OWN
+    /// document fails: a lease, order, revocation, replication nudge,
+    /// or administrative operation, none of which has a header. The name dates from
+    /// when all these documents lived in `oc-format` alongside the header.
     ///
-    /// Оценено 2026-09-20 и оставлено как есть. Завести
-    /// `oc_protocol::ProtocolError::BadSignature` значило бы сменить тип ошибки
-    /// у 108 публичных функций `oc-protocol` (672 упоминания `FormatError`
-    /// внутри крейта) и переписать разбор отказа у каждого потребителя, который
-    /// сегодня матчит именно этот вариант: `cc_cli::lease` (→ `BadSignature`),
-    /// `cc_cli::binding` (→ `NotAnchored`), `cc_viewer::session` (→ стирание
-    /// сессии), `cc_cli::exit`. Первые три задают ТЕКСТ отказа человеку,
-    /// четвёртый — КОД возврата, и оба обещаны неизменными. Цена — правка сотен
-    /// мест ради точности имени; выгода — точность имени. Полусделанное
-    /// разделение хуже общего перечисления, а сделанное целиком здесь дороже
-    /// неточности, названной вслух.
+    /// Evaluated on 2026-09-20 and left unchanged. Introducing
+    /// `oc_protocol::ProtocolError::BadSignature` would change the error type
+    /// of 108 public `oc-protocol` functions (672 references to `FormatError`
+    /// within the crate) and rewrite error handling in every consumer currently
+    /// matching this variant: `cc_cli::lease` (→ `BadSignature`),
+    /// `cc_cli::binding` (→ `NotAnchored`), `cc_viewer::session` (→ session
+    /// erasure), and `cc_cli::exit`. The first three define denial TEXT for the user,
+    /// the fourth the exit CODE, and both are promised to stay unchanged. Cost: edits to hundreds
+    /// of places for naming precision; benefit: naming precision. A half-finished
+    /// split is worse than a shared enum, while completing it here costs more
+    /// than explicitly acknowledged imprecision.
     BadHeaderSignature,
 }
 
@@ -345,27 +345,27 @@ impl fmt::Display for FormatError {
 
 impl core::error::Error for FormatError {}
 
-/// Разрезанный пролог контейнера: заимствует ровно те байты, которые подписаны.
+/// A split container prologue: borrows exactly the signed bytes.
 ///
-/// Хранение среза, а не разобранной структуры, — не оптимизация, а требование
-/// безопасности: подпись проверяется по исходным байтам, потому что повторная
-/// сериализация разобранного заголовка порождает всё семейство ошибок
-/// канонизации, известное по JWS и XML-DSig.
+/// Storing a slice rather than a parsed structure is a security requirement,
+/// not an optimization: signatures are verified over original bytes because
+/// reserializing a parsed header creates the entire family of
+/// canonicalization bugs known from JWS and XML-DSig.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Prologue<'a> {
-    /// Байты заголовка, ровно `declared_len` штук.
+    /// Header bytes, exactly `declared_len` of them.
     pub header: &'a [u8],
-    /// Подпись автора над транскриптом из
+    /// Author signature over the transcript from
     /// [`crate::verify::header_signing_transcript`].
     pub signature: &'a [u8; SIG_LEN],
-    /// Смещение первого байта после подписи.
+    /// Offset of the first byte after the signature.
     pub after_signature: u64,
     declared_len: u32,
 }
 
 impl<'a> Prologue<'a> {
-    /// Структурное разрезание: магия, границы, предел длины. Ни CBOR, ни
-    /// криптографии. Тотальна и дёшева, поэтому вызывается первой.
+    /// Structural splitting: magic, boundaries, length limit. No CBOR or
+    /// cryptography. Total and cheap, so it is called first.
     pub fn split(buf: &'a [u8]) -> Result<Self, FormatError> {
         let have = buf.len() as u64;
 
@@ -402,19 +402,19 @@ impl<'a> Prologue<'a> {
         Ok(Self { header, signature, after_signature: sig_end as u64, declared_len })
     }
 
-    /// Независимая сборка подписываемой строки — **только для теста-сверки**.
+    /// Independent construction of the signing string, **only for the comparison test**.
     ///
-    /// Рабочая реализация одна: [`crate::verify::header_signing_transcript`].
-    /// Эта собирает те же байты вручную и с зашитым литералом метки вместо
-    /// `label::HEADER_SIG` — в этом весь смысл: тест
-    /// `both_ways_of_building_the_signing_string_agree` сверяет их и падает,
-    /// если кто-то поменяет метку или порядок полей в одном месте и забудет в
-    /// другом.
+    /// There is one production implementation: [`crate::verify::header_signing_transcript`].
+    /// This one assembles the same bytes by hand with a hardcoded label literal instead of
+    /// `label::HEADER_SIG`, which is the point: the test
+    /// `both_ways_of_building_the_signing_string_agree` compares them and fails
+    /// if someone changes the label or field order in one place and forgets
+    /// the other.
     ///
-    /// Закрыта `cfg(test)`. Публичной она была вторым источником истины о
-    /// подписанных байтах в рабочей поверхности крейта: вызови её кто-нибудь
-    /// вместо настоящей — расхождение перестало бы быть заметным, потому что обе
-    /// стороны считали бы по одной и той же копии.
+    /// Gated by `cfg(test)`. When public, it was a second source of truth for
+    /// signed bytes in the crate's production surface. If someone called it
+    /// instead of the real implementation, divergence would become invisible because both
+    /// sides would compute using the same copy.
     #[cfg(test)]
     pub(crate) fn signing_transcript(&self, suite_id: u8, out: &mut Vec<u8>) {
         out.clear();
@@ -427,10 +427,10 @@ impl<'a> Prologue<'a> {
     }
 }
 
-/// Отображение диапазонов открытого текста в диапазоны шифротекста.
+/// Mapping plaintext ranges to ciphertext ranges.
 ///
-/// Чистая арифметика: именно её вызывает виртуальная файловая система, когда
-/// приложение читает четыре килобайта из середины документа.
+/// Pure arithmetic: called by the virtual filesystem when an
+/// application reads four kilobytes from the middle of a document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
     chunk_size: NonZeroU32,
@@ -440,11 +440,11 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Проверяет согласованность и строит отображение.
+    /// Check consistency and construct the mapping.
     ///
-    /// Пустой файл имеет ровно один чанк нулевой длины. Так у каждого файла есть
-    /// хотя бы один тег AEAD и хотя бы один лист дерева, и ни то ни другое не
-    /// требует особого случая.
+    /// An empty file has exactly one zero-length chunk. Every file therefore has
+    /// at least one AEAD tag and at least one tree leaf, with neither
+    /// requiring a special case.
     pub fn new(
         chunk_size: u32,
         chunk_count: u32,
@@ -474,22 +474,22 @@ impl Layout {
         u32::try_from(count).map_err(|_| FormatError::OffsetOverflow)
     }
 
-    /// Размер чанка в байтах открытого текста.
+    /// Chunk size in plaintext bytes.
     pub fn chunk_size(&self) -> u32 {
         self.chunk_size.get()
     }
 
-    /// Число чанков, всегда не меньше единицы.
+    /// Chunk count, always at least one.
     pub fn chunk_count(&self) -> u32 {
         self.chunk_count
     }
 
-    /// Длина открытого текста целиком.
+    /// Total plaintext length.
     pub fn total_len(&self) -> u64 {
         self.total_len
     }
 
-    /// Номер чанка, содержащего заданное смещение открытого текста.
+    /// Index of the chunk containing the given plaintext offset.
     // Делитель ненулевой по типу `NonZeroU32`.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn chunk_of(&self, plaintext_offset: u64) -> Result<u32, FormatError> {
@@ -501,7 +501,7 @@ impl Layout {
         Ok(index)
     }
 
-    /// Диапазон чанков, покрывающих чтение. Пустое чтение даёт `None`.
+    /// Range of chunks covering a read. An empty read yields `None`.
     pub fn chunks_for(&self, offset: u64, len: u64) -> Result<Option<Range<u32>>, FormatError> {
         if len == 0 || offset >= self.total_len {
             return Ok(None);
@@ -518,7 +518,7 @@ impl Layout {
         Ok(Some(first..end))
     }
 
-    /// Длина открытого текста конкретного чанка: последний чанк короче.
+    /// Plaintext length of a particular chunk: the last chunk is shorter.
     pub fn plaintext_len_of(&self, index: u32) -> Result<u64, FormatError> {
         if index >= self.chunk_count {
             return Err(FormatError::ChunkOutOfRange { index, count: self.chunk_count });
@@ -528,10 +528,10 @@ impl Layout {
         Ok(self.total_len.saturating_sub(start).min(size))
     }
 
-    /// Диапазон байтов чанка на диске: `nonce ‖ шифротекст ‖ тег`.
+    /// On-disk byte range of a chunk: `nonce ‖ ciphertext ‖ tag`.
     ///
-    /// Все чанки, кроме последнего, полны, поэтому смещение считается умножением,
-    /// а не суммированием таблицы.
+    /// All chunks except the last are full, so the offset is computed by multiplication,
+    /// rather than summing a table.
     pub fn ciphertext_span(&self, index: u32) -> Result<Range<u64>, FormatError> {
         let plaintext_len = self.plaintext_len_of(index)?;
         let framed_full = u64::from(self.chunk_size.get())

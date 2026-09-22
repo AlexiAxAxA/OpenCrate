@@ -1,24 +1,24 @@
-//! Реплика состояния сервера: толчок и подтверждение (E2, B4;
+//! Server state replication: push and acknowledgment (E2, B4;
 //! `docs/protocol.md` §9.17).
 //!
-//! # Что это и чего это не даёт
+//! # What it is and what it does not provide
 //!
-//! Реплика — отдельный процесс, который принимает снимки состояния сервера и
-//! подтверждает КОНКРЕТНЫЕ байты своей подписью. Профиль `witnessed` означает,
-//! что сервер не отдаёт успех, пока такого подтверждения нет; `mirrored` —
-//! что копия уходит после успеха и у хвоста ненулевой RPO.
+//! The replica is a separate process that accepts server state snapshots and
+//! acknowledges SPECIFIC bytes with its signature. The `witnessed` profile means
+//! that the server does not return success until acknowledgment arrives; `mirrored` means
+//! the copy is sent after success, with a nonzero RPO for the tail.
 //!
-//! Чего это не даёт: другой машины. Реплика в соседнем процессе или контейнере
-//! переживает падение сервера, но не диск, не машину и не человека с правами
-//! администратора. Обещание профиля — ровно «подтверждённые операции переживут
-//! потерю СЕРВЕРА», и границу эту называет и сервер, и реплика.
+//! What it does not provide: another machine. A replica in an adjacent process or container
+//! survives server failure, but not loss of the disk or machine, nor an administrator.
+//! The profile promises exactly that "acknowledged operations survive loss
+//! of the SERVER"; both server and replica state this boundary.
 //!
-//! # Непрерывность
+//! # Continuity
 //!
-//! Толчок несёт номер фиксации и отпечаток ПРЕДЫДУЩЕГО снимка. Реплика
-//! принимает только продолжение своей истории: разрыв — `SnapshotRequired`,
-//! тот же номер с другим отпечатком — `HistoryConflict`. Первое — повод
-//! послать снимок заново, второе — улика: две истории одного сервера.
+//! A push carries the commit number and the PREVIOUS snapshot's fingerprint. The replica
+//! accepts only a continuation of its own history: a gap yields `SnapshotRequired`,
+//! the same number with a different fingerprint yields `HistoryConflict`. The former calls for
+//! resending a snapshot; the latter is evidence of two histories for one server.
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
@@ -26,9 +26,9 @@ use oc_crypto::sign::Signer;
 use oc_crypto::transcript::Transcript;
 use oc_crypto::{label, sha256};
 
-/// Версия раскладки обоих документов.
+/// Layout version of both documents.
 pub const VERSION: u8 = 1;
-/// Предел снимка состояния: столько же, сколько сообщение провода.
+/// State snapshot limit: the same as the wire message limit.
 pub const MAX_STATE: usize = 2 * 1024 * 1024;
 
 const SIG: usize = oc_crypto::sign::SIGNATURE_LEN;
@@ -60,31 +60,31 @@ mod ack_tag {
     pub const AT: u16 = 7;
 }
 
-/// Снимок состояния, посланный реплике.
+/// A state snapshot sent to the replica.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Push {
     pub authority_id: [u8; 16],
     pub epoch: u64,
-    /// Номер фиксации: растёт на единицу с каждой записью состояния.
+    /// Commit number: increases by one with each state write.
     pub seq: u64,
-    /// Отпечаток предыдущего снимка; нули у первого и у снимка «с нуля».
+    /// Previous snapshot's fingerprint; zero for the first and for a bootstrap snapshot.
     pub previous: [u8; 32],
-    /// Отпечаток снимка — он же то, что подтверждает реплика.
+    /// Snapshot fingerprint: exactly what the replica acknowledges.
     pub state_hash: [u8; 32],
-    /// Снимок «с нуля»: реплика принимает его, не сверяя непрерывность.
-    /// Посылается ТОЛЬКО в ответ на `SnapshotRequired` самой реплики.
+    /// Bootstrap snapshot: accepted without checking continuity.
+    /// Sent ONLY in response to the replica's own `SnapshotRequired`.
     pub snapshot: bool,
     pub at: i64,
-    /// Сами байты состояния.
+    /// The state bytes themselves.
     pub state: Vec<u8>,
 }
 
 impl Push {
-    /// Тело без подписи. Байты состояния в тело входят, но подпись покрывает
-    /// их через отпечаток — сверять его обязан принимающий.
+    /// Unsigned body. State bytes are included in the body, but the signature covers
+    /// them through their fingerprint; the recipient must check it.
     ///
     /// # Errors
-    /// [`FormatError`] — снимок больше предела или поле не кодируется.
+    /// [`FormatError`]: oversized snapshot or unencodable field.
     pub fn body(&self) -> Result<Vec<u8>, FormatError> {
         use push_tag as t;
         if self.state.len() > MAX_STATE {
@@ -106,10 +106,10 @@ impl Push {
         Ok(w.finish().to_vec())
     }
 
-    /// Подписать ключом подписи лизингов сервера.
+    /// Sign with the server's lease-signing key.
     ///
     /// # Errors
-    /// [`FormatError`] — тело или подпись.
+    /// [`FormatError`]: body or signature.
     pub fn sign(&self, signer: &dyn Signer) -> Result<Vec<u8>, FormatError> {
         let body = self.body()?;
         let sig = signer
@@ -120,10 +120,10 @@ impl Push {
         Ok(out)
     }
 
-    /// Разобрать и проверить подпись ключом сервера, которому реплика служит.
+    /// Parse and verify the signature using the key of the server this replica serves.
     ///
     /// # Errors
-    /// [`FormatError`] — раскладка, подпись или отпечаток снимка.
+    /// [`FormatError`]: layout, signature or snapshot fingerprint.
     pub fn open(bytes: &[u8], authority: &[u8; KEY]) -> Result<Self, FormatError> {
         use push_tag as t;
         let (sig, body) = bytes.split_at_checked(SIG).ok_or(bad(0, bytes.len()))?;
@@ -185,23 +185,23 @@ impl Push {
     }
 }
 
-/// Подтверждение реплики: она сохранила ИМЕННО эти байты.
+/// Replica acknowledgment: it stored EXACTLY these bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ack {
     pub authority_id: [u8; 16],
     pub epoch: u64,
     pub seq: u64,
     pub state_hash: [u8; 32],
-    /// Ключ реплики: кто подтвердил.
+    /// Replica key: who acknowledged.
     pub replica: [u8; KEY],
     pub at: i64,
 }
 
 impl Ack {
-    /// Тело без подписи.
+    /// Unsigned body.
     ///
     /// # Errors
-    /// [`FormatError`] — поле не кодируется.
+    /// [`FormatError`]: a field cannot be encoded.
     pub fn body(&self) -> Result<Vec<u8>, FormatError> {
         use ack_tag as t;
         let mut w = TlvWriter::new();
@@ -215,10 +215,10 @@ impl Ack {
         Ok(w.finish().to_vec())
     }
 
-    /// Подписать ключом реплики, названным в самом подтверждении.
+    /// Sign with the replica key named in the acknowledgment itself.
     ///
     /// # Errors
-    /// [`FormatError`] — ключ подписанта не тот или подпись не удалась.
+    /// [`FormatError`]: wrong signing key or signature failure.
     pub fn sign(&self, signer: &dyn Signer) -> Result<Vec<u8>, FormatError> {
         if signer.public_key() != self.replica {
             return Err(bad(ack_tag::REPLICA, KEY));
@@ -232,13 +232,13 @@ impl Ack {
         Ok(out)
     }
 
-    /// Разобрать и проверить подпись ключом реплики, известным заранее.
+    /// Parse and verify the signature with a previously known replica key.
     ///
-    /// Ключ берётся снаружи — из настройки сервера, — а поле внутри обязано с
-    /// ним совпасть: подтверждение, называющее доверенным себя, не годится.
+    /// The key comes from outside, from the server configuration; the internal field must
+    /// match it. An acknowledgment declaring itself trustworthy is not acceptable.
     ///
     /// # Errors
-    /// [`FormatError`] — раскладка, подпись или чужой ключ.
+    /// [`FormatError`]: layout, signature or wrong key.
     pub fn open(bytes: &[u8], replica: &[u8; KEY]) -> Result<Self, FormatError> {
         use ack_tag as t;
         let (sig, body) = bytes.split_at_checked(SIG).ok_or(bad(0, bytes.len()))?;
@@ -278,20 +278,20 @@ impl Ack {
     }
 }
 
-/// Почему реплика снимок не приняла.
+/// Why the replica rejected the snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Refusal {
-    /// Разрыв истории: нужен снимок «с нуля».
+    /// History gap: a bootstrap snapshot is required.
     SnapshotRequired = 1,
-    /// Тот же номер фиксации с другим отпечатком: две истории.
+    /// The same commit number with a different fingerprint: two histories.
     HistoryConflict = 2,
-    /// Снимок другого сервера или другой эпохи.
+    /// A snapshot from another server or epoch.
     OtherScope = 3,
 }
 
 impl Refusal {
-    /// Из байта; незнакомый — `None` (И-10).
+    /// From a byte; unknown values return `None` (I-10).
     #[must_use]
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
@@ -374,7 +374,7 @@ mod tests {
         }
     }
 
-    /// ТОЛЧОК ПРОВЕРЯЕТСЯ КЛЮЧОМ СЕРВЕРА, А СНИМОК — СВОИМ ОТПЕЧАТКОМ.
+    /// THE PUSH IS VERIFIED WITH THE SERVER KEY, THE SNAPSHOT WITH ITS OWN FINGERPRINT.
     #[test]
     fn a_push_is_bound_to_the_authority_key_and_to_its_own_bytes() {
         let server = Ed25519Signer::from_seed(&[0x21; 32]);
@@ -394,7 +394,7 @@ mod tests {
         assert!(lying.sign(&server).is_err());
     }
 
-    /// ПОДТВЕРЖДЕНИЕ ПРИВЯЗАНО К КЛЮЧУ РЕПЛИКИ, ИЗВЕСТНОМУ ЗАРАНЕЕ.
+    /// THE ACKNOWLEDGMENT IS BOUND TO THE PREVIOUSLY KNOWN REPLICA KEY.
     #[test]
     fn an_ack_is_bound_to_the_replica_key_known_in_advance() {
         let replica = Ed25519Signer::from_seed(&[0x31; 32]);
@@ -442,12 +442,12 @@ mod tests {
         }
     }
 
-    /// ПРИЗНАК «СНИМОК С НУЛЯ» — РОВНО 0 ИЛИ 1.
+    /// THE BOOTSTRAP SNAPSHOT FLAG IS EXACTLY 0 OR 1.
     ///
-    /// До 2026-09-20 он читался как «байт не ноль»: 255 разных байтов отменяли
-    /// сверку непрерывности истории одинаково, и перекодирование приводило их
-    /// всех к единице (И-7). Подделка здесь ПОДПИСЫВАЕТСЯ ключом сервера — иначе
-    /// проба зеленела бы на отказе подписи и о разборе не говорила бы ничего.
+    /// Before 2026-09-20 it was read as "nonzero byte": 255 different bytes identically
+    /// disabled the history continuity check, and re-encoding reduced them
+    /// all to one (I-7). The forgery here IS SIGNED with the server key; otherwise
+    /// the test would pass on signature rejection and say nothing about parsing.
     #[test]
     fn the_snapshot_flag_is_exactly_zero_or_one() {
         let server = Ed25519Signer::from_seed(&[0x24; 32]);
@@ -484,7 +484,7 @@ mod tests {
         }
     }
 
-    /// СНИМОК БОЛЬШЕ ПРЕДЕЛА НЕ КОДИРУЕТСЯ И НЕ РАЗБИРАЕТСЯ.
+    /// AN OVERSIZED SNAPSHOT IS NEITHER ENCODED NOR PARSED.
     #[test]
     fn a_state_above_the_limit_is_refused() {
         let server = Ed25519Signer::from_seed(&[0x23; 32]);

@@ -1,9 +1,9 @@
-//! Лизинг версии 2: сервер везёт получателю СВОЙ профиль под своей подписью.
+//! Lease version 2: the server sends its OWN profile to the recipient under its signature.
 //!
-//! Проверяется не «поле сохранилось», а три свойства, ради которых поле заведено:
-//! документ с профилем НЕ выглядит как прежний (иначе клиент прежней сборки
-//! молча пропустил бы ужесточение), профиль покрыт подписью (иначе его снял бы
-//! любой, кто держит провод), и версия сходится с составом полей в обе стороны.
+//! Checks three properties motivating the field, not merely "the field survived":
+//! a document with a profile MUST NOT look like the old version (otherwise an old client
+//! would silently skip the restriction), the signature covers the profile (otherwise
+//! anyone controlling the wire could remove it), and version and field set agree in both directions.
 
 // Индексирование, срезы и паника разрешены ЗДЕСЬ и только здесь: проба правит
 // байты заведомо известной раскладки, и выход за край обязан уронить прогон, а
@@ -23,7 +23,7 @@ use oc_protocol::lease::{self, Lease, LEASE_VERSION, LEASE_VERSION_WITH_SERVER_P
 use oc_format::FormatError;
 use oc_policy::{Action, Binding, LeaseFacts, Network, Policy, Timestamp, TpmClock};
 
-/// Профиль сервера: смотреть можно, выгружать нельзя, привязка не ниже железа.
+/// Server profile: viewing allowed, export forbidden, binding at least hardware-backed.
 fn profile() -> Policy {
     let mut policy = Policy::deny_all().allow(Action::View);
     policy.min_binding = Binding::Hardware;
@@ -59,18 +59,18 @@ fn server() -> oc_crypto::sign::Ed25519Signer {
     oc_crypto::sign::Ed25519Signer::from_seed(&[0x5a; 32])
 }
 
-/// Значение поля версии лежит первым полем: тег(2) ‖ длина(4) ‖ значение(2).
+/// The version value is in the first field: tag(2) ‖ length(4) ‖ value(2).
 fn set_version(body: &mut [u8], version: u16) {
     assert_eq!(u16::from_le_bytes([body[0], body[1]]), tag::VERSION, "версия не первое поле");
     assert_eq!(u32::from_le_bytes([body[2], body[3], body[4], body[5]]), 2, "версия не u16");
     body[6..8].copy_from_slice(&version.to_le_bytes());
 }
 
-/// Профиль доезжает целиком, и документ при этом ОБЪЯВЛЯЕТ себя версией 2.
+/// The whole profile arrives, and the document DECLARES itself version 2.
 ///
-/// Обе половины важны. Круг без версии означал бы, что ужесточение доехало до
-/// нас — но ничего не говорил бы о том, что случится у клиента, собранного до
-/// появления поля.
+/// Both halves matter. A round trip without a version check would mean that the restriction reached
+/// us, while saying nothing about what happens in a client built before
+/// the field existed.
 #[test]
 fn a_profile_travels_whole_and_the_document_calls_itself_version_two() {
     let body = lease::encode(&lease(Some(profile()))).unwrap();
@@ -83,10 +83,10 @@ fn a_profile_travels_whole_and_the_document_calls_itself_version_two() {
     assert_eq!(lease::decode(&body).unwrap(), lease(Some(profile())));
 }
 
-/// Без профиля версия прежняя — байт в байт то, что было до B4a.
+/// Without a profile, the version stays old: byte for byte as before B4a.
 ///
-/// Это условие того, что замороженный вектор `tests/kat/lease.kat` остаётся
-/// верен (И-14): новое поле не имеет права менять документы, в которых его нет.
+/// This is required for the frozen vector `tests/kat/lease.kat` to remain
+/// valid (I-14): a new field must not change documents where it is absent.
 #[test]
 fn without_a_profile_the_document_stays_version_one() {
     let body = lease::encode(&lease(None)).unwrap();
@@ -95,12 +95,12 @@ fn without_a_profile_the_document_stays_version_one() {
     assert_eq!(lease::decode(&body).unwrap().facts.server_policy, None);
 }
 
-/// Версия 1 с профилем отвергается: критичное поле, которого в этой версии нет.
+/// Version 1 with a profile is rejected: a critical field absent from that version.
 ///
-/// Так выглядит попытка протащить ужесточение мимо версии — и так же выглядит
-/// сервер, забывший поднять версию. Разбирать такой документ нельзя ни в каком
-/// из двух случаев: приняв его, мы приняли бы правило, о котором договорённости
-/// нет.
+/// This is what bypassing the version to smuggle in a restriction looks like, and also what
+/// a server forgetting to bump the version looks like. The document must not be parsed
+/// in either case: accepting it would accept a rule on which no agreement
+/// exists.
 #[test]
 fn version_one_carrying_a_profile_is_refused() {
     let mut body = lease::encode(&lease(Some(profile()))).unwrap();
@@ -114,12 +114,12 @@ fn version_one_carrying_a_profile_is_refused() {
     }
 }
 
-/// Версия 2 без профиля отвергается: обещанное поле пропало по дороге.
+/// Version 2 without a profile is rejected: a promised field disappeared in transit.
 ///
-/// Именно так выглядит снятие ужесточения вырезанием поля. Подпись такую правку
-/// и так не переживёт, но разборщик обязан отказать САМ: он вызывается и там,
-/// где подпись проверяют после него, и «поле молча исчезло» не должно иметь
-/// исхода «доступ шире».
+/// This is precisely how removing a restriction by cutting out its field looks. The signature
+/// would not survive anyway, but the parser must reject it INDEPENDENTLY: it is also called where
+/// the signature is checked afterward, and "a field silently disappeared" must not
+/// result in "broader access".
 #[test]
 fn version_two_without_a_profile_is_refused() {
     let mut body = lease::encode(&lease(None)).unwrap();
@@ -131,13 +131,13 @@ fn version_two_without_a_profile_is_refused() {
     }
 }
 
-/// Версия из будущего отвергается по номеру, до разбора полей.
+/// A future version is rejected by number before field parsing.
 ///
-/// Ровно это и делает клиент прежней сборки, встретив нашу версию 2: он не
-/// знает поля 12 и не обязан его понимать — он видит незнакомую версию и
-/// отказывает. Проверить это «изнутри» нечем, поэтому проверяется механизм:
-/// незнакомый номер — отказ, а не разбор по мере сил. Номер из будущего — 4:
-/// третью занял признак аттестации (B6b).
+/// This is exactly what an old client does upon encountering our version 2: it does not
+/// know field 12 and need not understand it; it sees an unknown version and
+/// rejects it. There is no way to test that "from within", so the mechanism is tested:
+/// an unknown number means rejection, not best-effort parsing. The future number is 4:
+/// version 3 was taken by the attestation flag (B6b).
 #[test]
 fn an_unknown_version_is_refused_by_its_number() {
     let mut body = lease::encode(&lease(Some(profile()))).unwrap();
@@ -149,10 +149,10 @@ fn an_unknown_version_is_refused_by_its_number() {
     }
 }
 
-/// Правка ЛЮБОГО байта профиля ломает подпись сервера.
+/// Changing ANY profile byte breaks the server signature.
 ///
-/// Перебором по всей области профиля: подпись обязана покрывать её целиком.
-/// Профиль лежит последним полем — местом, которое пропускают первым.
+/// Every position in the profile is tested: the signature must cover it all.
+/// The profile is the last field, the location most easily overlooked.
 #[test]
 fn flipping_any_byte_of_the_profile_breaks_the_signature() {
     let body = lease::encode(&lease(Some(profile()))).unwrap();
@@ -173,11 +173,11 @@ fn flipping_any_byte_of_the_profile_breaks_the_signature() {
     }
 }
 
-/// Профиль нельзя срезать: укороченное тело не принимается подписью.
+/// The profile cannot be cut off: signature verification rejects the shortened body.
 ///
-/// Отдельной пробой от правки байта, потому что защищает другое. Правка меняет
-/// содержание ужесточения, срез — снимает его целиком, и снятие выгоднее
-/// противнику: оно возвращает права автора, то есть максимум из достижимого.
+/// Separate from byte mutation because it protects against something different. Mutation changes
+/// a restriction; cutting removes it altogether, which benefits the adversary more:
+/// it restores the author's permissions, the maximum attainable access.
 #[test]
 fn cutting_the_profile_off_is_not_accepted() {
     let body = lease::encode(&lease(Some(profile()))).unwrap();
@@ -192,11 +192,11 @@ fn cutting_the_profile_off_is_not_accepted() {
     );
 }
 
-/// Лизинг версии 2 сходится с собственным замороженным вектором.
+/// Lease version 2 matches its own frozen vector.
 ///
-/// Вектор ОТДЕЛЬНЫМ файлом, а не строкой в `lease.kat`: тот заморожен вместе с
-/// документом версии 1 и меняться не вправе (И-14). Новый документ — новый
-/// файл; это добавление свидетеля, а не перевыпуск старого.
+/// The vector is a SEPARATE file rather than a line in `lease.kat`: that file is frozen with
+/// the version 1 document and must not change (I-14). New document, new
+/// file: an added witness, not a reissue of the old one.
 #[test]
 fn the_version_two_lease_matches_its_frozen_vector() {
     let v = load_kat("lease-v2.kat");
@@ -234,7 +234,7 @@ fn load_kat(name: &str) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
-/// Выпустить вектор лизинга версии 2. Инструмент, не проверка.
+/// Generate the lease version 2 vector. A tool, not a test.
 #[test]
 #[ignore = "инструмент перевыпуска векторов, а не проверка"]
 fn print_version_two_lease_vector() {

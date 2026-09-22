@@ -1,53 +1,53 @@
-//! Изменяемая область контейнера.
+//! The container's mutable region.
 //!
-//! Автора нет рядом, когда файл правят, поэтому подписать изменённое содержимое
-//! он не может. Эта область заверена не подписью, а MAC на ключе, производном от
-//! ключа содержимого: пересчитать её может тот, кто владеет CEK, и никто другой.
+//! The author is not present when a file is edited and therefore cannot sign
+//! the modified content. This region is authenticated by a MAC rather than a signature,
+//! using a key derived from the content key: only a CEK holder can recompute it.
 //!
-//! Здесь же живут `total_len` и `chunk_count`. Это единственное место, где
-//! записана длина файла, и записана она **под MAC**. Отсюда обрезание файла
-//! обнаруживается сразу при открытии, а не когда чтение дойдёт до хвоста — до
-//! которого виртуальная файловая система может не дойти никогда.
+//! `total_len` and `chunk_count` also live here. This is the only place
+//! where file length is recorded, and it is **under the MAC**. Thus truncation
+//! is detected immediately on opening, rather than when reading reaches the tail,
+//! which a virtual filesystem may never reach.
 
 use crate::tlv::{TlvReader, TlvWriter, UnknownTag, unknown_tag_action};
 use crate::{FormatError, Layout};
 use oc_crypto::mac::{self, MAC_LEN};
 use oc_crypto::{MacKey, SigAlg, Transcript, label};
 
-/// Теги полей изменяемой области.
+/// Field tags for the mutable region.
 pub mod tag {
     pub const TOTAL_LEN: u16 = 1;
     pub const CHUNK_COUNT: u16 = 2;
     pub const TREE_ROOT: u16 = 3;
     pub const VERSION_COUNTER: u16 = 4;
-    /// Смещение футера. **Главный источник этой величины** — решение, перенесённое в версию 4.
+    /// Footer offset. **The authoritative source of this value**: a decision moved to version 4.
     ///
-    /// Тег 16 подписанного заголовка объявляет то же самое и сожжён: футер лежит
-    /// за нагрузкой, правка меняет её длину, и смещение обязано жить там, где
-    /// оно может измениться без автора — рядом с `total_len` и `chunk_count`,
-    /// описывающими то же «как файл выглядит сейчас».
+    /// Tag 16 in the signed header declares the same value and is permanently retired: the footer
+    /// follows the payload, whose length changes with edits, so the offset must live where
+    /// it can change without the author, alongside `total_len` and `chunk_count`,
+    /// which likewise describe "what the file looks like now".
     ///
-    /// Смещение стоит под MAC, а не под подписью, поэтому держатель `CEK` его
-    /// подменить может. Отсюда условие, без которого решение неверно: **футер
-    /// вправе нести только самозаверяющееся содержимое** — токен службы времени,
-    /// встречную подпись. Таблица тегов себя не заверяет, и класть её сюда
-    /// нельзя, не пересмотрев решение. Разбор — в `docs/format.md`, раздел
-    /// «ВЕРСИЯ 3 ОТКРЫТА», пункт 6.
+    /// The offset is under a MAC rather than a signature, so a `CEK` holder can
+    /// replace it. The decision therefore requires this condition: **the footer
+    /// may carry only self-authenticating content**, such as a timestamp authority token
+    /// or a countersignature. A tag table does not authenticate itself and cannot go here
+    /// without revisiting the decision. Discussion: `docs/format.md`, section
+    /// "VERSION 3 IS OPEN", item 6.
     pub const FOOTER_OFFSET: u16 = 5;
-    /// Подпись редактировавшего устройства. **Начиная с версии 4.**
+    /// Signature of the editing device. **Since version 4.**
     ///
-    /// Диапазон критичный: клиент, не знающий про редактирование, обязан
-    /// ОТКАЗАТЬСЯ открывать правленый файл, а не открыть и промолчать.
-    /// Необязательный тег сделал бы правку незаметной ровно для того, кто не
-    /// умеет её проверить.
+    /// The range is critical: a client unaware of editing must
+    /// REFUSE to open an edited file, rather than open it silently.
+    /// An optional tag would make edits invisible precisely to a client unable
+    /// to verify them.
     pub const EDITOR: u16 = 6;
 }
 
-/// Теги внутри записи подписи редактора (тег 6).
+/// Tags inside the editor signature record (tag 6).
 ///
-/// Вложенный TLV, а не склейка по фиксированным смещениям: величин пять, и
-/// вторая система кодирования рядом с существующей — это второе место, которое
-/// однажды разойдётся с первым.
+/// Nested TLV rather than concatenation at fixed offsets: there are five values,
+/// and a second encoding system alongside the existing one is another place
+/// that will eventually diverge from the first.
 pub mod editor_tag {
     pub const SIG_ALG: u16 = 1;
     pub const SESSION_HEAD: u16 = 2;
@@ -56,64 +56,64 @@ pub mod editor_tag {
     pub const SIGNATURE: u16 = 5;
 }
 
-/// Первая версия формата, знающая подпись редактора.
+/// First format version supporting editor signatures.
 pub const FIRST_EDITING_VERSION: u16 = 4;
 
-/// Длина подписи RSA-PSS над модулем RSA-2048.
+/// Length of an RSA-PSS signature with an RSA-2048 modulus.
 pub const EDITOR_SIGNATURE_LEN: usize = oc_crypto::rsa::MODULUS_LEN;
 
-/// Длина головы журнала: `u64le(size)` и корень в 32 байта.
+/// Journal head length: `u64le(size)` and a 32-byte root.
 pub const JOURNAL_HEAD_LEN: usize = 40;
 
-/// Верхняя граница сертификата ключа подписи.
+/// Upper bound on the signing key certificate.
 ///
-/// Изменяемая область целиком ограничена 64 КиБ, и без собственного предела
-/// сертификат съел бы её всю, вытеснив поля, ради которых она существует.
+/// The entire mutable region is limited to 64 KiB; without its own limit,
+/// a certificate could consume it all, displacing the fields it exists for.
 pub const MAX_CERTIFIED_BY_LEN: usize = 8 * 1024;
 
-/// Голова журнала сервера, последняя виденная подписывающим.
+/// The server journal head last seen by the signer.
 ///
-/// Носится в подписи ради сцепления в духе gossip: контейнеры ходят между
-/// людьми, поэтому любые два обменивающихся клиента невольно сверяют свои
-/// представления об истории. Сервер, показавший двоим разные ветви, ловится
-/// первым же файлом, пересёкшим границу между ними, — а не только тем клиентом,
-/// который аккуратно вёл закрепление головы.
+/// Carried in the signature for gossip-style linking: containers move between
+/// people, so any two clients exchanging them implicitly compare their
+/// views of history. A server that showed two parties different branches is exposed
+/// by the first file crossing between them, rather than only by a client
+/// that carefully maintained head pinning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JournalHead {
-    /// Число записей. Нужно для доказательства непротиворечивости.
+    /// Number of entries. Required for a consistency proof.
     pub size: u64,
-    /// Корень над записями.
+    /// Root over the entries.
     pub root: [u8; 32],
 }
 
-/// Подпись редактировавшего устройства и всё, что она заверяет.
+/// Signature of the editing device and everything it attests.
 ///
-/// Пять величин, а не одна подпись, и каждая нужна:
+/// Five values rather than just a signature, each necessary:
 ///
-/// * `sig_alg` — иначе схема подписи не выражена, а это `alg: none` из JWS;
-/// * `session_head` — голова хеш-цепочки СОХРАНЕНИЙ. Подпись покрывает сеанс, а
-///   не каждое сохранение: Word сохраняет по нескольку раз в минуту, а область
-///   ограничена 64 КиБ;
-/// * `journal_head` — см. [`JournalHead`];
-/// * `certified_by` — сертификат ключа подписи. Без него ротация ключа
-///   потребовала бы повторной сверки отпечатка вторым каналом со всеми;
-/// * `signature` — собственно подпись.
+/// * `sig_alg`: otherwise the signature scheme is unspecified, like JWS `alg: none`;
+/// * `session_head`: head of the SAVES hash chain. The signature covers a session,
+///   not each save: Word saves several times per minute, while the region
+///   is limited to 64 KiB;
+/// * `journal_head`: see [`JournalHead`];
+/// * `certified_by`: the signing key certificate. Without it, key rotation
+///   would require rechecking the fingerprint with everyone through a second channel;
+/// * `signature`: the signature itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditorSignature {
     pub sig_alg: SigAlg,
     pub session_head: [u8; 32],
-    /// `None` кодируется ПУСТЫМ значением, а не отсутствием записи.
+    /// `None` is encoded as an EMPTY value, not an absent record.
     ///
-    /// Отсутствие записи означало бы, что подпись не покрывает факт «сервера
-    /// редактор не видел», и устройство, никогда не отправлявшее правок, стало
-    /// бы неотличимо от устройства, скрывшего свою голову.
+    /// An absent record would mean that the signature does not cover the fact
+    /// that "the editor has not seen the server", making a device that never submitted edits
+    /// indistinguishable from one hiding its head.
     pub journal_head: Option<JournalHead>,
     pub certified_by: Vec<u8>,
     pub signature: Vec<u8>,
 }
 
 impl EditorSignature {
-    /// Тело записи: вложенный TLV, теги строго по возрастанию.
+    /// Record body: nested TLV, with tags strictly increasing.
     fn encode(&self) -> Result<Vec<u8>, FormatError> {
         if self.signature.len() != EDITOR_SIGNATURE_LEN {
             return Err(FormatError::BadFieldLength {
@@ -149,7 +149,7 @@ impl EditorSignature {
         Ok(w.finish().to_vec())
     }
 
-    /// Разбор тела записи. Тотален: любой буфер либо даёт структуру, либо ошибку.
+    /// Parse the record body. Total: every buffer yields either a structure or an error.
     fn decode(value: &[u8]) -> Result<Self, FormatError> {
         let mut reader = TlvReader::new(value);
         let mut sig_alg = None;
@@ -233,41 +233,41 @@ impl EditorSignature {
     }
 }
 
-/// Верхняя граница изменяемой области.
+/// Upper bound on the mutable region.
 pub const MAX_CONTENT_DESC_LEN: u32 = 64 * 1024;
 
-/// Длина префикса `ContentDescLen`.
+/// Length of the `ContentDescLen` prefix.
 const LEN_PREFIX: usize = 4;
 
-/// Описание содержимого: то, что меняется при правке файла.
+/// Content description: what changes when the file is edited.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentDesc {
-    /// Длина открытого текста целиком.
+    /// Total plaintext length.
     pub total_len: u64,
-    /// Число чанков. Всегда не меньше единицы: пустой файл имеет один чанк
-    /// нулевой длины, поэтому у любого файла есть хотя бы один тег AEAD и хотя бы
-    /// один лист дерева.
+    /// Number of chunks. Always at least one: an empty file has a single
+    /// zero-length chunk, so every file has at least one AEAD tag and at least
+    /// one tree leaf.
     pub chunk_count: u32,
-    /// Текущий корень дерева целостности.
+    /// Current integrity tree root.
     pub tree_root: [u8; 32],
-    /// Растёт при каждой правке. Не даёт подсунуть более старую, но корректно
-    /// заверенную версию содержимого.
+    /// Increases with every edit. Prevents substitution of an older but correctly
+    /// authenticated content version.
     pub version_counter: u64,
-    /// Смещение футера, если он есть. Зарезервировано под таблицу тегов, токен
-    /// RFC 3161 и встречную подпись сервера.
+    /// Footer offset, if present. Reserved for a tag table, an RFC 3161
+    /// token, and the server's countersignature.
     pub footer_offset: Option<u64>,
-    /// Подпись редактировавшего устройства. Есть только у правленого файла и
-    /// только начиная с версии 4.
+    /// Signature of the editing device. Present only in an edited file and
+    /// only since version 4.
     pub editor: Option<EditorSignature>,
 }
 
 impl ContentDesc {
-    /// Закодировать и заверить MAC.
+    /// Encode and authenticate with a MAC.
     ///
-    /// Возвращает `ContentDescLen(u32le) ‖ тело ‖ mac(32)`.
-    /// `version` — версия контейнера, а не украшение сигнатуры: раскладка этой
-    /// области зависит от неё, и писатель не должен уметь произвести область,
-    /// которую наш же читатель отвергнет как «тег из будущего».
+    /// Returns `ContentDescLen(u32le) ‖ body ‖ mac(32)`.
+    /// `version` is the container version, not a decorative parameter: this region's
+    /// layout depends on it, and the writer must not be able to produce a region
+    /// that our own reader rejects as a "tag from the future".
     pub fn encode(
         &self,
         key: &MacKey,
@@ -305,11 +305,11 @@ impl ContentDesc {
         Ok(out)
     }
 
-    /// Разобрать и проверить MAC.
+    /// Parse and verify the MAC.
     ///
-    /// Возвращает описание и число прочитанных байтов. Структура **не** отдаётся
-    /// вызывающему до проверки MAC: иначе `total_len` из непроверенной области
-    /// определял бы, сколько памяти мы выделим.
+    /// Returns the description and number of bytes read. The structure is **not** returned
+    /// to the caller before MAC verification; otherwise `total_len` from an unverified region
+    /// would determine how much memory we allocate.
     pub fn decode_verified(
         bytes: &[u8],
         key: &MacKey,
@@ -319,11 +319,11 @@ impl ContentDesc {
         Self::decode_verified_with_body(bytes, key, file_id, version).map(|(desc, _, read)| (desc, read))
     }
 
-    /// То же, что [`Self::decode_verified`], и вдобавок ЗАВЕРЕННЫЕ байты тела.
+    /// Like [`Self::decode_verified`], additionally returning AUTHENTICATED body bytes.
     ///
-    /// Нужны подписи редактора (`crate::edit`): она ставится над сырыми байтами
-    /// тела, а не над повторной кодировкой разобранного, — по той же причине,
-    /// что и MAC.
+    /// Needed for the editor signature (`crate::edit`): it signs raw body
+    /// bytes, not a re-encoding of the parsed structure, for the same reason
+    /// as the MAC.
     pub fn decode_verified_with_body<'b>(
         bytes: &'b [u8],
         key: &MacKey,
@@ -376,18 +376,18 @@ impl ContentDesc {
         Ok((desc, body, read))
     }
 
-    /// Байты тела — те, что лягут под MAC. Писателю правки: транскрипт подписи
-    /// редактора считается по ним до того, как подпись известна.
+    /// Body bytes: those covered by the MAC. For the edit writer: the editor signature
+    /// transcript is computed from these before the signature is known.
     pub fn body_bytes(&self, version: u16) -> Result<Vec<u8>, FormatError> {
         self.encode_body(version)
     }
 
-    /// Согласовано ли описание с размером чанка из заголовка.
+    /// Whether the description is consistent with the chunk size in the header.
     ///
-    /// Размер чанка подписан автором и живёт в заголовке, а число чанков — здесь,
-    /// под MAC владельца CEK. Две области заверены разными ключами, поэтому свести
-    /// их может только уровень выше, который держит обе; отсюда отдельная функция,
-    /// а не проверка внутри [`ContentDesc::decode_verified`].
+    /// Chunk size is author-signed and lives in the header, while chunk count is here,
+    /// under the CEK holder's MAC. The regions are authenticated with different keys, so only
+    /// a higher layer holding both can reconcile them; hence a separate function,
+    /// rather than a check inside [`ContentDesc::decode_verified`].
     pub fn check_against_chunk_size(&self, chunk_size: u32) -> Result<(), FormatError> {
         // Считает [`Layout`], а не собственная арифметика: формула числа чанков
         // обязана быть в одном месте. Две копии разошлись бы при первой же правке,
@@ -396,7 +396,7 @@ impl ContentDesc {
         Layout::new(chunk_size, self.chunk_count, self.total_len, 0).map(|_| ())
     }
 
-    /// Тело без рамки: TLV, теги строго по возрастанию.
+    /// Unframed body: TLV, with tags strictly increasing.
     fn encode_body(&self, version: u16) -> Result<Vec<u8>, FormatError> {
         // Подпись редактора в версии младше четвёртой невыразима, и попытка её
         // записать — ошибка ПИСАТЕЛЯ, а не файла. Отказ здесь стоит по тому же
@@ -419,7 +419,7 @@ impl ContentDesc {
         Ok(w.finish().to_vec())
     }
 
-    /// Разбор тела. Тотален: любой буфер либо даёт структуру, либо ошибку.
+    /// Parse the body. Total: every buffer yields either a structure or an error.
     fn decode_body(body: &[u8], version: u16) -> Result<Self, FormatError> {
         let mut reader = TlvReader::new(body);
         let mut total_len = None;
@@ -477,26 +477,26 @@ impl ContentDesc {
         Ok(Self { total_len, chunk_count, tree_root, version_counter, footer_offset, editor })
     }
 
-    /// Байты под MAC.
+    /// Bytes covered by the MAC.
     ///
-    /// `file_id` обязателен и идёт первым: без него описание, вырезанное из одного
-    /// контейнера, принималось бы в другом, и подмена длины с корнем дерева
-    /// сводилась бы к копированию сотни байт между файлами.
+    /// `file_id` is mandatory and comes first: without it, a description cut out of one
+    /// container would be accepted in another, so substituting a length and tree root
+    /// would require only copying a hundred bytes between files.
     ///
-    /// Дальше идут **сырые байты тела**, а не разобранные значения. Это то же
-    /// решение, что и в подписи заголовка, и по той же причине: пересчёт по
-    /// повторной кодировке разобранной структуры — источник всего семейства
-    /// ошибок канонизации, известного по JWS и XML-DSig.
+    /// Next come the **raw body bytes**, not parsed values. This is the same
+    /// decision as for the header signature and for the same reason: recomputing over
+    /// a re-encoding of a parsed structure causes the entire family
+    /// of canonicalization bugs known from JWS and XML-DSig.
     ///
-    /// Совместимости версий это не мешает, вопреки первому впечатлению. MAC по
-    /// сырым байтам сходится у любых версий **всегда**: читатель держит ровно те
-    /// байты, которые заверил писатель, и никакой пересборки между ними нет.
-    /// Заодно отпадает нужда связывать длину тела отдельно — она и так внутри.
+    /// Despite first impressions, this does not hinder version compatibility. A MAC over
+    /// raw bytes **always** agrees across versions: the reader has exactly the bytes
+    /// authenticated by the writer, without any reconstruction between them.
+    /// It also removes the need to bind the body length separately: it is already included.
     ///
-    /// Главное следствие практическое: MAC становится проверяемым **до** разбора
-    /// тела. Иначе разные коды ошибок (нет обязательного поля, неверная длина,
-    /// неизвестный тег) сообщались бы для незаверенных байтов, и повреждение
-    /// изменяемой области выглядело бы как обрезание файла, а не как подделка.
+    /// The main practical consequence: the MAC can be verified **before** parsing
+    /// the body. Otherwise distinct parse errors (missing required field, wrong length,
+    /// unknown tag) would be reported for unauthenticated bytes, and corruption
+    /// of the mutable region would look like truncation rather than forgery.
     fn mac_transcript(file_id: &[u8; 16], body: &[u8]) -> Transcript {
         let mut t = Transcript::new(label::CONTENT_MAC);
         // `fixed` для `file_id` — его длина задана типом; `field` для тела —
@@ -519,7 +519,7 @@ mod tests {
         MacKey::from_bytes([seed; 32])
     }
 
-    /// Файл в 5 МБ при чанке 64 КиБ: 77 чанков, последний неполный.
+    /// A 5 MB file with 64 KiB chunks: 77 chunks, the last partial.
     fn sample() -> ContentDesc {
         ContentDesc {
             total_len: 5_000_000,
@@ -531,24 +531,24 @@ mod tests {
         }
     }
 
-    /// Собрать область из произвольного тела с корректным MAC — так строится ввод,
-    /// который наш писатель произвести не может, но противник с CEK мог бы.
-    /// MAC проверяется РАНЬШЕ разбора тела — сторож на порядок двух строк.
+    /// Assemble a region from an arbitrary body with a correct MAC, producing input
+    /// that our writer cannot generate but an attacker holding the CEK could.
+    /// MAC verification occurs BEFORE body parsing: a guard on the order of two lines.
     ///
-    /// До этого теста порядок держался на комментарии и внимательности:
-    /// перестановка `mac::verify` и `decode_body` не роняла ни одной проверки.
-    /// Тесты на коды разбора подавали правильный MAC, тесты на неверный MAC —
-    /// корректное тело, и случай, где встречаются оба, не проверял никто.
+    /// Before this test, the order relied on a comment and attentiveness:
+    /// swapping `mac::verify` and `decode_body` did not fail any check.
+    /// Tests for parse error codes supplied a correct MAC, tests for a bad MAC
+    /// supplied a valid body, and nobody tested the case combining both faults.
     ///
-    /// Цена регрессии — не теоретическая. Различимые коды разбора для
-    /// НЕЗАВЕРЕННЫХ байтов дают противнику оракул: подделка изменяемой области
-    /// отвечала бы «нет обязательного поля» или «незнакомый тег» вместо «MAC не
-    /// сошёлся», то есть выглядела бы как обрезание файла, а не как подделка
-    /// (И-5).
+    /// The cost of regression is not theoretical. Distinguishable parse errors for
+    /// UNAUTHENTICATED bytes give an attacker an oracle: a forged mutable region
+    /// would report "missing required field" or "unknown tag" instead of "MAC
+    /// mismatch", thus appearing as file truncation rather than forgery
+    /// (I-5).
     ///
-    /// Тело здесь заведомо неразбираемое, ключ заведомо чужой. Правильный ответ
-    /// ровно один — `BadContentMac`; любой код разбора означает, что тело успели
-    /// прочитать до проверки подлинности.
+    /// The body here is deliberately unparseable, the key deliberately wrong. There is
+    /// exactly one correct response: `BadContentMac`; any parse error means the body
+    /// was read before authentication.
     #[test]
     fn the_mac_is_checked_before_the_body_is_parsed() {
         let file_id = [0x11u8; 16];
@@ -855,8 +855,8 @@ mod tests {
 
     // ================= подпись редактора, тег 6 =================
 
-    /// Заполненная подпись редактора. Байты произвольны: здесь проверяется
-    /// РАСКЛАДКА, а не криптография — у неё свои векторы в `tests/kat/`.
+    /// A populated editor signature. The bytes are arbitrary: this tests
+    /// LAYOUT, not cryptography, which has its own vectors in `tests/kat/`.
     fn sample_editor() -> EditorSignature {
         EditorSignature {
             sig_alg: SigAlg::RsaPssSha256,
@@ -871,7 +871,7 @@ mod tests {
         ContentDesc { editor, ..sample() }
     }
 
-    /// Круг: записали в версии 4 — прочитали в версии 4, получили то же самое.
+    /// Round trip: write in version 4, read in version 4, obtain the same result.
     #[test]
     fn an_editor_signature_survives_a_round_trip_in_version_four() {
         for editor in [Some(sample_editor()), None] {
@@ -884,12 +884,12 @@ mod tests {
         }
     }
 
-    /// Голова журнала, которой НЕ БЫЛО, отличается от головы, которая есть.
+    /// A journal head that WAS NOT SEEN differs from one that exists.
     ///
-    /// Пустое значение и значение в сорок байт — разные байты области, поэтому
-    /// разные MAC и разные подписи. Если бы «не виделась» кодировалось
-    /// отсутствием записи, устройство, скрывшее свою голову, было бы неотличимо
-    /// от устройства, которое сервера действительно не видело.
+    /// An empty value and a forty-byte value are different region bytes, hence
+    /// different MACs and signatures. If "not seen" were encoded by
+    /// omitting the record, a device hiding its head would be indistinguishable
+    /// from a device that truly had not seen the server.
     #[test]
     fn a_missing_journal_head_is_encoded_and_differs_from_a_present_one() {
         let without = with_editor(Some(EditorSignature {
@@ -907,12 +907,12 @@ mod tests {
         assert_eq!(back.editor.unwrap().journal_head, None);
     }
 
-    /// Версии младше четвёртой тег 6 НЕ ЗНАЮТ, и это не придирка.
+    /// Versions before four DO NOT KNOW tag 6, and this is no pedantry.
     ///
-    /// Версия есть набор байтов, которые она умеет прочитать. Приняв здесь
-    /// подпись редактора в файле версии 1, мы объявили бы, что версия 1 её
-    /// задаёт, — а она не задаёт, и вторая реализация, написанная по спеке
-    /// версии 1, такой файл отвергнет.
+    /// A version is a set of bytes it can read. Accepting an editor signature
+    /// here in a version 1 file would declare that version 1 defines it,
+    /// which it does not; a second implementation written to the version 1
+    /// specification would reject that file.
     #[test]
     fn an_editor_signature_is_refused_by_older_versions() {
         // Запись в версии 4, чтение в версиях 1, 2 и 3.
@@ -928,11 +928,11 @@ mod tests {
         }
     }
 
-    /// Писатель тоже не должен уметь произвести то, что читатель отвергнет.
+    /// The writer must likewise be unable to produce what the reader rejects.
     ///
-    /// Тот же довод, по которому `chunk_count == 0` отвергается на записи: наш
-    /// код не имеет права выпустить область, которую наш же разбор обязан
-    /// отбросить.
+    /// The same reasoning as rejecting `chunk_count == 0` on write: our
+    /// code must not emit a region that our own parser is required
+    /// to discard.
     #[test]
     fn writing_an_editor_signature_below_version_four_is_refused() {
         for version in [1u16, 2, 3] {
@@ -944,9 +944,9 @@ mod tests {
         }
     }
 
-    /// В теге 6 годится ТОЛЬКО RSA-PSS — зеркало проверки в заголовке, где
-    /// годится только Ed25519. Иначе подпись одной схемы предъявлялась бы как
-    /// подпись другой.
+    /// Tag 6 accepts ONLY RSA-PSS, mirroring the header check that
+    /// accepts only Ed25519. Otherwise a signature from one scheme could be presented
+    /// as a signature from another.
     #[test]
     fn only_rsa_pss_is_accepted_as_the_editor_signature_algorithm() {
         let mut inner = TlvWriter::new();
@@ -962,7 +962,7 @@ mod tests {
         );
     }
 
-    /// Длины проверяются на ТОЧНОЕ соответствие, а не подгоняются (И-8).
+    /// Lengths must match EXACTLY, never be adjusted (I-8).
     #[test]
     fn every_length_inside_the_editor_record_is_exact() {
         let cases: [(u16, Vec<u8>); 3] = [
@@ -993,10 +993,10 @@ mod tests {
         }
     }
 
-    /// Каждое поле записи обязательно: пропуск любого — отказ, а не умолчание.
+    /// Every record field is required: omitting any means rejection, not a default.
     ///
-    /// Умолчание здесь означало бы подпись без указания схемы, сеанс без головы
-    /// или сертификат, который никто не предъявлял.
+    /// A default here would mean a signature without a specified scheme, a session without
+    /// a head, or a certificate nobody presented.
     #[test]
     fn every_field_of_the_editor_record_is_required() {
         let all: [(u16, Vec<u8>); 5] = [
@@ -1023,10 +1023,10 @@ mod tests {
         }
     }
 
-    /// Сертификат ограничен собственным пределом, а не только пределом области.
+    /// The certificate has its own size limit, not merely the region's limit.
     ///
-    /// Без него сертификат съел бы все 64 КиБ, вытеснив поля, ради которых
-    /// область существует.
+    /// Without it, the certificate could consume all 64 KiB, displacing the fields
+    /// the region exists for.
     #[test]
     fn an_oversized_certificate_is_refused_on_write() {
         let editor = EditorSignature {

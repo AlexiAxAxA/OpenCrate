@@ -1,8 +1,8 @@
-//! Лизинг версии 3: признак аттестации ключа устройства под подписью сервера (B6b).
+//! Lease version 3: device key attestation flag under the server signature (B6b).
 //!
-//! Признак поднимает ступень привязки решателя до `HardwareAttested`, поэтому
-//! проверяется то же, что у профиля сервера: версия сходится с составом полей в
-//! обе стороны, основание берётся только из реестра, подпись покрывает признак.
+//! The flag raises the evaluator's binding level to `HardwareAttested`, so
+//! the same properties as for the server profile are checked: version and field set agree in
+//! both directions, the basis comes only from the registry, and the signature covers the flag.
 
 #![allow(
     clippy::unwrap_used,
@@ -64,7 +64,7 @@ fn an_attested_lease_round_trips_with_and_without_a_profile() {
     assert_eq!(u16::from_le_bytes([plain[6], plain[7]]), LEASE_VERSION);
 }
 
-/// Версия и признак сходятся в обе стороны; основание — только из реестра.
+/// Version and flag agree in both directions; the basis comes only from the registry.
 #[test]
 fn the_version_and_the_attestation_field_must_agree() {
     let mut claimed = lease::encode(&lease(Some(Attestation::EnrolledEk), None)).unwrap();
@@ -88,7 +88,7 @@ fn the_version_and_the_attestation_field_must_agree() {
     }
 }
 
-/// Признак под подписью: подменить основание или срезать признак нельзя.
+/// The flag is signed: its basis cannot be replaced, nor the flag removed.
 #[test]
 fn the_attestation_is_covered_by_the_signature() {
     let signer = server();
@@ -108,10 +108,10 @@ fn the_attestation_is_covered_by_the_signature() {
     assert!(lease::verify(&plain, &sig, &signer.public_key()).is_err());
 }
 
-/// Лизинг версии 3 сходится с собственным замороженным вектором.
+/// Lease version 3 matches its own frozen vector.
 ///
-/// Отдельным файлом: `lease.kat` и `lease-v2.kat` заморожены вместе со своими
-/// документами (И-14); новый документ — новый свидетель.
+/// A separate file: `lease.kat` and `lease-v2.kat` are frozen with their
+/// documents (I-14); a new document gets a new witness.
 #[test]
 fn the_version_three_lease_matches_its_frozen_vector() {
     let v = load_kat("lease-v3.kat");
@@ -125,7 +125,7 @@ fn the_version_three_lease_matches_its_frozen_vector() {
     assert_eq!(hex(&fresh), v["lease_signature"]);
 }
 
-/// Выпустить вектор лизинга версии 3. Инструмент, не проверка.
+/// Generate the lease version 3 vector. A tool, not a test.
 #[test]
 #[ignore = "инструмент выпуска вектора, а не проверка"]
 fn print_version_three_lease_vector() {

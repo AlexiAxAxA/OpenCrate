@@ -1,9 +1,9 @@
-//! Заворачивание ключа содержимого.
+//! Content-key wrapping.
 //!
-//! CEK случаен и **заворачивается** под KEK, а не выводится из него. Разница
-//! решающая: выведение `CEK = HKDF(A‖B)` впаяло бы ровно один слот ключа в
-//! формат навсегда, и первый заказчик, попросивший второго получателя, ключ
-//! восстановления или ротацию, сломал бы все ранее выпущенные файлы.
+//! CEK is random and **wrapped** under KEK, not derived from it. The distinction
+//! is decisive: deriving `CEK = HKDF(A‖B)` would permanently hardwire exactly one key slot into
+//! the format; the first customer asking for a second recipient, recovery key,
+//! or rotation would break every previously issued file.
 
 use crate::kdf::{slot_commitment, verify_commitment};
 use rand_core::CryptoRng;
@@ -16,26 +16,26 @@ use chacha20poly1305::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-/// Длина nonce обёртки.
+/// Wrapping nonce length.
 pub const WRAP_NONCE_LEN: usize = 24;
 
-/// Длина завёрнутого CEK: nonce, ключ и тег.
+/// Wrapped CEK length: nonce, key, and tag.
 ///
-/// Nonce **хранится, а не выводится**. Выведенный из KEK, он безопасен ровно
-/// пока пара (KEK, CEK) на файл одна, и это условие ничем не подкреплено:
-/// публичный интерфейс не мешает завернуть два разных CEK под одним KEK, а
-/// тогда совпадают и ключ, и nonce, и `wrapped₁ ⊕ wrapped₂ = CEK₁ ⊕ CEK₂` —
-/// оба ключа содержимого раскрываются, плюс повторяется одноразовый ключ
-/// Poly1305, то есть появляется возможность подделки.
+/// The nonce is **stored, not derived**. Derived from KEK, it would be safe only
+/// while each file had one (KEK, CEK) pair, an unenforced condition:
+/// the public API does not prevent wrapping two different CEKs under one KEK,
+/// repeating both key and nonce, with `wrapped₁ ⊕ wrapped₂ = CEK₁ ⊕ CEK₂`:
+/// both content keys are exposed, and the one-time Poly1305 key is
+/// reused, enabling forgery.
 ///
-/// Двадцать четыре байта — цена того, чтобы безопасность держалась на
-/// конструкции, а не на дисциплине вызывающего.
+/// Twenty-four bytes are the cost of security resting on
+/// construction rather than caller discipline.
 pub const WRAPPED_CEK_LEN: usize = WRAP_NONCE_LEN + SECRET_LEN + 16;
 
-/// Завернуть CEK. Возвращает `(завёрнутый ключ, обязательство слота)`.
+/// Wrap CEK. Returns `(wrapped key, slot commitment)`.
 ///
-/// `core_hash` идёт в связанные данные, поэтому завёрнутый ключ нельзя перенести
-/// в контейнер с другим заголовком.
+/// `core_hash` enters associated data, so the wrapped key cannot move
+/// to a container with another header.
 pub fn wrap_cek<R: CryptoRng + ?Sized>(
     kek: &Kek,
     cek: &Cek,
@@ -87,12 +87,12 @@ pub fn wrap_cek<R: CryptoRng + ?Sized>(
     Ok((wrapped, slot_commitment(kek, core_hash)))
 }
 
-/// Развернуть CEK.
+/// Unwrap CEK.
 ///
-/// Обязательство слота проверяется в постоянном времени **до** открытия AEAD.
-/// Порядок принципиален: XChaCha20-Poly1305 не является key-committing, и без
-/// этой проверки код-претензия низкой энтропии восстанавливается через оракул
-/// разбиения существенно быстрее полного перебора.
+/// The slot commitment is checked in constant time **before** opening AEAD.
+/// Order is essential: XChaCha20-Poly1305 is not key-committing; without
+/// this check a low-entropy claim code can be recovered through a partitioning
+/// oracle substantially faster than exhaustive search.
 pub fn unwrap_cek(
     kek: &Kek,
     wrapped: &[u8; WRAPPED_CEK_LEN],
@@ -140,7 +140,7 @@ mod tests {
     const CORE_HASH: [u8; 32] = [0x0c; 32];
     const OTHER_CORE_HASH: [u8; 32] = [0x0d; 32];
 
-    /// Детерминированный генератор: тест обязан воспроизводиться байт в байт.
+    /// Deterministic RNG: the test must reproduce byte for byte.
     struct TestRng(u64);
 
     impl TestRng {

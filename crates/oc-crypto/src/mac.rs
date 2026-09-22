@@ -1,12 +1,12 @@
-//! Коды аутентификации сообщений.
+//! Message authentication codes.
 //!
-//! Отдельный модуль, потому что MAC применяется там, где подписи быть не может:
-//! изменяемая область контейнера заверяется тем, кто владеет ключом содержимого,
-//! а не автором. Автора нет рядом, когда файл правят, и подписать изменённое
-//! содержимое он физически не в состоянии.
+//! A separate module because MACs serve where signatures cannot:
+//! the container's mutable region is authenticated by whoever holds the content key,
+//! not by the author. The author is absent when the file is edited and physically
+//! cannot sign the modified content.
 //!
-//! Вход — только [`Transcript`], как и у подписи. Метка домена обязательна по той
-//! же причине: MAC, посчитанный в одном контексте, не должен приниматься в другом.
+//! Input is only [`Transcript`], as with signatures. A domain label is mandatory for the
+//! same reason: a MAC computed in one context must not be accepted in another.
 
 use crate::secret::MacKey;
 use crate::transcript::Transcript;
@@ -15,10 +15,10 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-/// Длина кода аутентификации.
+/// Authentication-code length.
 pub const MAC_LEN: usize = 32;
 
-/// Посчитать HMAC-SHA256 над транскриптом.
+/// Compute HMAC-SHA256 over a transcript.
 pub fn compute(key: &MacKey, transcript: &Transcript) -> Result<[u8; MAC_LEN], CryptoError> {
     // Длина ключа фиксирована типом, поэтому отказ здесь недостижим; но паника в
     // этом крейте запрещена, и «недостижимо» проверяется компилятором, а не
@@ -30,11 +30,11 @@ pub fn compute(key: &MacKey, transcript: &Transcript) -> Result<[u8; MAC_LEN], C
     <[u8; MAC_LEN]>::try_from(tag.as_slice()).map_err(|_| CryptoError::BadLength)
 }
 
-/// Проверить код аутентификации.
+/// Verify an authentication code.
 ///
-/// Сравнение только в постоянном времени. Обычное сравнение массивов выходит из
-/// цикла на первом несовпавшем байте, и по времени ответа противник подбирает
-/// тег побайтово — за 32×256 попыток вместо 2^256.
+/// Comparison must be constant-time. Ordinary array comparison exits
+/// at the first mismatching byte, letting an adversary guess the tag byte by byte
+/// from response timing, in 32×256 attempts rather than 2^256.
 pub fn verify(
     key: &MacKey,
     transcript: &Transcript,

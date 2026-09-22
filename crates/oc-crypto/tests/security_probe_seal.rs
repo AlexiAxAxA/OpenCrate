@@ -21,10 +21,10 @@
     clippy::disallowed_methods,
     clippy::disallowed_types
 )]
-//! Зонд направления 1: рукописная конструкция запечатывания `oc-crypto/src/seal.rs`.
+//! Track 1 probe: hand-written sealing construction in `oc-crypto/src/seal.rs`.
 //!
-//! Каждый тест сформулирован как **требуемое свойство**. Падение теста —
-//! доказательство дефекта, а не поломка сборки.
+//! Each test states a **required property**. A failing test is
+//! evidence of a defect, not a broken build.
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
@@ -40,8 +40,8 @@ use oc_crypto::{label, CryptoError};
 // Инструментарий
 // ---------------------------------------------------------------------------
 
-/// Детерминированный генератор. Воспроизводимость важнее стойкости: тест обязан
-/// падать одинаково на любой машине.
+/// Deterministic RNG. Reproducibility matters more than strength: the test must
+/// fail identically on every machine.
 struct SeedRng([u8; 32]);
 
 impl SeedRng {
@@ -102,9 +102,9 @@ fn recipient(seed: u8) -> X25519Secret {
 // 1. Полнота отсечения точек малого порядка
 // ---------------------------------------------------------------------------
 
-/// Все публично известные точки малого порядка X25519, включая неканонические
-/// кодировки (`u`, `u + p`, `u` со взведённым старшим битом). Каждая обязана
-/// приводить к отказу, а не к предсказуемому ключу AEAD.
+/// All publicly known X25519 small-order points, including noncanonical
+/// encodings (`u`, `u + p`, `u` with the high bit set). Each must
+/// cause rejection rather than a predictable AEAD key.
 const LOW_ORDER: &[&str] = &[
     // порядок 1 — нейтральный элемент
     "0000000000000000000000000000000000000000000000000000000000000000",
@@ -235,9 +235,9 @@ fn a_non_canonical_enc_that_yields_the_same_dh_still_fails_to_open() {
 // 4. Соответствие RFC 9180 DHKEM(X25519, HKDF-SHA256)
 // ---------------------------------------------------------------------------
 
-/// Точная копия вывода ключа из `seal.rs` (строки 133–173). Сначала
-/// доказывается, что копия совпадает с оригиналом побайтово, и только потом она
-/// сравнивается с RFC 9180.
+/// Exact copy of key derivation from `seal.rs` (lines 133–173). First
+/// prove the copy matches the original byte for byte, then
+/// compare it with RFC 9180.
 fn implementation_derivation(
     dh: &[u8; 32],
     enc: &[u8; PUBLIC_KEY_LEN],
@@ -262,11 +262,11 @@ fn implementation_derivation(
 }
 
 const HPKE_VERSION: &[u8] = b"HPKE-v1";
-/// `"KEM" ‖ I2OSP(0x0020, 2)` — DHKEM(X25519, HKDF-SHA256).
+/// `"KEM" ‖ I2OSP(0x0020, 2)`: DHKEM(X25519, HKDF-SHA256).
 const KEM_SUITE_ID: &[u8] = b"KEM\x00\x20";
 /// `"HPKE" ‖ kem_id ‖ kdf_id ‖ aead_id`. kdf_id = HKDF-SHA256,
-/// aead_id = ChaCha20Poly1305 (ближайший определённый в RFC 9180; конкретный
-/// выбор не влияет на вывод — расхождение возникает уже на уровне KEM).
+/// aead_id = ChaCha20Poly1305 (the closest defined by RFC 9180; the specific
+/// choice does not affect derivation, since divergence occurs at the KEM level).
 const HPKE_SUITE_ID: &[u8] = b"HPKE\x00\x20\x00\x01\x00\x03";
 
 fn labeled_extract(salt: &[u8], suite: &[u8], label_text: &[u8], ikm: &[u8]) -> [u8; 32] {
@@ -291,7 +291,7 @@ fn labeled_expand(prk: &[u8; 32], suite: &[u8], label_text: &[u8], info: &[u8], 
     Hkdf::<Sha256>::from_prk(prk).unwrap().expand(&labeled, out).unwrap();
 }
 
-/// RFC 9180 §4.1 `Encap` + §5.1 `KeyScheduleS` в режиме Base.
+/// RFC 9180 §4.1 `Encap` plus §5.1 `KeyScheduleS` in Base mode.
 fn rfc9180_derivation(
     dh: &[u8; 32],
     enc: &[u8; PUBLIC_KEY_LEN],
@@ -330,20 +330,20 @@ fn rfc9180_derivation(
     (key, nonce)
 }
 
-/// Конструкция запечатывания РАСХОДИТСЯ с RFC 9180, и это осознанно.
+/// The sealing construction DELIBERATELY DIFFERS from RFC 9180.
 ///
-/// `docs/format.md` §3.3 говорит «рукописная конструкция **по образцу** RFC 9180,
-/// а не готовый HPKE», и причина названа там же: NCrypt с Microsoft Platform
-/// Crypto Provider не даёт X25519, поэтому согласование для TPM пойдёт по P-256
-/// над сырым результатом `NCryptSecretAgreement`, а передать такой ключ в готовый
-/// крейт HPKE нельзя.
+/// `docs/format.md` §3.3 says "a hand-written construction **following** RFC 9180,
+/// not off-the-shelf HPKE", giving the reason there: NCrypt with Microsoft Platform
+/// Crypto Provider lacks X25519, so TPM agreement uses P-256
+/// over the raw `NCryptSecretAgreement` result, and such a key cannot be passed to an
+/// existing HPKE crate.
 ///
-/// Прежняя редакция этого теста требовала побайтового совпадения с RFC 9180 и
-/// падала. Требование было её собственным: спека совпадения никогда не обещала.
-/// Тест переписан на то, что действительно ценно, — зафиксировать расхождение
-/// как факт и держать рядом эталонную реализацию RFC 9180, по которой видно, в
-/// чём именно оно состоит. Совпади вдруг значения, это означало бы, что
-/// конструкцию незаметно переписали на HPKE, и об этом надо узнать.
+/// An earlier version of this test demanded byte-for-byte RFC 9180 agreement and
+/// failed. That requirement was its own invention: the specification never promised agreement.
+/// The test was rewritten to do something valuable: record divergence
+/// as fact and retain a reference RFC 9180 implementation showing
+/// exactly where it occurs. Suddenly matching values would mean the
+/// construction had silently been rewritten as HPKE, which must be noticed.
 #[test]
 fn the_sealing_construction_deliberately_diverges_from_rfc9180() {
     let mut rng = SeedRng::seeded(33);
@@ -394,22 +394,22 @@ fn the_sealing_construction_deliberately_diverges_from_rfc9180() {
 // 5. Nonce выводится из того же prk, что и ключ
 // ---------------------------------------------------------------------------
 
-/// Полный повтор состояния генератора не раскрывает открытые тексты (С-13).
+/// A full RNG-state repeat does not expose plaintexts (C-13).
 ///
-/// Сценарий реальный и не экзотический: откат снапшота виртуальной машины, клон
-/// образа диска, восстановление из резервной копии возвращают генератор в
-/// прежнее состояние. Раньше это повторяло И эфемерную пару, И nonce — оба
-/// брались из одного генератора подряд, — а значит совпадал весь поток ключей, и
-/// из двух шифротекстов получался `ct₁ ⊕ ct₂ = pt₁ ⊕ pt₂`. Открытые тексты здесь
-/// доли секрета схемы 2-из-2, то есть отсюда доставались обе доли, KEK и ключ
-/// содержимого без единого приватного ключа.
+/// A realistic, ordinary scenario: virtual-machine snapshot rollback, disk-image
+/// cloning, and backup restoration return the RNG to
+/// its previous state. Previously this repeated BOTH ephemeral pair AND nonce, taken
+/// consecutively from one RNG, repeating the entire keystream and
+/// making two ciphertexts reveal `ct₁ ⊕ ct₂ = pt₁ ⊕ pt₂`. These plaintexts
+/// are 2-of-2 secret shares, exposing both shares, KEK, and the content
+/// key without a single private key.
 ///
-/// Теперь случайные байты идут в засев производной, куда входит и открытый
-/// текст, поэтому при повторе генератора и **разных** секретах nonce расходятся.
-/// Эфемерная пара при этом всё ещё повторяется — она обязана, она вычисляется
-/// раньше открытого текста, — и именно поэтому проверка ниже устроена так: она
-/// требует, чтобы предпосылка (генератор повторился) выполнялась, и всё равно
-/// XOR не давал открытого текста.
+/// Random bytes now seed a derivation that also includes plaintext,
+/// so repeated RNG state with **different** secrets produces different nonces.
+/// The ephemeral pair still repeats, as it must, since it is computed
+/// before plaintext. Hence this check's structure: require
+/// the premise (the RNG repeated) to hold while XOR still
+/// fails to yield plaintext.
 #[test]
 fn a_full_generator_repeat_no_longer_reuses_the_keystream() {
     let pt_one = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -449,14 +449,14 @@ fn a_full_generator_repeat_no_longer_reuses_the_keystream() {
     );
 }
 
-/// Одинаковый вход при повторе генератора даёт одинаковый выход — и это всё,
-/// что он раскрывает.
+/// Identical input with a repeated RNG yields identical output, revealing
+/// only that fact.
 ///
-/// Граница гарантии, названная явно. Подмешивание открытого текста делает nonce
-/// функцией (засев, открытый текст); совпади оба — совпадёт и шифротекст.
-/// Раскрывается при этом только сам факт равенства входов, а не их содержимое, и
-/// иначе быть не может: источник, не зависящий ни от генератора, ни от данных, в
-/// чистом крейте отсутствует по построению.
+/// The guarantee's boundary, explicitly stated. Mixing in plaintext makes the nonce
+/// a function of (seed, plaintext); when both match, ciphertext matches.
+/// Only equality of inputs is revealed, not their contents; it cannot be
+/// otherwise because a pure crate has no source independent of both RNG
+/// and data by construction.
 #[test]
 fn identical_input_under_a_repeated_generator_is_deterministic_and_that_is_the_limit() {
     let sk = recipient(7);

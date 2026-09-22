@@ -1,31 +1,31 @@
-//! Дисциплина нарезки полезной нагрузки на чанки.
+//! Payload chunking discipline.
 //!
-//! # Почему это здесь, а не там, где ввод-вывод
+//! # Why here rather than alongside I/O
 //!
-//! До 2026-09-09 цикл жил в `cc_cli::payload::seal_stream`, и это было верно,
-//! пока хост был один. Хостов становится два: тот же цикл нужен обёртке для
-//! чужих языков, которая собирается под `wasm32` и до `cc-cli` не дотягивается
-//! — тот крейт под wasm не собирается вовсе.
+//! Before 2026-09-09 the loop lived in `cc_cli::payload::seal_stream`, appropriately
+//! while there was one host. Now there are two: the same loop is needed by a wrapper for
+//! other languages that builds for `wasm32` and cannot reach `cc-cli`,
+//! which does not build for wasm at all.
 //!
-//! Переписать цикл во втором месте нельзя, и дело не в экономии строк. То, что
-//! он делает, — КРИПТОГРАФИЧЕСКИЙ КОНТРАКТ, а не работа с файлами:
+//! Reimplementing the loop elsewhere is forbidden, not to save lines. Its behavior
+//! is a CRYPTOGRAPHIC CONTRACT rather than file handling:
 //!
-//! * пустой вход даёт ОДИН чанк нулевой длины, а не ноль чанков — иначе у файла
-//!   не было бы ни одного тега подлинности и ни одного листа дерева;
-//! * nonce каждого чанка выводится ХЕДЖИРОВАНИЕМ из засева и открытого текста
-//!   (И-1, решение С-13), а не берётся из генератора;
-//! * лист дерева считается из `nonce ‖ tag ‖ ct`, и порядок листьев — порядок
-//!   чанков.
+//! * empty input yields ONE zero-length chunk rather than zero chunks; otherwise a file
+//!   would have no authentication tag and no tree leaf;
+//! * each chunk nonce is derived by HEDGING over the seed and plaintext
+//!   (I-1, decision C-13), not taken from the RNG;
+//! * the tree leaf is computed from `nonce ‖ tag ‖ ct`, with leaf order matching
+//!   chunk order.
 //!
-//! Разойдись две реализации хоть в одном из трёх — и файлы, собранные разными
-//! хостами, перестали бы открываться друг у друга, а заметить это было бы
-//! нечем: обе прошли бы свои тесты.
+//! If two implementations differed on any of these three rules, files built by different
+//! hosts would no longer open in each other, with no way to
+//! notice: both would pass their own tests.
 //!
-//! # Чем это остаётся чистым
+//! # How this remains pure
 //!
-//! Ни файлов, ни часов, ни собственного генератора. Источник и приёмник
-//! приходят замыканиями, генератор — параметром. `std::io` здесь не упомянут:
-//! адаптер над `Read`/`Write` живёт у того хоста, у которого они есть.
+//! No files, clocks, or internal RNG. Source and sink arrive
+//! as closures, the RNG as a parameter. `std::io` is not mentioned here:
+//! the `Read`/`Write` adapter belongs to the host that has them.
 
 use crate::aead::{NONCE_LEN, TAG_LEN, seal_chunk_hedged};
 use crate::merkle::{Leaf, MerkleTree};
@@ -33,7 +33,7 @@ use crate::secret::{PayloadKey, SecretBuf};
 use crate::{AeadAlg, CryptoError};
 use zeroize::Zeroizing;
 
-/// Что вышло из прогона потока.
+/// Result of processing a stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sealed {
     pub total_len: u64,
@@ -41,18 +41,18 @@ pub struct Sealed {
     pub tree_root: [u8; 32],
 }
 
-/// Отказ прогона: наш или хозяйский.
+/// Stream failure: ours or the host's.
 ///
-/// Хозяйские ошибки не сводятся к нашим намеренно: у одного хоста это
-/// `std::io::Error`, у другого — исключение JavaScript, и приводить их к общему
-/// виду здесь значило бы терять причину ровно там, где она нужна.
+/// Host errors deliberately remain distinct from ours: one host has
+/// `std::io::Error`, another JavaScript exceptions; normalizing them
+/// here would discard the cause exactly where it is needed.
 #[derive(Debug)]
 pub enum StreamError<E> {
-    /// Крипта: ключ, алгоритм, ёмкость буфера.
+    /// Cryptography: key, algorithm, buffer capacity.
     Crypto(CryptoError),
-    /// Источник или приёмник хоста.
+    /// Host source or sink.
     Host(E),
-    /// Файл больше, чем адресуемо форматом.
+    /// File exceeds the format's addressable size.
     TooLarge,
 }
 
@@ -74,17 +74,17 @@ impl<E: core::fmt::Display> core::fmt::Display for StreamError<E> {
 
 impl<E: core::fmt::Debug + core::fmt::Display> core::error::Error for StreamError<E> {}
 
-/// Зашифровать поток чанками и отдать кадры приёмнику.
+/// Encrypt a stream in chunks and deliver frames to the sink.
 ///
-/// `source` заполняет буфер и возвращает, сколько байт положил; ноль означает
-/// конец входа. Дочитывать до полного буфера НЕ его забота — это делает цикл
-/// здесь: короткое чтение посреди файла иначе резало бы чанк не там, где
-/// договорено, и каждый хост чинил бы это у себя по-своему.
+/// `source` fills the buffer and returns the number of bytes written; zero means
+/// end of input. Filling the buffer completely is NOT its responsibility; this loop
+/// does that, or a short read in mid-file would split a chunk at the wrong
+/// boundary and each host would fix it differently.
 ///
-/// `sink` получает готовые байты кадра: сперва `nonce`, затем `tag ‖ ct`.
+/// `sink` receives ready-made frame bytes: first `nonce`, then `tag ‖ ct`.
 ///
 /// # Errors
-/// [`StreamError`]: отказ крипты, отказ хоста или файл длиннее адресуемого.
+/// [`StreamError`]: crypto failure, host failure, or an unaddressably large file.
 pub fn seal_chunks<G, E>(
     key: &PayloadKey,
     alg: AeadAlg,
@@ -145,12 +145,12 @@ where
     Ok(Sealed { total_len, chunk_count: index, tree_root: tree.root() })
 }
 
-/// Дочитать буфер до конца или до конца входа.
+/// Read until the buffer is full or input ends.
 ///
-/// Короткое чтение — обычное дело у труб и сетевых источников, и оно НЕ
-/// означает конца: приняв его за конец, мы нарезали бы чанк не там, где
-/// договорено, и файл, собранный через трубу, отличался бы от собранного с
-/// диска. Конец входа — только нулевое чтение.
+/// Short reads are normal for pipes and network sources; they do NOT
+/// mean end-of-input. Treating them as the end would split chunks at the wrong
+/// boundary, producing different files from pipe input and disk
+/// input. Only a zero-byte read means end of input.
 fn fill<E>(
     source: &mut impl FnMut(&mut [u8]) -> Result<usize, E>,
     buf: &mut [u8],
@@ -174,9 +174,9 @@ fn fill<E>(
 mod tests {
     use super::*;
 
-    /// Генератор проб: детерминированный, потому что здесь проверяется
-    /// ДИСЦИПЛИНА нарезки, а не случайность. Со случайным генератором два
-    /// прогона нельзя было бы сравнить между собой.
+    /// Probe RNG: deterministic because this tests chunking
+    /// DISCIPLINE, not randomness. With a random RNG, two
+    /// runs could not be compared.
     struct Fixed(u8);
 
     impl rand_core::TryRng for Fixed {
@@ -198,10 +198,10 @@ mod tests {
         PayloadKey::from_bytes([7u8; 32])
     }
 
-    /// Прогнать вход, отдавая его кусками не больше `step` байт.
+    /// Process input in pieces no larger than `step` bytes.
     ///
-    /// `step` — это и есть модель короткого чтения: труба отдаёт столько,
-    /// сколько у неё есть сейчас, а не столько, сколько попросили.
+    /// `step` models short reads: a pipe returns what
+    /// it currently has, not what was requested.
     fn run(input: &[u8], chunk_size: u32, step: usize) -> (Sealed, Vec<u8>) {
         let mut left = input;
         let mut out = Vec::new();
@@ -226,11 +226,11 @@ mod tests {
         (sealed, out)
     }
 
-    /// У ПУСТОГО ВХОДА ОДИН ЧАНК, А НЕ НОЛЬ.
+    /// EMPTY INPUT HAS ONE CHUNK, NOT ZERO.
     ///
-    /// Иначе у файла не было бы ни одного тега подлинности и ни одного листа
-    /// дерева, и разбору пришлось бы заводить особый случай — то есть место,
-    /// где подделка «файл без чанков» выглядела бы законно.
+    /// Otherwise the file would have no authentication tag and no tree
+    /// leaf, forcing the parser to introduce a special case, a place
+    /// where the forgery "file without chunks" would look legitimate.
     #[test]
     fn an_empty_input_still_gets_exactly_one_chunk() {
         let (sealed, _) = run(&[], 64, 64);
@@ -238,13 +238,13 @@ mod tests {
         assert_eq!(sealed.total_len, 0);
     }
 
-    /// КОРОТКОЕ ЧТЕНИЕ НЕ МЕНЯЕТ НИ ОДНОГО БАЙТА.
+    /// SHORT READS CHANGE NO BYTES.
     ///
-    /// Главное свойство этого модуля и причина, по которой цикл обязан быть
-    /// один. Труба отдаёт по байту, диск — целыми чанками; нарежь хост файл по
-    /// тому, сколько ему дали за раз, — и один и тот же документ, поданный
-    /// двумя способами, дал бы РАЗНЫЕ контейнеры. Заметить это на живом файле
-    /// почти невозможно: оба открываются.
+    /// This module's main property and the reason the loop must exist
+    /// only once. Pipes return bytes, disks return whole chunks; if a host split by
+    /// how much it received at a time, the same document supplied in
+    /// two ways would yield DIFFERENT containers. Almost impossible to notice in a live
+    /// file: both open.
     #[test]
     fn a_short_read_changes_nothing() {
         let input: Vec<u8> = (0..300u32).map(|i| u8::try_from(i % 251).unwrap_or(0)).collect();
@@ -256,10 +256,10 @@ mod tests {
         }
     }
 
-    /// ЧИСЛО ЧАНКОВ СЧИТАЕТСЯ ПО РАЗМЕРУ, А НЕ ПО УДАЧЕ.
+    /// CHUNK COUNT DEPENDS ON SIZE, NOT LUCK.
     ///
-    /// Отдельно проверяется граница «вход ровно в размер чанка»: там легко
-    /// получить лишний пустой чанк или, наоборот, потерять последний.
+    /// The "input exactly one chunk long" boundary is checked separately: it is easy
+    /// to create an extra empty chunk there or lose the last one.
     #[test]
     fn the_chunk_count_follows_the_size_including_the_edges() {
         for (len, expected) in [(0usize, 1u32), (1, 1), (63, 1), (64, 1), (65, 2), (128, 2), (129, 3)] {
@@ -270,10 +270,10 @@ mod tests {
         }
     }
 
-    /// ОТКАЗ ХОСТА ДОХОДИТ ДО ВЫЗЫВАЮЩЕГО СВОИМ ТИПОМ.
+    /// HOST ERRORS REACH THE CALLER WITH THEIR ORIGINAL TYPE.
     ///
-    /// Не сводится к нашей ошибке: у одного хоста это `std::io::Error`, у
-    /// другого — исключение JavaScript, и причина нужна ровно та, что была.
+    /// Not collapsed into our error: one host has `std::io::Error`, another
+    /// JavaScript exceptions, and the original cause must be preserved.
     #[test]
     fn a_host_failure_arrives_as_itself() {
         let err = seal_chunks(

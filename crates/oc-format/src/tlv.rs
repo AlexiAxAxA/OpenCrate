@@ -1,50 +1,50 @@
-//! Кодирование заголовка: поля с числовыми тегами, длиной и значением.
+//! Header encoding: fields with numeric tags, lengths, and values.
 //!
-//! Формат закрытый, читать его сторонним разработчикам не нужно, поэтому CBOR
-//! здесь не даёт ничего, кроме вопроса о канонизации и большого парсера. Вместо
-//! него — простейший TLV с одним жёстким правилом: **теги идут строго по
-//! возрастанию**. Из этого правила бесплатно следует всё, ради чего в других
-//! форматах вводят «каноническую кодировку»: дубликаты тегов невозможны,
-//! перестановка полей невозможна, две разные последовательности байтов не могут
-//! означать одно и то же. Проверка занимает одно сравнение на поле.
+//! The format is closed and third-party developers do not need to read it, so CBOR
+//! would add only canonicalization questions and a large parser. Instead,
+//! a minimal TLV has one strict rule: **tags are strictly
+//! increasing**. This rule automatically provides everything other
+//! formats introduce "canonical encoding" for: duplicate tags are impossible,
+//! field reordering is impossible, and two different byte sequences cannot
+//! mean the same thing. Checking takes one comparison per field.
 //!
-//! Разделение критичных и необязательных полей — по диапазону тега. Неизвестный
-//! критичный тег означает, что файл использует семантику, которой этот клиент не
-//! знает, и открывать его нельзя. Неизвестный необязательный тег игнорируется.
-//! Без этого разделения каждое новое значимое поле следующей версии формата
-//! стало бы днём отказа для всех старых клиентов.
+//! Critical and optional fields are separated by tag range. An unknown
+//! critical tag means the file uses semantics this client does not
+//! understand, so it must not be opened. Unknown optional tags are ignored.
+//! Without this distinction, every new significant field in the next format version
+//! would cause all old clients to reject files.
 
 use crate::FormatError;
 use core::ops::Range;
 use zeroize::Zeroizing;
 
-/// Теги не выше этого значения критичны: неизвестный такой тег — отказ.
+/// Tags no greater than this value are critical: an unknown one means rejection.
 pub const CRIT_TAG_MAX: u16 = 0x7FFF;
 
-/// Заголовок поля: тег (u16) и длина (u32).
+/// Field header: tag (u16) and length (u32).
 ///
-/// Публичная потому, что от неё зависит вырез записей из `core_hash`: там нужна
-/// граница ЗАПИСИ, а не значения, и вычисляется она вычитанием этой длины из
-/// начала значения. Второй источник истины об этом числе означал бы, что при
-/// смене ширины тега или длины разъедется хеш ядра — молча и только у части
-/// файлов.
+/// Public because excluding records from `core_hash` depends on it: that requires
+/// the RECORD boundary, not the value boundary, computed by subtracting this length
+/// from the value's start. A second source of truth for this number would mean
+/// that changing the width of a tag or length silently breaks the core hash,
+/// and only for some files.
 pub const FIELD_PREFIX_LEN: usize = 6;
 
-/// Разобранное поле с точным диапазоном его значения в исходном буфере.
+/// Parsed field with the exact range of its value in the original buffer.
 ///
-/// Диапазон нужен не для удобства: хеши политики и ядра заголовка считаются по
-/// исходным байтам, а не по повторной кодировке разобранной структуры — иначе
-/// воспроизводится всё семейство ошибок канонизации, известное по JWS и XML-DSig.
+/// The range is essential, not a convenience: policy and header core hashes use
+/// original bytes rather than a re-encoding of the parsed structure, avoiding
+/// the whole family of canonicalization bugs known from JWS and XML-DSig.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field<'a> {
     pub tag: u16,
     pub value: &'a [u8],
-    /// Диапазон значения в буфере, переданном в [`TlvReader::new`].
+    /// Value range in the buffer passed to [`TlvReader::new`].
     pub span: Range<usize>,
 }
 
 impl<'a> Field<'a> {
-    /// Значение как ровно один байт.
+    /// Value as exactly one byte.
     pub fn u8(&self) -> Result<u8, FormatError> {
         match self.value {
             [b] => Ok(*b),
@@ -52,33 +52,33 @@ impl<'a> Field<'a> {
         }
     }
 
-    /// Значение как `u16` little-endian.
+    /// Value as a little-endian `u16`.
     pub fn u16(&self) -> Result<u16, FormatError> {
         self.array::<2>().map(u16::from_le_bytes)
     }
 
-    /// Значение как `u32` little-endian.
+    /// Value as a little-endian `u32`.
     pub fn u32(&self) -> Result<u32, FormatError> {
         self.array::<4>().map(u32::from_le_bytes)
     }
 
-    /// Значение как `u64` little-endian.
+    /// Value as a little-endian `u64`.
     pub fn u64(&self) -> Result<u64, FormatError> {
         self.array::<8>().map(u64::from_le_bytes)
     }
 
-    /// Значение как массив точно заданной длины.
+    /// Value as an array of an exact length.
     ///
-    /// Длина проверяется, а не подгоняется: короткое значение не дополняется
-    /// нулями, длинное не обрезается. Иначе противник управляет тем, какие байты
-    /// попадут в ключ или в отпечаток.
+    /// Length is checked, not adjusted: a short value is not padded with
+    /// zeros and a long one is not truncated. Otherwise the attacker controls
+    /// which bytes enter a key or fingerprint.
     pub fn array<const N: usize>(&self) -> Result<[u8; N], FormatError> {
         <[u8; N]>::try_from(self.value)
             .map_err(|_| FormatError::BadFieldLength { tag: self.tag, len: self.value.len() })
     }
 }
 
-/// Последовательное чтение полей с проверкой возрастания тегов.
+/// Sequential field reading with increasing-tag validation.
 #[derive(Debug)]
 pub struct TlvReader<'a> {
     buf: &'a [u8],
@@ -87,20 +87,20 @@ pub struct TlvReader<'a> {
 }
 
 impl<'a> TlvReader<'a> {
-    /// Начать чтение. Ничего не разбирает: разбор происходит в [`TlvReader::next_field`].
+    /// Start reading. Parses nothing: parsing happens in [`TlvReader::next_field`].
     pub fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0, last_tag: None }
     }
 
-    /// Прочитан ли буфер целиком.
+    /// Whether the entire buffer has been read.
     pub fn is_exhausted(&self) -> bool {
         self.pos >= self.buf.len()
     }
 
-    /// Следующее поле, либо `None` в конце буфера.
+    /// Next field, or `None` at the end of the buffer.
     ///
-    /// Тотальна: любой буфер либо разбирается, либо даёт ошибку, но никогда не
-    /// паникует и никогда не зацикливается — позиция строго растёт на каждом шаге.
+    /// Total: every buffer either parses or yields an error, never
+    /// panicking or looping forever: the position strictly increases on every step.
     pub fn next_field(&mut self) -> Result<Option<Field<'a>>, FormatError> {
         if self.pos >= self.buf.len() {
             return Ok(None);
@@ -148,19 +148,19 @@ impl<'a> TlvReader<'a> {
     }
 }
 
-/// Запись полей с той же проверкой возрастания тегов.
+/// Field writing with the same increasing-tag validation.
 ///
-/// Проверка на стороне записи не дублирует проверку чтения: она не даёт
-/// сгенерировать заголовок, который наш же читатель отвергнет.
+/// Write-side validation is not redundant with read-side validation: it prevents
+/// generation of a header that our own reader would reject.
 ///
-/// Буфер здесь **затирающий**, и это не запас прочности «на всякий случай».
-/// Этим же писателем собираются приватные метаданные — настоящее имя файла,
-/// ради сокрытия которого поле `private_meta` вообще существует и шифруется
-/// отдельным ключом K5. Обычный `Vec` отдал бы это имя аллокатору как есть, и
-/// оно осталось бы читаемым в освобождённой куче — то есть шифрование в
-/// заголовке защищало бы файл на диске, но не процесс, который его собрал.
-/// Публичные поля заголовка от затирания не страдают: цена — один memset на
-/// уничтожение писателя.
+/// The buffer is **zeroizing**, not merely an extra precaution.
+/// This writer also assembles private metadata: the real filename,
+/// whose concealment is why the `private_meta` field exists and is encrypted
+/// with a separate K5 key. An ordinary `Vec` would return that name to the allocator
+/// intact, leaving it readable in freed heap memory. Header encryption would
+/// then protect the file on disk but not the process that assembled it.
+/// Zeroizing does not harm public header fields: the cost is one memset
+/// when the writer is destroyed.
 #[derive(Debug, Default)]
 pub struct TlvWriter {
     buf: Zeroizing<Vec<u8>>,
@@ -172,22 +172,22 @@ impl TlvWriter {
         Self::default()
     }
 
-    /// Писатель с заранее известной ёмкостью.
+    /// Writer with a known initial capacity.
     ///
-    /// Рост буфера безопасен (см. `TlvWriter::reserve`), но не бесплатен:
-    /// каждое перевыделение — копирование и затирание всего накопленного. Там,
-    /// где итоговый размер известен заранее, роста лучше не допускать вовсе.
+    /// Buffer growth is safe (see `TlvWriter::reserve`) but not free:
+    /// every reallocation copies and wipes everything accumulated. Where
+    /// the final size is known beforehand, growth is best avoided altogether.
     pub fn with_capacity(capacity: usize) -> Self {
         Self { buf: Zeroizing::new(Vec::with_capacity(capacity)), last_tag: None }
     }
 
-    /// Освободить место под `extra` байт, не рассыпая уже записанное по куче.
+    /// Make room for `extra` bytes without scattering already-written data across the heap.
     ///
-    /// Обычный рост `Vec` отдаёт старый блок аллокатору нетронутым, поэтому имя
-    /// файла оказалось бы в освобождённой куче столько раз, сколько случилось
-    /// перевыделений: растущий буфер здесь хуже просто незатёртого. Новый буфер
-    /// выделяется явно, старый уезжает в локальную переменную и затирается её
-    /// `Drop` **до** возврата памяти аллокатору.
+    /// Ordinary `Vec` growth returns the old block to the allocator untouched, so the filename
+    /// would remain in freed heap memory once for every
+    /// reallocation: a growing buffer here is worse than an unwiped one. A new buffer
+    /// is explicitly allocated, the old one is moved to a local variable and wiped by its
+    /// `Drop` **before** memory is returned to the allocator.
     fn reserve(&mut self, extra: usize) -> Result<(), FormatError> {
         let needed = self.buf.len().checked_add(extra).ok_or(FormatError::OffsetOverflow)?;
         if needed <= self.buf.capacity() {
@@ -202,7 +202,7 @@ impl TlvWriter {
         Ok(())
     }
 
-    /// Записать поле. Теги обязаны идти по возрастанию.
+    /// Write a field. Tags must be increasing.
     pub fn put(&mut self, tag: u16, value: &[u8]) -> Result<(), FormatError> {
         match self.last_tag {
             Some(prev) if tag <= prev => {
@@ -223,7 +223,7 @@ impl TlvWriter {
         Ok(())
     }
 
-    /// Записать необязательное поле: `None` не занимает места.
+    /// Write an optional field: `None` takes no space.
     pub fn put_opt(&mut self, tag: u16, value: Option<&[u8]>) -> Result<(), FormatError> {
         match value {
             Some(v) => self.put(tag, v),
@@ -231,18 +231,18 @@ impl TlvWriter {
         }
     }
 
-    /// Готовые байты — в затирающей обёртке.
+    /// Finished bytes in a zeroizing wrapper.
     ///
-    /// Тип возврата — часть гарантии, а не украшение: отдай эта функция обычный
-    /// `Vec`, и всё, что писатель бережно не рассыпал по куче, вызывающий отдал
-    /// бы аллокатору целиком при первом же `drop`. Кому нужны именно публичные
-    /// байты (заголовок, политика, описание содержимого), тот копирует их явно
-    /// через `to_vec` — и это видно в коде.
+    /// The return type is part of the guarantee, not decoration: if this function returned
+    /// an ordinary `Vec`, everything the writer carefully avoided scattering across the heap
+    /// would be returned intact to the allocator by the caller's first `drop`. Callers needing
+    /// specifically public bytes (header, policy, content description) explicitly copy them
+    /// with `to_vec`, making that choice visible in code.
     pub fn finish(self) -> Zeroizing<Vec<u8>> {
         self.buf
     }
 
-    /// Текущая длина.
+    /// Current length.
     pub fn len(&self) -> usize {
         self.buf.len()
     }
@@ -252,20 +252,20 @@ impl TlvWriter {
     }
 }
 
-/// Как поступить с полем, тег которого читателю неизвестен.
+/// How to handle a field whose tag the reader does not recognize.
 ///
-/// Разделение по диапазону тега — самая ценная точка расширения формата. Без неё
-/// каждое значимое поле следующей версии становится днём отказа.
+/// Separation by tag range is the format's most valuable extension point. Without it,
+/// every significant field in the next version becomes a rejection event.
 pub fn unknown_tag_action(tag: u16) -> UnknownTag {
     if tag <= CRIT_TAG_MAX { UnknownTag::Refuse } else { UnknownTag::Ignore }
 }
 
-/// Решение по неизвестному тегу.
+/// Decision for an unknown tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnknownTag {
-    /// Критичный диапазон: файл использует семантику, которой мы не знаем.
+    /// Critical range: the file uses semantics we do not understand.
     Refuse,
-    /// Необязательный диапазон: пропустить.
+    /// Optional range: skip.
     Ignore,
 }
 

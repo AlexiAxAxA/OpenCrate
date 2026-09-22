@@ -1,9 +1,9 @@
-//! Байты тождества операции на проводе против замороженного вектора
+//! Operation identity bytes on the wire versus the frozen vector
 //! `tests/kat/operation_id.kat` (`docs/protocol.md` §9.10).
 //!
-//! Здесь — провод: запрос активации с тегом 9 и ответы с эхом (тег 3 выдачи,
-//! тег 2 отказа). Сама производная K28 сверяется в `oc-crypto/tests/kat.rs`,
-//! тождество, собранное клиентом, — в `cc-cli/tests/kat_wire.rs`.
+//! This tests the wire: an activation request with tag 9 and echo responses (issuance tag 3,
+//! refusal tag 2). The K28 derivation itself is checked in `oc-crypto/tests/kat.rs`,
+//! and the client-constructed identity in `cc-cli/tests/kat_wire.rs`.
 
 // Запрет `disallowed_methods` адресован продукту чистого крейта; тест векторов
 // читает файл по определению (довод `kat_policy.rs`). Снимается точечно.
@@ -46,7 +46,7 @@ fn id(v: &BTreeMap<String, Vec<u8>>) -> [u8; 32] {
     v["k28_operation_id"].as_slice().try_into().unwrap()
 }
 
-/// Запрос из вектора — полями, как их называет шапка файла.
+/// The vector request, using the field names from the file header.
 fn request(operation_id: Option<[u8; 32]>) -> ActivateReq {
     ActivateReq {
         file_id: [0x11; 16],
