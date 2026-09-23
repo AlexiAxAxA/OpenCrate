@@ -12,6 +12,15 @@ Open Crate gives Rust applications the building blocks for encrypted documents:
 signed headers, authenticated chunks, recipient key slots and explicit access
 decisions. It is the five-library core behind Close Crate.
 
+For a Rust project, add the `opencrate` facade to use all five libraries, or
+depend on the individual `oc-*` crates you need. Version `0.0.1` is available
+on crates.io:
+
+```toml
+[dependencies]
+opencrate = "=0.0.1"
+```
+
 Your application supplies storage, transport, keys, secure randomness and time.
 The core handles the container rules, cryptography and policy evaluation.
 This separation also makes the same core buildable for WebAssembly.
