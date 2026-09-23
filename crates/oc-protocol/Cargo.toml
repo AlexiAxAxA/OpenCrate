@@ -1,5 +1,9 @@
 [package]
 name = "oc-protocol"
+description = "Wire protocol documents for Open Crate access and authority flows"
+repository = "https://github.com/AlexiAxAxA/OpenCrate"
+homepage = "https://closecrate.com/"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "opencrate"
+description = "One-dependency entry point for the Open Crate Rust core"
+repository = "https://github.com/AlexiAxAxA/OpenCrate"
+homepage = "https://closecrate.com/"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file = "../../LICENSE-OPENCRATE"
+publish.workspace = true
+
+[dependencies]
+oc-policy = { version = "0.0.1", path = "../oc-policy" }
+oc-crypto = { version = "0.0.1", path = "../oc-crypto" }
+oc-format = { version = "0.0.1", path = "../oc-format" }
+oc-protocol = { version = "0.0.1", path = "../oc-protocol" }
+oc-engine = { version = "0.0.1", path = "../oc-engine" }
+
+[lints]
+workspace = true

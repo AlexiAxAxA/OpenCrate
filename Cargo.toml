@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/oc-crypto", "crates/oc-format", "crates/oc-protocol", "crates/oc-policy", "crates/oc-engine"]
+members = ["crates/oc-crypto", "crates/oc-format", "crates/oc-protocol", "crates/oc-policy", "crates/oc-engine", "crates/opencrate"]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
 rust-version = "1.90"
 license-file = "LICENSE-OPENCRATE"
-publish = false
+publish = true
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
