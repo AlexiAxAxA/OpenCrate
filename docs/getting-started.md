@@ -97,14 +97,35 @@ cargo run
 ```
 
 You should see the same three outcomes. This application consumes a path
-dependency from the exported repository, rather than relying on the private
-Close Crate workspace. Keep its generated `Cargo.lock` for reproducible builds.
+dependency from the exported repository. Keep its generated `Cargo.lock` for
+reproducible builds.
 
 ## Choose the libraries for your integration
 
-The pinned Rust toolchain is in `rust-toolchain.toml`. These packages are not
-published to crates.io. Start with a source checkout and path dependencies, and
-pin a reviewed source revision and lockfile in your own integration.
+All five libraries and the `opencrate` facade are published to crates.io at
+version `0.0.1`. To use the full core, add one dependency:
+
+```toml
+[dependencies]
+opencrate = "=0.0.1"
+```
+
+The facade re-exports the libraries as `opencrate::{crypto, engine, format,
+policy, protocol}`. To depend on only the libraries you use, declare them
+individually instead:
+
+```toml
+[dependencies]
+oc-format = "=0.0.1"
+oc-crypto = "=0.0.1"
+oc-protocol = "=0.0.1"
+oc-policy = "=0.0.1"
+oc-engine = "=0.0.1"
+```
+
+The pinned Rust toolchain for this repository is in `rust-toolchain.toml`.
+For local source development, use path dependencies and pin a reviewed source
+revision and lockfile in your integration:
 
 ```toml
 [dependencies]
