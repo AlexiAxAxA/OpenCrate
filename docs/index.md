@@ -9,6 +9,7 @@
 | I want to… | Start here |
 | --- | --- |
 | Try the core on my machine | [Getting started](getting-started.md) |
+| Seal any small file or application value | [Facade `app-data` example](../examples/README.md#seal-a-small-file-of-any-extension) |
 | Understand a document's journey | [How it works](how-it-works.md) |
 | Choose the crates for my application | [Architecture and responsibilities](architecture.md) |
 | Verify a header or explore access rules | [Runnable examples](../examples/README.md) |

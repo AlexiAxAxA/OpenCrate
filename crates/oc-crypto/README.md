@@ -8,6 +8,12 @@ The crate supplies authenticated encryption, key derivation, signatures, sealing
 integrity trees and hybrid key mechanisms. Frozen known-answer vectors in
 [`tests/kat`](../../tests/kat/) support reproducibility of these operations.
 
+Its low-level operations accept byte slices; they do not check filenames or
+extensions. For a small standalone sealed-byte envelope with OS randomness,
+use [`opencrate-sdk`](https://github.com/AlexiAxAxA/OpenCrateSDK) or the
+`opencrate` facade's `app-data` feature. The SDK uses this crate's sealing and
+AEAD primitives; its `OCSB1` envelope is separate from the `.cc` container.
+
 Use the existing domain-separated operations when integrating the format;
 constructing an apparently equivalent nonce or key schedule can produce different
 bytes and different security properties. Secure randomness is supplied by the host.

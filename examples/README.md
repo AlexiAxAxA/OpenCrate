@@ -35,6 +35,20 @@ The program checks each expected result and exits with an error if it changes.
 Read the printed obligations on the successful request. Its device fingerprint,
 policy hash and lease are synthetic demonstration inputs, not verified evidence.
 
+## Seal a small file of any extension
+
+Source: [`seal-file.rs`](../crates/opencrate/examples/seal-file.rs).
+
+```sh
+cargo run --locked -p opencrate --features app-data --example seal-file -- README.md
+```
+
+The example reads the named file as bytes, seals it for one temporary recipient,
+opens it, and checks equality. Input is limited to 16 MiB. It writes no key or
+envelope; applications that need persistence must protect the recipient secret
+and store both the envelope and the metadata needed to reproduce purpose and
+context. See the separate [SDK guide](https://github.com/AlexiAxAxA/OpenCrateSDK/blob/main/docs/usage-guide.md).
+
 ## Build your own consumer
 
 The [getting-started guide](../docs/getting-started.md#4-use-it-in-your-own-application)

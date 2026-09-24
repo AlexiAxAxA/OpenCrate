@@ -13,17 +13,40 @@ signed headers, authenticated chunks, recipient key slots and explicit access
 decisions. It is the five-library core behind Close Crate.
 
 For a Rust project, add the `opencrate` facade to use all five libraries, or
-depend on the individual `oc-*` crates you need. Version `0.0.1` is available
-on crates.io:
+depend on the individual `oc-*` crates you need. The facade is version
+`0.0.2`; the five core libraries are also `0.0.2` on crates.io:
 
 ```toml
 [dependencies]
-opencrate = "=0.0.1"
+opencrate = "=0.0.2"
 ```
 
 Your application supplies storage, transport, keys, secure randomness and time.
 The core handles the container rules, cryptography and policy evaluation.
-This separation also makes the same core buildable for WebAssembly.
+The default core remains buildable for WebAssembly.
+
+## Files beyond `.cc`
+
+Enable the host-side `app-data` feature to seal the bytes of a file of any
+extension, or JSON and messages, for one recipient. It re-exports the separate
+[`opencrate-sdk`](https://crates.io/crates/opencrate-sdk) as
+`opencrate::app_data`; it does not change the `.cc` format.
+
+```toml
+[dependencies]
+opencrate = { version = "=0.0.2", features = ["app-data"] }
+```
+
+```sh
+cargo run --locked -p opencrate --features app-data --example seal-file -- README.md
+```
+
+The example reads a file as bytes and round-trips it with a temporary key.
+The SDK accepts up to **16 MiB** of input, uses OS randomness, and produces an
+`OCSB1` envelope rather than a `.cc` document. Your application owns persistent
+key protection, storage and public-key authentication. This feature has no
+lease, access policy or revocation; see the
+[SDK integration guide](https://github.com/AlexiAxAxA/OpenCrateSDK/blob/main/docs/usage-guide.md).
 
 ## What you can build
 
@@ -33,9 +56,10 @@ This separation also makes the same core buildable for WebAssembly.
 | A document packaging pipeline | Plan recipient slots and assemble authenticated headers around encrypted content |
 | A verifier or inspection tool | Check container authenticity and integrate your own author trust store |
 | An access-control integration | Process signed lease/revocation messages and evaluate time, device and policy facts |
+| Small arbitrary file or application value | Opt into `app-data` for a one-recipient sealed-byte envelope outside `.cc` |
 
 These are integration building blocks. Your application enforces the returned
-decisions and obligations. Start with the two runnable examples below.
+decisions and obligations. Start with the runnable examples below.
 
 ## What is included
 

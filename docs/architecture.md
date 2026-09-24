@@ -34,6 +34,16 @@ trust policy, device identity, trustworthy time, durable anti-replay state,
 network transport and resource limits. The packing engine does not own the
 author's signing key. The author signs the transcript of the final header.
 
+The `opencrate` facade optionally re-exports the separate `opencrate-sdk` as
+`app_data`. This host-side layer uses OS randomness to seal arbitrary bytes
+into `OCSB1` envelopes. It is outside the five-library core and outside the
+`.cc` format; the default facade and core retain their WASM build. Applications
+using `app-data` own keys, storage, transport and any access rules.
+The SDK itself depends on `oc-crypto`: applications that need control of the
+random source, key schedule or container orchestration can continue using the
+individual low-level libraries. None of those APIs restrict a filename or
+extension; `oc-format` specifically parses and builds `.cc` containers.
+
 ## Format compatibility
 
 The magic is `CLOSECR1`, the extension is `.cc`, and current containers use version
