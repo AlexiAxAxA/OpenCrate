@@ -68,3 +68,12 @@ allow = ["LicenseRef-OpenCrate-Community-1.0"]
 crate = "opencrate"
 expression = "LicenseRef-OpenCrate-Community-1.0"
 license-files = [{ path = "../../LICENSE-OPENCRATE", hash = 0xd44aae0f }]
+
+[[licenses.exceptions]]
+crate = "opencrate-sdk"
+allow = ["LicenseRef-OpenCrate-Community-1.0"]
+
+[[licenses.clarify]]
+crate = "opencrate-sdk"
+expression = "LicenseRef-OpenCrate-Community-1.0"
+license-files = [{ path = "LICENSE-OPENCRATE", hash = 0xd44aae0f }]

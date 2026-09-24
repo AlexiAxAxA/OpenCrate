@@ -19,8 +19,7 @@ cd OpenCrate
 The commands below run from this directory unless stated otherwise. The first
 build needs internet access to download the toolchain and dependencies. No
 Open Crate account, license server or hardware security module is needed for
-these examples. A private preparation repository requires GitHub access until
-the public launch.
+these examples.
 
 ## 2. Verify a header
 
@@ -102,12 +101,12 @@ reproducible builds.
 
 ## Choose the libraries for your integration
 
-All five libraries and the `opencrate` facade are published to crates.io at
-version `0.0.1`. To use the full core, add one dependency:
+The five libraries and the `opencrate` facade are published to crates.io at
+`0.0.2`. To use the full core, add one dependency:
 
 ```toml
 [dependencies]
-opencrate = "=0.0.1"
+opencrate = "=0.0.2"
 ```
 
 The facade re-exports the libraries as `opencrate::{crypto, engine, format,
@@ -116,12 +115,26 @@ individually instead:
 
 ```toml
 [dependencies]
-oc-format = "=0.0.1"
-oc-crypto = "=0.0.1"
-oc-protocol = "=0.0.1"
-oc-policy = "=0.0.1"
-oc-engine = "=0.0.1"
+oc-format = "=0.0.2"
+oc-crypto = "=0.0.2"
+oc-protocol = "=0.0.2"
+oc-policy = "=0.0.2"
+oc-engine = "=0.0.2"
 ```
+
+To seal arbitrary application bytes or a small file without a `.cc` container,
+enable `app-data` on the facade. This optional feature re-exports the separate
+`opencrate-sdk` as `opencrate::app_data` and requires a native OS random source.
+The [file example](../crates/opencrate/examples/seal-file.rs) reads any file
+extension up to 16 MiB; it does not save a key or envelope for later use.
+
+```toml
+[dependencies]
+opencrate = { version = "=0.0.2", features = ["app-data"] }
+```
+
+For persistent application data, follow the
+[SDK key and storage guide](https://github.com/AlexiAxAxA/OpenCrateSDK/blob/main/docs/usage-guide.md).
 
 The pinned Rust toolchain for this repository is in `rust-toolchain.toml`.
 For local source development, use path dependencies and pin a reviewed source
@@ -185,7 +198,7 @@ and the relationship between historical decisions and later amendments.
 
 | What you see | What to check |
 | --- | --- |
-| Repository not found or authentication required | Check the repository URL and access; preparation snapshots are private until launch |
+| Repository not found or authentication required | Check the public repository URL and network access |
 | `cargo` or the Windows linker is missing | Install rustup and, on Windows, the C++ build tools; reopen the terminal |
 | Toolchain or dependency download fails | Check network access to the Rust distribution service and crates.io; do not change the pinned version to hide the failure |
 | File not found for the fixture | Run the command from the `OpenCrate` repository root |

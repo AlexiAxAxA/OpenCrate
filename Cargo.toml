@@ -2,8 +2,13 @@
 resolver = "2"
 members = ["crates/oc-crypto", "crates/oc-format", "crates/oc-protocol", "crates/oc-policy", "crates/oc-engine", "crates/opencrate"]
 
+# Keep the optional SDK on the same oc-crypto package as the local core during
+# workspace development. Published packages resolve oc-crypto from crates.io.
+[patch.crates-io]
+oc-crypto = { path = "crates/oc-crypto" }
+
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.90"
 license-file = "LICENSE-OPENCRATE"
