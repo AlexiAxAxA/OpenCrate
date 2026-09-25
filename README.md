@@ -1,4 +1,14 @@
+<p align="center">
+  <img src="docs/assets/open-crate-mark.svg" width="88" alt="Open Crate logo">
+</p>
+
 ![Open Crate — encrypted documents, explicit access decisions](docs/assets/open-crate-banner.svg)
+
+<p align="center">
+  <a href="https://github.com/AlexiAxAxA/OpenCrate/actions/workflows/ci.yml"><img alt="Core CI on main" src="https://github.com/AlexiAxAxA/OpenCrate/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="LICENSE"><img alt="Open Crate Community License 1.0" src="https://img.shields.io/badge/license-Community%201.0-527fba"></a>
+  <a href="https://crates.io/crates/opencrate"><img alt="Total opencrate crate downloads" src="https://img.shields.io/crates/d/opencrate?label=downloads"></a>
+</p>
 
 <div align="center">
 
@@ -24,6 +34,25 @@ opencrate = "=0.0.2"
 Your application supplies storage, transport, keys, secure randomness and time.
 The core handles the container rules, cryptography and policy evaluation.
 The default core remains buildable for WebAssembly.
+
+## Quick Start
+
+With Git and Rust installed, clone the repository and run a policy example:
+
+```sh
+git clone https://github.com/AlexiAxAxA/OpenCrate.git
+cd OpenCrate
+cargo run --locked -p oc-policy --example access-policy
+```
+
+It prints an allowed view with obligations, a denied print, and a view denied
+after the lease window. This example uses synthetic facts; your application
+must verify its own inputs and enforce the returned obligations. The first
+Cargo build downloads dependencies and may take more than a minute. No account
+or server is needed. See the [getting started guide](docs/getting-started.md)
+for prerequisites and a signed-header check.
+
+![Animated terminal demo of header verification and policy decisions](docs/assets/quick-start.gif)
 
 ## Files beyond `.cc`
 
@@ -59,7 +88,8 @@ lease, access policy or revocation; see the
 | Small arbitrary file or application value | Opt into `app-data` for a one-recipient sealed-byte envelope outside `.cc` |
 
 These are integration building blocks. Your application enforces the returned
-decisions and obligations. Start with the runnable examples below.
+decisions and obligations. Start with the Quick Start above, then follow the
+[integration guide](docs/getting-started.md).
 
 ## What is included
 
@@ -70,31 +100,6 @@ decisions and obligations. Start with the runnable examples below.
 | `oc-protocol` | Signed leases, revocation and other protocol message codecs |
 | `oc-policy` | Access decisions from policy and verified caller-provided facts |
 | `oc-engine` | Packing plans, per-file secrets and header assembly |
-
-## Try it
-
-Install Rust through rustup, then run from a terminal:
-
-```sh
-git clone https://github.com/AlexiAxAxA/OpenCrate.git
-cd OpenCrate
-cargo run --locked -p oc-format --example verify-header -- tests/golden/basic.cc
-cargo run --locked -p oc-policy --example access-policy
-```
-
-The first example verifies a real fixture's header signature and reports an
-unknown author until your application pins that identity. The second lets you
-explore a policy with synthetic facts:
-
-```text
-VIEW at t=1100: ALLOW (obligations: ...)
-PRINT at t=1100: DENY (no print permission)
-VIEW at t=2000: DENY (lease window has ended)
-```
-
-Both run locally, without an account or server. Follow the
-[step-by-step guide](docs/getting-started.md) to add the libraries to your own
-Rust application, understand the output and try a damaged-header check.
 
 ## Designed to be checked
 
@@ -144,3 +149,12 @@ Send only USDT on the TRON (TRC20) network to this address. Other tokens or
 other networks (Ethereum, BNB Chain and so on) will be lost. No memo or tag is
 needed. Commercial licensing goes through god@closecrate.com, not through this
 address.
+
+## Feedback
+
+Questions and improvement ideas are welcome in
+[Issues](https://github.com/AlexiAxAxA/OpenCrate/issues).
+Please report security vulnerabilities through [private reporting](SECURITY.md).
+If Open Crate helped you, please consider
+[starring the repository](https://github.com/AlexiAxAxA/OpenCrate).
+It helps others find the project.
