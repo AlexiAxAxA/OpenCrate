@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Open Crate mark</title>
+  <desc id="desc">A warm crate resting on layered blue document sheets.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101b31"/><stop offset="1" stop-color="#223d5d"/></linearGradient>
+    <linearGradient id="sheet" x2="1" y2="1"><stop stop-color="#7bdcf7"/><stop offset="1" stop-color="#5289ef"/></linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="26" fill="url(#bg)"/>
+  <path d="M20 86 64 62l44 24-44 25Z" fill="#2d527a" stroke="#6ea0ce" stroke-linejoin="round"/>
+  <path d="M20 72 64 48l44 24-44 25Z" fill="#3c6796" stroke="#79afda" stroke-linejoin="round"/>
+  <path d="M20 58 64 34l44 24-44 25Z" fill="url(#sheet)" stroke="#a7e6fa" stroke-linejoin="round"/>
+  <path d="m46 42 18-10 18 10-18 10Z" fill="#ffc487" stroke="#ffd6a9" stroke-linejoin="round"/>
+  <path d="m46 42 18 10v20L46 62Z" fill="#cb7554"/>
+  <path d="m64 52 18-10v20L64 72Z" fill="#e99365"/>
+</svg>
