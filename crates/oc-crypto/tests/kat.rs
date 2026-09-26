@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -8,21 +9,11 @@
     clippy::disallowed_methods,
     clippy::disallowed_types
 )]
-//! Frozen key-schedule known-answer tests (KAT).
+//! Frozen key-schedule known-answer tests.
 //!
-//! Vectors live **outside** code, in the repository-root `tests/kat/`; this is not
-//! an organizational detail. Their purpose is to let a second format implementation
-//! (server, editor, third-party client) compare results without reading our Rust. A vector
-//! encoded as a test constant cannot provide that.
-//!
-//! **Change rule.** `tests/kat/*.kat` files change only alongside
-//! a decision recorded in `docs/format.md` and a format-version increase. "Test
-//! failed → fix the vector" is forbidden: the vector would stop being
-//! evidence and become a reflection of code, making the test tautological.
-//!
-//! The file format is deliberately primitive: `name = hexadecimal bytes`, with
-//! `#` comments. Twenty dependency-free parsing lines leave an implementer
-//! no excuse not to compare.
+//! `tests/kat/*.kat` uses `name = hexadecimal bytes` with `#` comments so other
+//! implementations can consume the same vectors. Changes require a recorded
+//! format decision and version increase; do not regenerate vectors to hide a failure.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -125,20 +116,12 @@ fn check(vectors: &BTreeMap<String, Vec<u8>>, name: &str, actual: &[u8]) {
     );
 }
 
-/// Recompute all vectors and print them in the file format.
+/// Print regenerated vectors for a deliberate, recorded format change.
 ///
-/// Marked `#[ignore]` because it is a tool, not a check. Run
-/// manually:
-///
+/// This ignored test is a tool, not a check:
 /// ```text
 /// cargo test -p oc-crypto --test kat -- --ignored --nocapture
 /// ```
-///
-/// Exists because reissuing vectors is sometimes legitimate: a deliberate format
-/// change, documented in `docs/format.md`, with a version increase.
-/// A tool is better than editing thirty lines manually: by hand people
-/// would fix only the failing lines and silently leave the others
-/// inconsistent.
 #[test]
 #[ignore = "инструмент перевыпуска векторов, а не проверка"]
 fn print_all_vectors_for_regeneration() {
@@ -282,20 +265,10 @@ const SEAL_RECIPIENT_SECRET: [u8; 32] = [0x5e; 32];
 /// Sealing associated data: `policy_hash` in the format.
 const SEAL_AAD: [u8; 32] = [0x9d; 32];
 
-/// The `Seal` vector is frozen as an **opening** vector, not a sealing vector.
+/// Open a frozen Seal vector with its private key, `info` and AAD.
 ///
-/// Not a simplification, but the only honest form. Sealing is random by
-/// construction: the ephemeral pair comes from an RNG, the nonce from a seed
-/// (§3.1), and a second implementation cannot and should not reproduce identical bytes.
-/// Opening is fully deterministic, and every container reader
-/// performs it: the server opens its slot, the recipient theirs.
-///
-/// Thus the vector says: "here are the private key, blob, `info`, and `aad`; you
-/// must recover exactly this plaintext". It checks the entire construction
-/// at once: X25519 agreement, K10 derivation including `info`, parsing
-/// of the stored nonce, and AEAD with associated data. A separate vector for the intermediate
-/// K10 key is unnecessary and worse: it would freeze an internal value
-/// an implementation may compute differently provided results agree.
+/// Opening is deterministic; this checks X25519, K10, the stored nonce and AEAD
+/// against fixed plaintext without requiring randomized sealing to reproduce bytes.
 #[test]
 fn the_slot_sealing_matches_its_frozen_vectors() {
     use oc_crypto::seal::{SealedBlob, open, slot_info, x25519_public};
@@ -392,25 +365,9 @@ fn print_seal_vector() {
     println!("seal_plaintext = {}", hex(&plaintext));
 }
 
-/// A P-256 slot opens from a frozen vector.
-///
-/// Wire-format version 2 check: 65-byte `enc`, mechanism in `info`,
-/// stored nonce, AEAD with associated data. Failure means
-/// bytes promised immutable changed; fix the code, not the vector.
-///
-/// This is K10 with `kem_id = 2`, NOT K11. Plan F-6 promised a K11 vector with
-/// the wrong number: K11 is a server→device message containing `lease.seq` in `info`,
-/// belonging to the lease path. Implementing K11 instead of K10 would make the slot
-/// fail to open, appearing as file corruption.
-/// THE MLKEM768-P256 HYBRID MATCHES EXTERNAL VECTORS.
-///
-/// Ten vectors from CFRG draft appendix A.1, five checks each:
-/// ML-KEM seed from the common seed, P-256 scalar (checked via its public point),
-/// composite public half, deterministic encapsulation, and decapsulation
-/// with both halves.
-///
-/// Negative controls live beside it in module probes: this tests
-/// MATCHING external bytes; those test that substituting a half breaks the match.
+/// Compare the MLKEM768-P256 hybrid with ten CFRG draft appendix A.1 vectors.
+/// Check expanded seeds, the scalar's public point, composite public key,
+/// deterministic encapsulation and decapsulation with both halves.
 #[test]
 fn the_mlkem_p256_hybrid_matches_the_drafts_own_vectors() {
     use oc_crypto::agreement::KeyAgreement as _;

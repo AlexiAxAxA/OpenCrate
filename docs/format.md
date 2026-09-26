@@ -1260,6 +1260,23 @@ The commitment lets the recipient discover a mistyped code **before** expensive 
 
 No domain label is used twice anywhere in the system.
 
+**Canonical DH keys in K10 — clarification, 2026-09-26.** Seal binds the raw
+`enc` and recipient-key bytes. For `kem_id = 1`, it accepts only a 32-byte
+little-endian X25519 coordinate in `0 <= u < 2^255 - 19`, with the high bit zero.
+Aliases reduced or masked by RFC 7748 are rejected. For `kem_id = 2`, it accepts
+only a valid uncompressed SEC1 point `0x04 ‖ X(32) ‖ Y(32)`; compressed, hybrid,
+infinite and invalid points are rejected. Both the recipient key and `enc` are
+checked before DH/KDF. A zero shared secret remains invalid. Low-level
+`KeyAgreement` retains its library's accepted forms and does not itself define
+the Seal context. K10 formulas, valid output and frozen KAT/golden artifacts
+remain unchanged.
+
+For `kem_id = 4`, X-Wing Seal also requires the recipient's trailing classical
+X25519 coordinate to be canonical before encapsulation and RNG use. The
+recipient reconstructs that public key for the combiner and K10 context; an
+alias would produce ciphertext it cannot open. This is a Seal boundary check,
+not a change to the raw X-Wing primitive or its frozen combiner.
+
 | # | Purpose | Function | salt | ikm | info | bytes |
 |---|---|---|---|---|---|---|
 | K1 | file KEK | HKDF-SHA256 | `file_id` | `secret_A‖secret_B` | `"CC/v1/kek"‖org_id‖file_id` | 32 |

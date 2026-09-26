@@ -1,18 +1,10 @@
-//! Header encoding: fields with numeric tags, lengths, and values.
+// SPDX-License-Identifier: MPL-2.0
+//! TLV fields with strictly increasing numeric tags.
 //!
-//! The format is closed and third-party developers do not need to read it, so CBOR
-//! would add only canonicalization questions and a large parser. Instead,
-//! a minimal TLV has one strict rule: **tags are strictly
-//! increasing**. This rule automatically provides everything other
-//! formats introduce "canonical encoding" for: duplicate tags are impossible,
-//! field reordering is impossible, and two different byte sequences cannot
-//! mean the same thing. Checking takes one comparison per field.
-//!
-//! Critical and optional fields are separated by tag range. An unknown
-//! critical tag means the file uses semantics this client does not
-//! understand, so it must not be opened. Unknown optional tags are ignored.
-//! Without this distinction, every new significant field in the next format version
-//! would cause all old clients to reject files.
+//! Ordering rejects duplicates and reordered fields. Each codec separately checks
+//! field lengths and canonical values. Tag ranges distinguish unknown critical
+//! fields, which require rejection, from optional fields that can be skipped.
+//! Slot parsing applies the same rule with slot-level rather than file-level rejection.
 
 use crate::FormatError;
 use core::ops::Range;
@@ -35,12 +27,19 @@ pub const FIELD_PREFIX_LEN: usize = 6;
 /// The range is essential, not a convenience: policy and header core hashes use
 /// original bytes rather than a re-encoding of the parsed structure, avoiding
 /// the whole family of canonicalization bugs known from JWS and XML-DSig.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Field<'a> {
     pub tag: u16,
     pub value: &'a [u8],
     /// Value range in the buffer passed to [`TlvReader::new`].
     pub span: Range<usize>,
+}
+
+impl core::fmt::Debug for Field<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Field").field("tag", &self.tag)
+            .field("value_len", &self.value.len()).field("span", &self.span).finish()
+    }
 }
 
 impl<'a> Field<'a> {
@@ -79,11 +78,17 @@ impl<'a> Field<'a> {
 }
 
 /// Sequential field reading with increasing-tag validation.
-#[derive(Debug)]
 pub struct TlvReader<'a> {
     buf: &'a [u8],
     pos: usize,
     last_tag: Option<u16>,
+}
+
+impl core::fmt::Debug for TlvReader<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TlvReader").field("len", &self.buf.len())
+            .field("pos", &self.pos).field("last_tag", &self.last_tag).finish()
+    }
 }
 
 impl<'a> TlvReader<'a> {
@@ -148,23 +153,23 @@ impl<'a> TlvReader<'a> {
     }
 }
 
-/// Field writing with the same increasing-tag validation.
+/// Write fields while enforcing increasing tags, matching reader validation.
 ///
-/// Write-side validation is not redundant with read-side validation: it prevents
-/// generation of a header that our own reader would reject.
-///
-/// The buffer is **zeroizing**, not merely an extra precaution.
-/// This writer also assembles private metadata: the real filename,
-/// whose concealment is why the `private_meta` field exists and is encrypted
-/// with a separate K5 key. An ordinary `Vec` would return that name to the allocator
-/// intact, leaving it readable in freed heap memory. Header encryption would
-/// then protect the file on disk but not the process that assembled it.
-/// Zeroizing does not harm public header fields: the cost is one memset
-/// when the writer is destroyed.
-#[derive(Debug, Default)]
+/// The self-wiping buffer also carries private metadata such as filenames.
+/// Zeroizing wipes owned contents on drop; it does not make Vec growth safe for
+/// secrets or prove erasure of copies made by callers.
+#[derive(Default)]
 pub struct TlvWriter {
     buf: Zeroizing<Vec<u8>>,
     last_tag: Option<u16>,
+}
+
+impl core::fmt::Debug for TlvWriter {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // TLV also carries key seeds and private metadata.
+        f.debug_struct("TlvWriter").field("len", &self.buf.len())
+            .field("last_tag", &self.last_tag).finish()
+    }
 }
 
 impl TlvWriter {

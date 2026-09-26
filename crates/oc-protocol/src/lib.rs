@@ -1,95 +1,23 @@
-//! Product protocol documents: everything exchanged between client, server and
-//! witness that does not reside inside the `.cc` container.
+// SPDX-License-Identifier: MPL-2.0
+//! Client, server, and witness documents outside the `.cc` container.
 //!
-//! # Why this is a separate crate rather than modules in `oc-format`
+//! Container parsing lives in [`oc_format`]. This crate depends on it for TLV and
+//! [`oc_format::FormatError`]; the dependency does not run in the other direction.
+//! Protocol documents have their own versions and lifecycles. The crate performs
+//! no I/O and reads neither clocks nor randomness from the environment.
 //!
-//! The boundary follows the RATE OF CHANGE, not directory
-//! neighbors. The container format freezes: after the first file leaves the system,
-//! every header byte is promised forever, and changing it requires a new
-//! format version together with a recorded decision (I-14). The product protocol
-//! grows with the server: a new request kind, a new field in the file standing,
-//! a new rejection reason appear exactly when the mechanism appears, with
-//! no promise of permanence.
+//! # Unknown fields
 //!
-//! While both kinds lived in one crate, they were indistinguishable externally: the crate
-//! promised to be frozen and opened contained eight and a half thousand
-//! lines changing every week. Mixing them meant either freezing what
-//! must change or exposing the freeze to things that change independently. Decision
-//! R-2 (`docs/plan.md`, «D-core-freeze») separated them into crates; now
-//! the difference is VISIBLE in a `use` statement, before any gate runs.
+//! Unknown critical tags are rejected; unknown optional tags are skipped through
+//! `oc_format::tlv::unknown_tag_action`. Known field lengths, ordering, duplicate
+//! rejection, enum values, and message kinds remain strict.
 //!
-//! # What lives where
+//! Signed documents verify raw body bytes before parsing. Skipping an optional
+//! field therefore cannot hide a change to the signed body. Two layouts differ:
 //!
-//! [`oc_format`] contains the container: splitting the prologue, the header and its slots,
-//! the mutable area, chunk frames, the footer, the policy codec, the TLV parser,
-//! signature verification and the shared error type [`oc_format::FormatError`]. This crate holds
-//! what arrives from or goes onto the wire: activation, author orders,
-//! file standing on the server, access requests and decisions, leases, revocations,
-//! device key attestation, the witness journal, the recipient directory, attribute
-//! rules, control operations and replicas.
-//!
-//! There is exactly one dependency arrow: protocol depends on format. The reverse does not
-//! and cannot exist: no container parser calls any protocol document;
-//! this was verified in the code before the move, not merely promised.
-//!
-//! The lease ([`lease`]) lives here although it is cached alongside the container and
-//! verified by the reader: it is a SEPARATE document with its own version
-//! ([`lease::LEASE_VERSION`]) and lifecycle, issued by the server,
-//! and changes at the server's pace rather than the format's pace.
-//!
-//! # Purity
-//!
-//! The crate passes through the same gate as `oc-format`, `oc-crypto`, `oc-policy` and
-//! `oc-engine`: no I/O, clocks or random number generator.
-//! The verification check is a `wasm32-unknown-unknown` build. This is not a
-//! style concern: tests for time travel and revocation must be DATA,
-//! not a replacement of the system clock.
-//!
-//! # Unknown tags
-//!
-//! **The same rule as the container (I-7), since 2026-09-21.** A tag ≤
-//! `oc_format::tlv::CRIT_TAG_MAX` is critical: an unknown such tag is rejected with
-//! [`oc_format::FormatError::UnknownCriticalField`], the same error
-//! variant as before the decision. Higher tags are optional: their values are skipped. The decision
-//! is made by `oc_format::tlv::unknown_tag_action`, the same function used by
-//! the container; the protocol has no separate one.
-//!
-//! Before that date, protocol parsers rejected EVERY unknown tag, justified
-//! by clients and servers updating together. That argument ceased to hold
-//! even before the first release: after release, servers and clients
-//! update at different times: a solo operator runs their server, while recipients
-//! use unmanaged machines. Under the old rule, the very first
-//! new field after release would break every released peer.
-//! Before release, the change is free: there are no external clients, and client and server ship
-//! as one package. After release, it would require a wire version.
-//!
-//! # The optional range does NOT enable forgery
-//!
-//! Verification order has not changed: signatures and MACs are verified BEFORE body parsing
-//! (I-5), and unknown tags are skipped AFTERWARD, within already authenticated
-//! bytes. Signatures cover the RAW body bytes: `lease`, `revocation`, `order`,
-//! `control` and `replica` sign exactly the slice they subsequently parse,
-//! so a third party cannot append a tag in transit: the signature would no longer
-//! verify. Unauthenticated documents are discussed below, each with its own rationale.
-//!
-//! There are two exceptions, both documented locally:
-//!
-//! * [`access::decode_decision`] remains STRICT. Its signature is verified not over
-//!   raw bytes but over a body REBUILT from the parsed structure
-//!   ([`access::decision_body`]); a skipped tag disappears from that reconstruction.
-//!   Thus an optional range there would enable exactly what this paragraph
-//!   promises to prevent: a third party could append a tag to a signed decision,
-//!   and its signature would verify. It would provide no extension capability either: a field added
-//!   to `decision_body` by a new build would still fail signature verification in an old build.
-//! * [`witness`] does not follow this rule because it contains no TLV: heads, views and
-//!   cosigned heads have exact-length layouts.
-//!
-//! What has NOT changed: request and response kinds (`KIND_*`) are not tags; an unknown
-//! kind is still rejected. Enumerations WITHIN values (lease state, operation
-//! outcome, inheritance mode) are not tags; an unknown value of a known field
-//! is still rejected. Strict tag ordering, duplicate rejection and exact lengths
-//! of known fields (I-7, I-8) remain unchanged, and ordering is checked even for
-//! skipped tags.
+//! * [`access::decode_decision`] rejects every unknown tag because verification
+//!   reconstructs the body; skipping a field would remove it from the transcript.
+//! * [`witness`] uses fixed-length layouts rather than TLV.
 
 /// Access request documents: the recipient requests, the author approves.
 pub mod access;

@@ -1,25 +1,13 @@
-//! Witnessing a server journal head (`docs/protocol.md` §9.13, D3).
+// SPDX-License-Identifier: MPL-2.0
+//! Witnessed server journal heads (protocol §9.13, D3).
 //!
-//! # What this contains and why
+//! A witness retains a head, verifies a new head's RFC 9162 consistency proof,
+//! and cosigns the extension. This codec handles heads, proofs and signatures;
+//! networking, persistence and clocks belong to the witness service.
 //!
-//! A signed head (`size ‖ root`) proves only that the server
-//! agrees with itself: rewriting the journal also rewrites its root. Value
-//! comes from a copy of the head OUTSIDE the server, and someone able to compare a
-//! new head with it without possessing the journal. That is the witness: it stores one head,
-//! receives a new one from the server with a consistency proof
-//! (RFC 9162), and signs it after the server if it extends
-//! the old one.
-//!
-//! Only bytes and checks live here: a head, a view (head with proof),
-//! a cosigned head, and the relationship between two heads. Networking, disk and clocks belong
-//! to the witness (`cc_authority::witness`).
-//!
-//! # What this does NOT provide
-//!
-//! Independent public time or operator independence: a witness on the same
-//! machine or under the same operator signs what it is shown and
-//! rolls back with it. The witness detects rollback and forks
-//! RELATIVE TO ITS OWN MEMORY, nothing more.
+//! Rollback/fork detection is relative to the witness's retained state.
+//! A witness does not establish public time or operator independence; a
+//! colocated witness can lose or roll back its state with the server.
 
 use oc_format::FormatError;
 use oc_crypto::merkle::MerkleTree;

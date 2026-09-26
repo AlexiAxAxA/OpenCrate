@@ -1,28 +1,15 @@
-//! Device key attestation documents on the wire (B6b, `docs/protocol.md`
-//! §9.11.1).
+// SPDX-License-Identifier: MPL-2.0
+//! Device key attestation documents (protocol §9.11.1, B6b).
 //!
-//! # Three steps, and why not two
+//! The Windows provider creates its attestation key together with evidence,
+//! so the challenge must arrive first. The wire exchange is:
+//! 1. Request a challenge and receive `Nonce`.
+//! 2. Send `Evidence` (EK, attestation key and challenged attestation); receive credentials.
+//! 3. Return the decrypted secret and receive the verdict.
 //!
-//! The model in §9.11 has two verifier moves: credentials for the attestation
-//! key's name under the EK, then the secret and the attestation. The Windows provider works differently:
-//! the attestation key is created TOGETHER with the attestation (`KAST` wrapper, B6b measurement), and
-//! the attestation needs the verifier's challenge beforehand. Hence three wire steps:
-//!
-//! 1. The device requests a challenge; the server responds with `Nonce`.
-//! 2. The device sends complete `Evidence`: EK, attestation key and attestation
-//!    with that challenge, and receives credentials.
-//! 3. The device returns the decrypted secret; the server delivers its verdict.
-//!
-//! All three requests follow proof of possession and are protected by the session MAC (K25):
-//! attestation concerns the key whose possession was proved in this same
-//! conversation, not a key merely named by the peer.
-//!
-//! # What is not verified here
-//!
-//! TPM structures and certificates within are bytes: the verifier parses them
-//! (`cc_authority::attest`), strictly and with its own limits. This module handles only
-//! the document layout and length caps, so that envelope parsing cannot allocate memory
-//! based solely on the sender's claims.
+//! All requests follow possession proof and use the session MAC (K25).
+//! This codec checks layouts and length caps. TPM structures and certificates
+//! remain opaque bytes for the attestation verifier to validate.
 
 use oc_format::tlv::{TlvReader, TlvWriter};
 use oc_format::FormatError;

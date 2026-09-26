@@ -1,37 +1,12 @@
-//! Tag-range rule for PROTOCOL DOCUMENTS (I-7, decision of 2026-09-21).
+// SPDX-License-Identifier: MPL-2.0
+//! Protocol unknown-tag tests across the codec table.
 //!
-//! # What is tested here
+//! Reject unknown critical tags, skip optional tags, and enforce ordering even
+//! for skipped entries. Known tags in these layouts precede the optional range,
+//! so optional test fields are appended.
 //!
-//! One rule across all fourteen parsers: an unknown tag > `0x7FFF`
-//! is skipped; an unknown tag ≤ `0x7FFF` is rejected with the same error variant
-//! used for every unknown tag before the decision; strict tag ordering
-//! (I-7) also applies to skipped tags.
-//!
-//! # Why a table rather than twelve files
-//!
-//! Because there is ONE rule. Copying its test into one file per document would
-//! create twelve independently editable places, exactly how this repository develops
-//! the "one path fixed, its neighbor forgotten" problem.
-//! Here a new document adds one table row and immediately receives all four
-//! cases.
-//!
-//! # Why the unknown tag appears ONLY AT THE END
-//!
-//! Not laziness: no other position is possible. Tags strictly increase (I-7), and all
-//! KNOWN protocol document tags lie in the critical range (1..=20 for the
-//! richest document). An optional-range tag is therefore larger by construction
-//! than every known tag and can only follow them. These documents have no middle
-//! position where it could be inserted, unlike the
-//! container header, where optional tag `0x8001` is already occupied.
-//!
-//! # Why signing happens AFTER the tag is added
-//!
-//! Case (i) must test PARSING. Signing a body without the tag and supplying one with
-//! the tag would fail signature verification, letting the test pass without saying anything about
-//! parsing. Thus signed documents have their body extended first, then
-//! signed. The reverse order is separate case (iv), asserting
-//! exactly what justifies the optional range: an outsider cannot append
-//! a tag because the signature covers the raw body bytes.
+//! Sign extended bodies to exercise parsing. Separately append fields after
+//! signing to confirm raw-byte authentication detects changes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
@@ -659,29 +634,11 @@ fn a_tag_appended_after_the_signature_breaks_the_signature() {
     assert!(checked >= 9, "подписанных документов в таблице стало меньше: {checked}");
 }
 
-/// SPECIAL CASE (a): UNAUTHENTICATED GREETING AND CONVERSATION TRANSCRIPT (K31).
+/// Modify an optional greeting field before authentication.
 ///
-/// # The question this test answers
-///
-/// The greeting and challenge travel over the wire BEFORE any authentication: neither
-/// is signed, and the session MAC is not derived yet. An intermediary can therefore append
-/// an optional tag to the greeting, and the range rule made such a
-/// greeting PARSEABLE for the first time; formerly the server would reject it. The question:
-/// is this harmless because the field is ignored?
-///
-/// # Answer: harmless, but NOT because it is ignored
-///
-/// It relies on the handshake transcript (K31,
-/// `oc_crypto::kdf::handshake_transcript`, `docs/format.md`, "ECHO BOUND TO THE
-/// CONVERSATION 2026-09-21"). It is computed over RAW FRAME BYTES: the device
-/// uses bytes it SENT (`cc_cli::activate::greet`), the server bytes
-/// it RECEIVED (`cc_authority::serve::step`, `Request::Hello` branch).
-/// Editing a frame in transit makes these quantities differ, so the device's computed
-/// proof-of-possession echo fails at the server.
-///
-/// Thus the parties hash DIFFERENT bytes precisely when an intermediary intervened,
-/// and identical bytes when none did. That is what this test verifies rather than
-/// merely retelling it.
+/// The field can parse, but K31 hashes raw frames: the device hashes what it sent
+/// and the server hashes what it received. Alteration must change the transcript
+/// and make the possession-proof echo fail.
 #[test]
 fn a_tag_smuggled_into_the_unauthenticated_hello_parts_the_handshake_transcript() {
     let hello = activation::Request::Hello(activation::Hello {

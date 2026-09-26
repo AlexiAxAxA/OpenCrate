@@ -1,24 +1,11 @@
-//! TPM 2.0 credential protection: the computable part of `TPM2_MakeCredential`
-//! (B6a, `docs/protocol.md` §9.11).
+// SPDX-License-Identifier: MPL-2.0
+//! TPM 2.0 credential protection: the pure part of TPM2_MakeCredential
+//! (protocol §9.11).
 //!
-//! # Why in the core
-//!
-//! The server binds an attestation key to an endorsement key through credential
-//! activation: it encrypts a secret so only the TPM containing both keys
-//! can open it. Apart from the block cipher, everything is hash computation without
-//! I/O, clocks, or an RNG: the seed is a parameter, like every source
-//! of randomness in this crate, and every test is deterministic.
-//!
-//! # The form is not ours
-//!
-//! TPM 2.0, part 1, "Credential Protection", and KDFa from the same part (SP 800-108
-//! in HMAC counter mode). Labels `"STORAGE"`, `"INTEGRITY"`, and `"IDENTITY"`
-//! belong to the TPM specification, not the domain-label registry (I-12): we did not
-//! choose them and cannot change them. Labels are supplied WITH the trailing
-//! zero, as the reference TPM implementation hashes them and real TPMs
-//! expect them; a discrepancy would silently produce credentials no TPM could
-//! open. Thus the form is confirmed by activation using
-//! a software TPM (`crates/cc-authority/tests/attest/`), not merely by reading the specification.
+//! The caller supplies the seed. TPM KDFa uses SP 800-108 HMAC counter mode
+//! and the specification's labels `"STORAGE"`, `"INTEGRITY"`, `"IDENTITY"`,
+//! including their trailing zero byte. These labels are fixed by TPM, not by
+//! this crate's domain registry. Compatibility has software-TPM test evidence.
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;

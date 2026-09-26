@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/AlexiAxAxA/OpenCrate/actions/workflows/ci.yml"><img alt="Core CI on main" src="https://github.com/AlexiAxAxA/OpenCrate/actions/workflows/ci.yml/badge.svg?branch=main"></a>
-  <a href="LICENSE"><img alt="Open Crate Community License 1.0" src="https://img.shields.io/badge/license-Community%201.0-527fba"></a>
+  <a href="LICENSE"><img alt="MPL-2.0 license" src="https://img.shields.io/badge/license-MPL--2.0-527fba"></a>
   <a href="https://crates.io/crates/opencrate"><img alt="Total opencrate crate downloads" src="https://img.shields.io/crates/d/opencrate?label=downloads"></a>
 </p>
 
@@ -24,11 +24,11 @@ decisions. It is the five-library core behind Close Crate.
 
 For a Rust project, add the `opencrate` facade to use all five libraries, or
 depend on the individual `oc-*` crates you need. The facade is version
-`0.0.2`; the five core libraries are also `0.0.2` on crates.io:
+`0.0.5`; the five core libraries are also `0.0.5` on crates.io:
 
 ```toml
 [dependencies]
-opencrate = "=0.0.2"
+opencrate = "=0.0.5"
 ```
 
 Your application supplies storage, transport, keys, secure randomness and time.
@@ -63,7 +63,7 @@ extension, or JSON and messages, for one recipient. It re-exports the separate
 
 ```toml
 [dependencies]
-opencrate = { version = "=0.0.2", features = ["app-data"] }
+opencrate = { version = "=0.0.5", features = ["app-data"] }
 ```
 
 ```sh
@@ -126,20 +126,16 @@ See [the documentation map](docs/index.md) for examples and library references.
 
 ## License
 
-The [Open Crate Community License 1.0](LICENSE) is free for personal
-non-commercial use and businesses with both less than **$1M annual group revenue**
-and **fewer than 25 people**. Larger businesses need a commercial agreement:
-write to god@closecrate.com or see [Licensing](docs/licensing.md).
-There is a 90-day transition for existing qualifying businesses.
-
-This is source-available software, not OSI-approved open source. See
-[licensing](docs/licensing.md) for scope and third-party terms.
+Open Crate is licensed under [MPL-2.0](LICENSE). Commercial use is allowed;
+distributed changes to covered files stay under MPL-2.0. Separate application
+files can use other terms. See
+[licensing](docs/licensing.md) for release history and third-party terms.
 
 ## Support the project
 
 Open Crate is built by one independent developer. If the core is useful to you,
 a tip helps keep it going. Tips are voluntary: they are not a license fee, do
-not buy a commercial license and do not create any support obligation.
+not create any support obligation.
 
 | Asset | Network | Address |
 | --- | --- | --- |
@@ -147,8 +143,7 @@ not buy a commercial license and do not create any support obligation.
 
 Send only USDT on the TRON (TRC20) network to this address. Other tokens or
 other networks (Ethereum, BNB Chain and so on) will be lost. No memo or tag is
-needed. Commercial licensing goes through god@closecrate.com, not through this
-address.
+needed.
 
 ## Feedback
 

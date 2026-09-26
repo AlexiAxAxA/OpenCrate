@@ -1,34 +1,9 @@
-//! Single-byte Cyrillic encodings.
+// SPDX-License-Identifier: MPL-2.0
+//! Single-byte Cyrillic decoding shared by display and renderer hosts.
 //!
-//! # Why this belongs in a pure crate
-//!
-//! Because BOTH halves of the product need encoding support; keeping it in one
-//! would require a second copy in the other. The viewer displays text
-//! files itself; the renderer decodes email headers. A table duplicated across
-//! two crates diverges with the first edit, and divergence here means
-//! DIFFERENT LETTERS in two places in one product, rather than a rejection.
-//!
-//! There is no I/O, clock, or generator here: a table is a table.
-//!
-//! # Why the tables are generated
-//!
-//! Because a table of one hundred and twenty-eight values entered by hand
-//! almost certainly contains a typo, and that typo displays not garbage but
-//! A DIFFERENT LETTER. Neither code review nor looking at the output catches it:
-//! the text remains coherent.
-//!
-//! # Why guessing is acceptable here but not in email
-//!
-//! Because these are DIFFERENT situations. An email declares its own encoding:
-//! guessing there contradicts the document and introduces plausible but wrong
-//! letters for no reason. A text file declares nothing, so the choice
-//! is between "display using a guess" and "display dots".
-//!
-//! Dots mean refusing to display a perfectly readable document. Therefore
-//! a guess is made but **explicitly identified**: the caller receives the
-//! encoding name and must show it to the user. A user seeing meaningful
-//! text loses nothing; a user seeing nonsense knows where to look
-//! for the cause.
+//! Generated tables avoid maintaining separate mappings. Email uses its declared
+//! encoding; text files without a declaration may use a guess. The guessed
+//! encoding name is returned so the host can show it to the reader.
 
 /// The encoding in which the bytes could be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,20 +63,12 @@ pub const ALL: [Encoding; 3] = [Encoding::Cp1251, Encoding::Koi8R, Encoding::Cp8
 /// under any of the three tables, so there would always be a "winner".
 const CONFIDENT: u32 = 3;
 
-/// Guess the encoding from the bytes.
+/// Guess text encoding; return None when confidence is insufficient.
 ///
-/// `None` means "no confident candidate": a binary file, text in a language without
-/// Cyrillic, or a fragment that is too short. The caller must then NOT display
-/// the text as text, or it will show plausible nonsense.
-///
-/// # Distinguishing CP1251 from KOI8-R
-///
-/// Both place Cyrillic in `0xC0..=0xFF`, so "did these become letters" cannot
-/// distinguish them. CASE does: KOI8-R puts lowercase letters in `0xC0..=0xDF`,
-/// while CP1251 uses `0xE0..=0xFF`. Russian text is mostly lowercase, so the correct
-/// table yields many lowercase letters and the wrong one many uppercase letters.
-///
-/// Hence the metric: count LOWERCASE Cyrillic letters rather than all letters.
+/// Short, binary or non-Cyrillic input may have no candidate and should not be
+/// silently displayed as guessed text. CP1251/KOI8-R scoring counts lowercase
+/// Cyrillic: KOI8-R uses `0xC0..=0xDF`, CP1251 `0xE0..=0xFF`, so letter count
+/// alone would not distinguish the two tables.
 #[must_use]
 pub fn guess(bytes: &[u8]) -> Option<Encoding> {
     let high = bytes.iter().filter(|byte| **byte >= 0x80).count();

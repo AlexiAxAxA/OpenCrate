@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Editing at byte level: certificate, editor signature, session head, and
 //! the `verify_edition` decision (`docs/format.md`, "EDITING IS EXECUTABLE").
 //!

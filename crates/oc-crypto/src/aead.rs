@@ -1,28 +1,13 @@
-//! Payload chunk encryption.
+// SPDX-License-Identifier: MPL-2.0
+//! Payload chunk encryption: `nonce(24) ‖ ciphertext ‖ tag(16)`.
 //!
-//! On-disk frame: `nonce(24) ‖ ciphertext ‖ tag(16)`.
+//! The sender hedges each nonce over a random seed, plaintext, and AAD. The reader
+//! uses the stored nonce. Deriving it only from file ID and chunk index would reuse
+//! the keystream when a chunk is edited under the same key.
 //!
-//! The nonce is **stored, never derived by the reader**. Deriving it from `(file_id, chunk
-//! index)` is fatal: `file_id` must remain constant during editing, so
-//! rewriting a chunk under the same key would reuse a nonce with different
-//! plaintexts, recovering both plaintexts through XOR and recovering
-//!  the one-time Poly1305 key.
-//!
-//! 192 bits suffice against random collisions, but NOT against repeated
-//! RNG state, so the SENDER derives the nonce through hedging (§6.1
-//! and §3.1). This used to say that the width exists "precisely to make
-//! random values safe", a statement that contradicted §3.1 and
-//! survived decision C-13.
-//!
-//! This determines the crate's API shape, which is the main point here: production
-//! sealing paths accept a SEED rather than a nonce: [`seal_chunk_hedged`] and
-//! [`seal_metadata_hedged`]. There is no way to pass a ready-made nonce; this is a property
-//! of the signature, not caller discipline. Forms accepting a nonce
-//! (`seal_chunk`, `seal_metadata`) remain only behind the
-//! `explicit-nonce` feature, absent from production builds.
-//!
-//! An inviolable rule: unauthenticated bytes never leave the function.
-//! On error, the output buffer is wiped.
+//! Production entry points accept seeds, not caller-chosen nonces. Explicit-nonce
+//! forms are available only through the `explicit-nonce` feature for testing.
+//! Unauthenticated plaintext is never returned; failed output buffers are wiped.
 
 use crate::merkle::{leaf_of, Leaf};
 use crate::secret::{MetaKey, PayloadKey, SecretBuf};
@@ -107,21 +92,11 @@ pub fn metadata_aad(file_id: &[u8; 16]) -> [u8; META_AAD_LEN] {
     aad
 }
 
-/// Whether this build supports encryption with the declared AEAD profile.
+/// Whether this build supports the AEAD profile.
 ///
-/// A second boundary for `aead_id`, symmetric to [`crate::merkle::ensure_supported`]
-/// for the tree hash. Without it, an identifier in a signed header parsed
-/// successfully, with rejection only at the first chunk, after signature
-/// verification, slot parsing, key agreement, and CEK unwrapping. Parsing a number and
-/// being able to execute it are different things; both must be resolved together,
-/// at parsing time.
-///
-/// AES profiles are declared by the format (docs/format.md §6.1), but their crates are
-/// not included: the AES-GCM counter nonce does not fit a 24-byte argument and
-/// requires its own path, not a branch in `match`.
-///
-/// The `match` deliberately has no `_`: adding a member to [`AeadAlg`] must break
-/// the build here, beside the cipher, rather than pass silently.
+/// Header parsing checks support before key agreement and chunk processing.
+/// AES profiles need a separate nonce path and are not implemented here.
+/// The exhaustive match requires an explicit decision for each new profile.
 pub fn ensure_supported(alg: AeadAlg) -> Result<(), CryptoError> {
     match alg {
         AeadAlg::XChaCha20Poly1305 => Ok(()),
@@ -157,19 +132,11 @@ fn seal_with(
     }
 }
 
-/// The sole AEAD profile selection point for CHUNK decryption.
+/// Decrypt a chunk in place using the selected AEAD profile.
 ///
-/// Decrypts in place: `buffer` contains ciphertext on input and plaintext
-/// of the same length on output; the tag is a separate argument.
-///
-/// Exists to prevent plaintext from acquiring its own heap copy:
-/// see the detailed explanation in [`open_chunk_inner`]. Rejection looks
-/// identical for a substituted chunk, another file, and a corrupted byte, for the
-/// same reason as in [`open_with`].
-///
-/// The contents of `buffer` on failure are unspecified and must not be relied
-/// on: an implementation may leave partially decrypted bytes there.
-/// The [`open_chunk`] wrapper guarantees wiping, structurally.
+/// The input buffer holds ciphertext; successful output has the same length.
+/// The tag is supplied separately. Failure may leave partially decrypted bytes;
+/// [`open_chunk`] wipes the buffer before returning an error.
 fn open_in_place(
     key: &[u8; 32],
     alg: AeadAlg,
@@ -211,27 +178,11 @@ fn open_with(
     }
 }
 
-/// Seal a chunk, DERIVING the nonce internally, and return it with the tree leaf.
+/// Seal a chunk with an internally derived nonce and return its tree leaf.
 ///
-/// # Why this function exists at all
-///
-/// Because it physically prevents passing a nonce, which is exactly what is required
-/// when a chunk is REWRITTEN. Nonce reuse under one key is fatal (I-1):
-/// two different plaintexts under one keystream are exposed through XOR, and
-/// reuse of the one-time Poly1305 key enables tag forgery. Yet the most natural
-/// approach when editing a document, "keep the nonce already in the frame",
-/// leads directly to that failure.
-///
-/// Rewriting is safe today as a CONSEQUENCE of hedging, rather than by API design:
-/// the nonce derives from the seed and plaintext, so a different plaintext
-/// naturally produces a different nonce. The property is real, but depends on the caller
-/// not getting clever. A comment cannot enforce it; only a function
-/// signature with no room for a nonce can.
-///
-/// The seed is a parameter: this crate has no RNG and must not have one
-/// (I-1 requires stored nonces, not reader-derived ones, but the SENDER derives them
-/// from a random seed PLUS plaintext, so that repeating
-/// RNG state after snapshot rollback does not repeat the nonce).
+/// The caller supplies a random seed, not a nonce. Hedging binds the plaintext,
+/// so changed plaintext gets a different nonce even after RNG rollback.
+/// Reusing a nonce under one key would expose plaintexts and permit tag forgery.
 ///
 /// # Errors
 /// Returns [`CryptoError`] on encryption failure or an incorrect output length.
@@ -250,28 +201,11 @@ pub fn seal_chunk_hedged(
     Ok((nonce, leaf))
 }
 
-/// Encrypt a chunk, appending `ciphertext ‖ tag` to `out`, and return the tree leaf.
+/// Encrypt a chunk, appending `ciphertext ‖ tag` to `out`, and return its leaf.
 ///
-/// `out` is cleared before writing.
-///
-/// # The nonce is an argument here: this is the DANGEROUS form
-///
-/// Retained for frozen vectors and probes needing precisely the
-/// nonce recorded in the artifact. Production paths do not use it: they use
-/// [`seal_chunk_hedged`], where a nonce can be derived but cannot be supplied.
-///
-/// If you are writing a new call unrelated to KATs, this is not the function you need.
-/// Rewriting a chunk with the nonce already in its frame destroys confidentiality
-/// of both plaintexts at once (I-1).
-///
-/// # Why a feature gate rather than just a doc-comment warning
-///
-/// Because documentation is not a boundary. While production code can see the function,
-/// the "dangerous form" relies on the next caller reading the paragraph above;
-/// `explicit-nonce` is disabled by default and enabled ONLY through
-/// `[dev-dependencies]`, so a production build cannot see this function
-/// at all: the call does not compile. A boundary visible to the compiler cannot
-/// be overlooked in a hurry.
+/// Clears `out` before writing. The `explicit-nonce` feature exposes this form
+/// for frozen vectors and probes; normal callers use [`seal_chunk_hedged`].
+/// Never reuse a supplied nonce under the same key, including when editing.
 #[cfg(any(test, feature = "explicit-nonce"))]
 pub fn seal_chunk(
     key: &PayloadKey,
@@ -357,19 +291,9 @@ fn open_chunk_inner(
         .ok_or(CryptoError::BadLength)?;
     let aad = chunk_aad(file_id, index, alg);
 
-    // Расшифровка идёт НА МЕСТЕ, в буфере вызывающего, и это не оптимизация.
-    //
-    // Раньше здесь выделялся `Zeroizing<Vec<u8>>` под открытый текст, и он
-    // затирался при уничтожении — то есть защищал от того, что блок достанется
-    // аллокатору читаемым. От второй беды он не защищал вовсе: блок обычной кучи
-    // может уехать в файл подкачки, пока живёт. Просмотрщик запирает свою память
-    // (`VirtualLock`) именно затем, чтобы этого не случилось, и промежуточная
-    // копия в незапертой куче сводила бы всю меру на нет — на каждый чанк.
-    //
-    // Порядок операций здесь единственно возможный: сначала объявить длину, потом
-    // скопировать шифротекст, потом расшифровать. Затирать буфер перед копией
-    // нельзя не по соображениям скорости — `as_declared_mut` не затирает
-    // намеренно: стереть буфер после копии значило бы стереть вход.
+    // Decrypt in the caller's buffer to avoid an extra plaintext heap copy.
+    // Declare the length, copy ciphertext, then decrypt. Wiping after the copy
+    // would erase the input; `as_declared_mut` therefore does not wipe it.
     let room = out.as_capacity_mut().get_mut(..ct.len()).ok_or(CryptoError::BadLength)?;
     room.copy_from_slice(ct);
     out.declare_len(ct.len())?;
@@ -381,23 +305,11 @@ fn open_chunk_inner(
     Ok(leaf_of(index, nonce, tag, ct))
 }
 
-/// Seal private metadata, DERIVING the nonce internally, and return it alongside.
+/// Seal private metadata with an internally derived nonce.
 ///
-/// # Why this function exists
-///
-/// For the same reason as [`seal_chunk_hedged`]. It was added later not
-/// because metadata is safer: hedging existed here, but the CALLER assembled it;
-/// the engine derived a nonce itself and passed it here ready-made. While
-/// that derivation step is external, it can be skipped, and the function signature
-/// cannot prevent that: it accepts any 24 bytes. Reuse here is especially
-/// costly: `CEK` and `header_salt` come from the same RNG, so VM snapshot
-/// rollback would repeat both the K5 key and nonce, while plaintexts
-/// (the name and size of another document) would differ.
-///
-/// The seed is a parameter: this crate has no RNG and must not have one.
-///
-/// Returns `(nonce, ciphertext)`: the nonce is not secret, but the block cannot
-/// be decrypted without it, and it is stored ready-made in the file (I-1).
+/// The caller supplies a random seed. Hedging also binds plaintext, preventing
+/// nonce reuse for changed metadata when RNG state is repeated.
+/// Returns `(nonce, ciphertext)`; store the nonce with the encrypted metadata.
 ///
 /// # Errors
 /// Returns [`CryptoError`] on nonce derivation or encryption failure.
@@ -718,19 +630,8 @@ mod tests {
         }
     }
 
-    /// ONE SEED FOR TWO DIFFERENT PLAINTEXTS PRODUCES DIFFERENT NONCES.
-    ///
-    /// # What this test protects
-    ///
-    /// Chunk rewriting, which does not exist yet. When it arrives (phase 6),
-    /// the most natural approach will be "take the nonce already in the
-    /// frame", which would destroy confidentiality of both plaintexts at once:
-    /// one keystream for two different plaintexts exposes them through XOR, and
-    /// the one-time Poly1305 key permits tag forgery (I-1).
-    ///
-    /// This checks that protection is a PROPERTY OF DERIVATION rather than
-    /// caller discipline: even with exactly the same seed, as after
-    /// VM snapshot rollback, a different plaintext yields a different nonce.
+    /// Changed plaintext must produce a different nonce even with the same seed.
+    /// This covers chunk rewriting and repeated RNG state after snapshot rollback.
     #[test]
     fn the_same_seed_still_yields_different_nonces_for_different_plaintexts() {
         let seed = [0x33u8; NONCE_LEN];

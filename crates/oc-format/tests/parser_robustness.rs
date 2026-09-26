@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Parser robustness against hostile input.
 //!
 //! A real `cargo-fuzz` fuzzer requires nightly and separate installation and will

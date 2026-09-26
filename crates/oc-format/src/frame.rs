@@ -1,23 +1,8 @@
-//! Message framing: four length bytes, least significant byte first.
+// SPDX-License-Identifier: MPL-2.0
+//! Message framing with a four-byte little-endian length.
 //!
-//! # Why this lives here rather than with the first consumer
-//!
-//! Because there are already three consumers: the engine behind a pipe, its client,
-//! and the server behind a socket. All share one rule: **check the limit BEFORE
-//! allocating**; two copies of that rule already existed, both only in prose.
-//!
-//! Divergent copies here mean different interpretations of length between
-//! processes, not a stylistic difference: one side accepts a message, while
-//! the other ends the conversation. Hence one implementation, in a crate all can see.
-//!
-//! This also receives what appeared in `oc-engine` yesterday: once there was a third
-//! consumer, the former location was no longer shared.
-//!
-//! # What is NOT here
-//!
-//! I/O. The engine uses a pipe, the client a child process, the server
-//! a socket; combining three different forms of I/O into one type would hide
-//! differences that must remain visible: each has its own errors and end of conversation.
+//! Check the declared limit before allocating. Pipe and socket hosts share this
+//! encoding but keep their own I/O, errors and end-of-stream handling.
 
 use crate::FormatError;
 

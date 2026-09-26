@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Lease version 3: device key attestation flag under the server signature (B6b).
 //!
 //! The flag raises the evaluator's binding level to `HardwareAttested`, so

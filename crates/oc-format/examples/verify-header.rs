@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Authenticate a local header without treating an unknown author as trusted.
 // The example is the I/O host, not part of the pure library.
 #![allow(clippy::disallowed_methods)]

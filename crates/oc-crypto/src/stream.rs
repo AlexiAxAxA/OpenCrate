@@ -1,31 +1,10 @@
-//! Payload chunking discipline.
+// SPDX-License-Identifier: MPL-2.0
+//! Streaming payload encryption shared by native and WASM hosts.
 //!
-//! # Why here rather than alongside I/O
-//!
-//! Before 2026-09-09 the loop lived in `cc_cli::payload::seal_stream`, appropriately
-//! while there was one host. Now there are two: the same loop is needed by a wrapper for
-//! other languages that builds for `wasm32` and cannot reach `cc-cli`,
-//! which does not build for wasm at all.
-//!
-//! Reimplementing the loop elsewhere is forbidden, not to save lines. Its behavior
-//! is a CRYPTOGRAPHIC CONTRACT rather than file handling:
-//!
-//! * empty input yields ONE zero-length chunk rather than zero chunks; otherwise a file
-//!   would have no authentication tag and no tree leaf;
-//! * each chunk nonce is derived by HEDGING over the seed and plaintext
-//!   (I-1, decision C-13), not taken from the RNG;
-//! * the tree leaf is computed from `nonce ‖ tag ‖ ct`, with leaf order matching
-//!   chunk order.
-//!
-//! If two implementations differed on any of these three rules, files built by different
-//! hosts would no longer open in each other, with no way to
-//! notice: both would pass their own tests.
-//!
-//! # How this remains pure
-//!
-//! No files, clocks, or internal RNG. Source and sink arrive
-//! as closures, the RNG as a parameter. `std::io` is not mentioned here:
-//! the `Read`/`Write` adapter belongs to the host that has them.
+//! Source and sink are closures; randomness is supplied by the caller. Empty
+//! input produces one authenticated, zero-length chunk. Nonces use hedging, and
+//! Merkle leaves bind each chunk's index, nonce, tag, and ciphertext in stream order.
+//! Keeping this loop shared preserves the same bytes across host adapters.
 
 use crate::aead::{NONCE_LEN, TAG_LEN, seal_chunk_hedged};
 use crate::merkle::{Leaf, MerkleTree};
@@ -98,6 +77,10 @@ where
     G: rand_core::CryptoRng + ?Sized,
 {
     let capacity = usize::try_from(chunk_size).map_err(|_| StreamError::TooLarge)?;
+    // Zero capacity skips the source and would seal a nonempty file as empty.
+    if capacity == 0 {
+        return Err(CryptoError::BadLength.into());
+    }
     // Затирающий буфер фиксированной ёмкости: обычный вектор уносил бы каждый
     // прочитанный кусок исходного файла в кучу — и при уничтожении, и при росте
     // (И-11).

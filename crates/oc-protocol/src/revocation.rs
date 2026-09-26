@@ -1,25 +1,10 @@
-//! Revocation: a server-signed "file revoked" document.
+// SPDX-License-Identifier: MPL-2.0
+//! Server-signed revocation documents, distributable through any channel.
 //!
-//! # Why a document when revocation already works
-//!
-//! Revocation works by the server ceasing to issue leases, so it reaches
-//! only those who contact the server. A revocation document makes revocation DATA:
-//! a document signed with the lease-signing key that a reader accepts
-//! from anywhere: a subscription, a query, a file beside the container, or a
-//! peer. The channel is no longer the only route (F-18, tier 3).
-//!
-//! It cannot be forged without the server key; spreading a genuine document means
-//! spreading the truth. It is verified with the same key as a lease: the author
-//! pinned it in the container header under their signature, so revocation introduces
-//! no second trust root.
-//!
-//! # Layout
-//!
-//! Like a lease: `signature(64) ‖ body`, the body is TLV under I-7 and I-8;
-//! the signature transcript uses label `"CC/v1/revocation"` from the shared registry in §3.6
-//! (the label was reserved earlier and had not been used before this date).
-//! Revocation is final: the epoch in the document serves journals and reports, not
-//! comparisons of "which revocation is newer".
+//! Verify with the lease-signing key pinned in the signed container header.
+//! The layout is `signature(64) ‖ TLV body`; the transcript label is
+//! `CC/v1/revocation`. Revocation is final: its epoch identifies journal/report
+//! entries, rather than choosing between newer and older revocations.
 
 use oc_crypto::CryptoError;
 

@@ -1,15 +1,9 @@
-//! Signatures.
+// SPDX-License-Identifier: MPL-2.0
+//! Domain-separated signatures over [`Transcript`] values.
 //!
-//! Only [`Transcript`] can be signed, and its constructor requires a domain
-//! label. Signing bytes without domain separation is therefore impossible:
-//! the compiler prevents it.
-//!
-//! Verification uses `verify_strict`, not `verify`, to avoid inheriting
-//! malleability from the cofactor and noncanonical key representations,
-//! which would lose the property "one signature, one file".
-//!
-//! The [`Signer`] trait exists because author and device keys will reside in TPMs
-//! in phase 1 without leaving them: hardware will sign, not this code.
+//! Transcript construction requires a registry label. Verification uses
+//! `verify_strict` to reject small-order points and noncanonical representations.
+//! The [`Signer`] trait also supports providers that retain their private key.
 
 use crate::transcript::Transcript;
 use crate::{CryptoError, SigAlg};
@@ -289,35 +283,12 @@ mod tests {
         );
     }
 
-    /// SIGNATURES UNDER SMALL-ORDER KEYS ARE REJECTED: that is what `strict` means.
+    /// Strict verification rejects a small-order forgery that lax verification accepts.
     ///
-    /// # Why `verify_strict` was unguarded without this probe
-    ///
-    /// Because every other probe supplies either a valid signature or garbage,
-    /// and `verify` and `verify_strict` handle both IDENTICALLY. Replacing one
-    /// with the other broke no test and no vector:
-    /// the difference is visible in exactly one input class, small-order
-    /// points, and the repository had no such input.
-    ///
-    /// # The vector
-    ///
-    /// The classic "signature valid for any message" forgery: public
-    /// key `A` is the curve identity (`01` followed by 31 zeroes), `R` is the same,
-    /// and `S = 0`. The verification equation reduces to `[0]B = R + h·A`, hence
-    /// `identity = identity`, true for ANY message. `verify_strict`
-    /// rejects this input because `A` and `R` have small order; `verify` does not.
-    ///
-    /// # Why the probe includes an `ed25519_dalek` half
-    ///
-    /// Without it, the probe would prove nothing: "nonstrict verification accepts
-    /// this vector" is a claim about a dependency, to be checked by execution rather than
-    /// reasoning. It also guards the dependency itself: if `dalek` starts
-    /// rejecting weak keys on the nonstrict path, this half fails and reports that
-    /// the behavioral discriminator no longer exists.
-    ///
-    /// The cost of omission is stated in I-6: one signature verifies under
-    /// multiple keys; "one signature, one file" ceases to hold,
-    /// and revocation and the log lose their unambiguous file binding.
+    /// The vector uses identity points for `A` and `R` (`01` then 31 zeroes), with
+    /// `S = 0`. The equation `[0]B = R + h·A` reduces to `identity = identity` for
+    /// any message. The lax dependency check is the positive control; without it,
+    /// rejection would not distinguish strict verification from generic invalid input.
     #[test]
     fn a_small_order_forgery_is_refused_although_the_lax_check_would_take_it() {
         // Нейтральный элемент в сжатом виде: y = 1, то есть `01` и 31 ноль.

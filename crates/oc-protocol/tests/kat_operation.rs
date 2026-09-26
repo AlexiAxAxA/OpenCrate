@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Operation identity bytes on the wire versus the frozen vector
 //! `tests/kat/operation_id.kat` (`docs/protocol.md` §9.10).
 //!

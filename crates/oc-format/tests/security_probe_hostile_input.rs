@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // Файл-проба состязательной проверки безопасности. Часть тестов здесь КРАСНАЯ
 // НАМЕРЕННО: падение теста и есть доказательство находки. Линтерные запреты
 // рабочего кода к пробам не применяются — проба вправе делать то, чего продукт
@@ -11,23 +12,11 @@
     clippy::disallowed_methods,
     clippy::disallowed_types,    clippy::assertions_on_constants
 )]
-//! Area 3: parsing hostile input.
+//! Hostile-input probes for headers, policies and content descriptors.
 //!
-//! `parser_robustness.rs` covers `TlvReader`, `Prologue`, and `Layout`, but does not
-//! reach `Header::decode`, `policy_codec::decode`, or
-//! `ContentDesc::decode_verified`. This file closes that gap and also compares
-//! parsing with the specification where divergence has already occurred.
-//!
-//! Three probes here (CEK wrapper, mutable region MAC transcript, and
-//! `suite` members) were written against an EARLIER `docs/format.md` revision and asserted
-//! the opposite of the current specification. They were explicitly revised:
-//! each comment records what the earlier revision required and why
-//! it could not be implemented. None was silently adjusted to the code:
-//! every claim was checked against the current §1.2, §2, and §3.3 text.
-//!
-//! The harness holds ITS OWN signing key and MAC key; otherwise deep branches
-//! (`verify_and_parse` after the signature, `ContentDesc::decode_body` after the MAC)
-//! are unreachable. This is exactly what `docs/format.md` §5.2 requires.
+//! The harness signs and MACs inputs with its own test keys to reach parsing after
+//! authentication. It checks the current format contracts for the CEK wrapper,
+//! mutable-region MAC transcript and suite members.
 
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -583,21 +572,9 @@ fn superseded_value_transcript(
     t
 }
 
-/// REVISED OPENLY, not silently. The previous probe was named
-/// `the_content_mac_follows_the_transcript_named_by_the_specification` and
-/// required the reader to accept a region authenticated with a transcript over
-/// PARSED field values. That transcript appeared in the former §1.2 revision;
-/// the current one specifies `fixed(file_id) ‖ field(body)` over raw bytes and
-/// explains why no alternative works.
-///
-/// The previous probe's requirement was not merely obsolete; it contradicted two
-/// other format promises. A value-based transcript would (1) require both
-/// parties to know ALL body fields, so a version 2 optional tag would break the MAC
-/// for a version 1 client, disabling the extension point of §2.1 item 3
-/// precisely where promised; (2) require a separate "footer present"
-/// flag byte although §1.2 explicitly says "no footer" and "footer at offset 0"
-/// are distinguishable from body bytes alone; (3) reproduce the JWS/XML-DSig canonicalization bug:
-/// parse one thing, authenticate another.
+/// Authenticate `fixed(file_id) ‖ field(body)` over raw content-body bytes.
+/// A transcript of parsed values would lose unknown optional fields and change
+/// the specified authentication boundary.
 #[test]
 fn the_content_mac_covers_the_raw_body_bytes_so_unknown_optional_fields_still_verify() {
     let key = mac_key();
@@ -739,21 +716,8 @@ fn header_without(header_bytes: &[u8], tag: u16) -> Vec<u8> {
     w.finish().to_vec()
 }
 
-/// REVISED OPENLY, not silently. The previous probe was named
-/// `a_header_containing_exactly_the_fields_of_the_specification_is_readable` and
-/// required the opposite: a header WITHOUT tag 17 should parse, and tag 17 itself
-/// should be optional (> 0x7FFF). The probe relied on a revision of
-/// `docs/format.md` whose §2 table ended at tag 16. The current
-/// §2 has row 17 stating `wrapped_cek`, bytes[72], **required**;
-/// absence means rejection.
-///
-/// Neither of the two edits could satisfy the former probe legitimately.
-/// Moving the field to the optional range would let an unaware reader
-/// SKIP the sole wrapped content key, then fail to open a single byte
-/// while reporting file corruption: precisely the silent
-/// divergence the tag ranges are separated to prevent.
-/// Accepting a header without tag 17 would validate a container
-/// for which no decryption key can be obtained.
+/// Require critical tag 17, `wrapped_cek`, with its specified 72-byte value.
+/// Without this field the reader cannot recover the content key.
 #[test]
 fn the_wrapped_cek_field_is_mandatory_and_stays_in_the_critical_tag_range() {
     let full = sample_header([0x01; 32]).encode().unwrap();
@@ -779,20 +743,9 @@ fn the_wrapped_cek_field_is_mandatory_and_stays_in_the_critical_tag_range() {
     );
 }
 
-/// REVISED OPENLY, not silently. The previous probe was named
-/// `the_suite_map_accepts_the_members_the_specification_lists` and required
-/// `suite` with `kdf_id`(4) and `kem_id`(5) members to parse: `suite` had this
-/// former §2 description. Current §2 says "exactly three
-/// members: sig_alg(1), aead_id(2), tree_hash_id(3). Neither kdf_id nor kem_id" and
-/// gives each omitted member a paragraph of explanation.
-///
-/// Satisfying the former probe would create a second source of truth
-/// for KEM: §3.3 specifies `kem_id` PER SLOT, the reason slots exist;
-/// the server slot and author-device slot already use different KEMs. A file-wide
-/// `kem_id` would either forbid this coexistence or disagree with a slot,
-/// causing two implementations to read the file using different KEMs. `kdf_id`, meanwhile, has
-/// exactly one valid value: a critical field the reader can only
-/// silently ignore is explicitly forbidden by the format.
+/// Accept exactly `sig_alg`, `aead_id` and `tree_hash_id` suite members.
+/// KEM is specified per slot; a file-wide KEM would conflict with mixed slots.
+/// The format has no selectable KDF field.
 #[test]
 fn the_suite_map_holds_exactly_the_three_members_of_the_specification() {
     let base = sample_header([0x01; 32]).encode().unwrap();
@@ -839,31 +792,10 @@ fn the_suite_map_holds_exactly_the_three_members_of_the_specification() {
 
 #[test]
 fn an_unknown_critical_field_inside_a_key_slot_is_not_silently_dropped() {
-    // §2: «тег ≤ 0x7FFF критичен, и неизвестный такой тег означает отказ
-    // открывать файл». Правило сформулировано как свойство ДИАПАЗОНА тега, а не
-    // одного конкретного контейнера, и `Header::decode`, `decode_suite`,
-    // `decode_authority`, `policy_codec::decode` его соблюдают.
-    //
-    // ИСТОРИЯ. Проба заводилась, когда `decode_slot` отбрасывал ЛЮБОЙ незнакомый
-    // тег: слот с известным видом и KEM, но с добавленным в версии 2 критичным
-    // ограничением, открывался клиентом версии 1 так, будто ограничения нет.
-    // Затем маятник ушёл в другую крайность — отвергался весь ФАЙЛ, и точка
-    // расширения, ради которой слоты заведены, оказалась закрыта: любой будущий
-    // вид слота делал контейнер нечитаемым даже для клиента, у которого есть
-    // собственный открываемый слот.
-    //
-    // Нынешнее правило (пункт С-6): непригоден СЛОТ, а не файл. Он отдаётся как
-    // `Unknown` — то есть сохраняется целиком и не используется, ровно как слот
-    // незнакомого вида или с незнакомым `kem_id`.
-    //
-    // Тег берётся МАКСИМАЛЬНЫЙ критичный, а не первый свободный, и это третья
-    // редакция этой строки. Сначала здесь стоял тег 7 — и стал NONCE. Потом тег 8
-    // как «первый свободный» — и стал CLAIM_COMMIT вместе с кодом-претензией. В
-    // оба раза проба продолжала проходить, но проверяла уже не диапазон тега, а
-    // длину известного поля: реестр вырос, а проба об этом не узнала.
-    //
-    // `CRIT_TAG_MAX` — верхняя граница критичного диапазона. Реестр растёт снизу,
-    // поэтому дойти до неё он может только вместе с решением, которое заметят.
+    // An unknown critical field makes this slot unusable, without rejecting
+    // other usable slots in the container. Preserve it as `Unknown`.
+    // Use `CRIT_TAG_MAX` rather than the next unassigned tag so registry growth
+    // does not silently turn the test into a known-field length check.
     const UNKNOWN_CRITICAL: u16 = oc_format::tlv::CRIT_TAG_MAX;
 
     let mut slot = TlvWriter::new();
@@ -926,22 +858,10 @@ fn an_optional_unknown_tag_inside_suite_and_authority_is_skipped() {
     }
 }
 
-/// SERVER ADDRESSES ARE PRINTABLE ASCII, CHECKED BY BOTH SIDES.
+/// Reject non-ASCII and control characters in server addresses on both paths.
 ///
-/// # Why content is checked, not merely length
-///
-/// The product only prints `authority.urls` for the user
-/// to compare the author's addresses with their intended destination. The person's
-/// consent is the protection mechanism, but the displayed string is chosen by
-/// the file's author, generally an adversary.
-///
-/// The three samples below break precisely that comparison. All are valid UTF-8
-/// and passed the entire previous check:
-///
-/// * `ESC` starts a control sequence: an address printed below
-///   can erase the line printed above;
-/// * U+202E reverses order, displaying `moc.dab` as `bad.com`;
-/// * Cyrillic `а` is indistinguishable from Latin `a` in any font.
+/// The samples cover terminal escape sequences, bidi reordering and a Cyrillic
+/// homoglyph. These can interfere with the user's comparison of displayed addresses.
 #[test]
 fn a_server_address_outside_printable_ascii_is_refused_on_both_sides() {
     let hostile = [

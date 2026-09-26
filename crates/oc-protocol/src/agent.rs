@@ -1,39 +1,14 @@
-//! AGENT PROTOCOL documents: agent grant and delegation to a descendant.
+// SPDX-License-Identifier: MPL-2.0
+//! Agent grants and delegation chains.
 //!
-//! # What this conversation is and how it differs from approval
+//! A grant binds a door, subtree, expiry, and delegation depth. The door uses an
+//! agreement key for sealed shares and a separate Ed25519 key for delegations;
+//! the author's grant authenticates the latter as `door_verify`.
 //!
-//! Approval ([`crate::access::Decision`]) asks "is this person among
-//! the intended recipients of THIS file?": one `file_id`, one signature, no
-//! mention of expiration. An agent grant asks instead "this door, this SUBTREE,
-//! until this time". It cannot be reduced to a batch of approvals: that would be N
-//! human decisions, N signatures and nowhere for the door signing key,
-//! expiration or delegation depth.
-//!
-//! # Why the door has TWO key pairs
-//!
-//! A device in the protocol is a key-agreement public key (`activation.rs`), which
-//! cannot sign. A door must sign delegations to descendants,
-//! otherwise there is nothing to authenticate them with. Thus it has a second pair, Ed25519;
-//! the author names its public half in the grant as `door_verify`. This key is covered
-//! by the author's signature, so an intermediary cannot replace it without breaking
-//! the signature.
-//!
-//! # What is signed
-//!
-//! **Raw body bytes, not a reconstructed structure**; the signature PRECEDES
-//! the body, matching the layout of leases, revocations and orders
-//! (`signature(64) ‖ body`). It is checked BEFORE TLV parsing (I-5, I-6): parsing
-//! unauthenticated bytes is itself an oracle, yielding distinguishable error codes about
-//! material nobody signed.
-//!
-//! # Whose key verifies the grant
-//!
-//! The CALLER obtains `author_key` from the container header or the server's file
-//! record, not the submitted document. The embedded key
-//! is compared with the supplied key in constant time and serves just one purpose:
-//! making "to whom this grant is addressed" part of the signed body. The same technique
-//! pins the lease-signing key: authority to decide
-//! comes from the signed header, not the peer's claims.
+//! Signatures cover `signature(64) ‖ body` layouts and verify raw body bytes before
+//! TLV parsing. The caller supplies the trusted author key from the container or
+//! registered file record; a key embedded in the submitted grant cannot establish
+//! its own authority.
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
@@ -274,26 +249,14 @@ pub fn decode_grant(bytes: &[u8], author_key: &[u8; 32]) -> Result<AgentGrant, F
     Ok(grant)
 }
 
-/// Grant body from signed bytes, WITHOUT signature verification.
+/// Parse a grant body without verifying its signature.
 ///
-/// # Who needs this, and why it is not a vulnerability
-///
-/// The server, for exactly the same reason as [`crate::order::peek`]: it looks up the verification key
-/// FROM DOCUMENT CONTENTS, using the file list whose records contain the
-/// author key. No lookup is possible without reading the list. The chicken-and-egg
-/// problem is resolved as with orders: parsing here serves to
-/// FIND the key; only [`decode_grant`] establishes trust.
-///
-/// Everything returned here is suitable only for key lookup. Nothing may be executed
-/// based on this value: the signature is unverified, and whoever sent the document
-/// chose every field.
-///
-/// Shape is nevertheless fully checked (`check_grant_shape`): I-9 forbids
-/// releasing unchecked bytes from the crate; an "almost parsed"
-/// grant does not escape.
+/// The shape is checked, but every returned field is untrusted. Use the result
+/// only to look up the verification key; call [`decode_grant`] before making
+/// access decisions.
 ///
 /// # Errors
-/// [`FormatError`] if bytes are shorter than the signature or the body cannot be parsed.
+/// [`FormatError`] for a short signature prefix or a malformed body.
 pub fn peek_grant(bytes: &[u8]) -> Result<AgentGrant, FormatError> {
     let (signature, body) = split_signature(bytes)?;
     let mut grant = decode_grant_body(body)?;
@@ -686,16 +649,10 @@ fn check_delegation_shape(link: &Delegation) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Chain verification result: what the LAST link may access, and until when.
+/// Verified access facts for the final link.
 ///
-/// # Why ALL restrictions are returned instead of compared with each other
-///
-/// Because no ordering relation exists on policies, and inventing one for
-/// one check is inappropriate. Rather than proving "the link did not weaken its parent", the chain returns
-/// the entire list, and the evaluator intersects it all: `oc_policy::intersect`
-/// is monotonic only toward restriction, so an additional link can
-/// TIGHTEN but cannot loosen permissions, whatever it contains. A check
-/// that does not exist cannot be bypassed.
+/// The caller must intersect all returned policies using `oc_policy::intersect`;
+/// an extra restriction must never loosen an ancestor's permissions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainFacts {
     pub grant_id: [u8; 16],
@@ -810,27 +767,15 @@ pub fn verify_grant_chain(
     verify_grant_chain_with_actions(author_key, grant, links, None, now)
 }
 
-/// The same, plus an ACTION GRANT (Agent Protocol, stage 2).
+/// Verify a grant chain with an optional action grant.
 ///
-/// # Why a separate function rather than a fifth argument to the old one
-///
-/// Because the old call must work UNCHANGED: it has callers
-/// in the server, door and stage 1 tests. Updating all of them
-/// just to pass `None` would add noise obscuring the one place
-/// where behavior changed. The old function remains exactly what it was
-/// and delegates here: two routes to one check, not two checks.
-///
-/// `actions` contains RAW [`crate::action::ActionGrant`] bytes signed with THE SAME
-/// author key: actions have no container header, so the anchor is
-/// the file grant, with its key likewise supplied externally.
-///
-/// `None` means "nothing known about actions", and the facts then carry an empty
-/// list, even when chain links DO carry action tags. There is nothing
-/// to verify them against; unverified rules have no effect (I-10). This also
-/// fulfills the promise that a stage 1 reader sees the old chain.
+/// `actions` contains raw [`crate::action::ActionGrant`] bytes signed by the
+/// same externally supplied author key as the file grant.
+/// With `None`, the result has no action rules, even if links contain action
+/// tags: those restrictions cannot be verified without the root action grant.
 ///
 /// # Errors
-/// [`ChainRefusal`] with the link number where the chain broke.
+/// [`ChainRefusal`] identifies the link where verification failed.
 pub fn verify_grant_chain_with_actions(
     author_key: &[u8; 32],
     grant: &[u8],
@@ -949,20 +894,12 @@ pub fn verify_grant_chain_with_actions(
     Ok(facts)
 }
 
-/// Child rules against parent rules: each must be no broader.
+/// Check that each child rule narrows at least one parent rule of the same kind.
 ///
-/// # Why "any parent rule of the same kind", not "the first"
-///
-/// A parent may have multiple rules of one kind: two `tree.remove`
-/// rules for two subtrees are ordinary. Requiring
-/// matching ORDER would make verification depend on how the author
-/// listed rules, rejecting legitimate narrowing for an arbitrary
-/// reason.
-///
-/// Rejection reason comes from the FIRST parent rule of the same kind: a rejection
-/// without explanation passes any "rejected" test, but the user needs the
-/// limiting constraint's name. If the parent has no such kind, the reason is
-/// different and more precise: [`ChainRefusal::ActionNotGranted`].
+/// Multiple parent rules may cover different subtrees; their order does not
+/// determine authorization. If none permits the child, report the first
+/// matching rule's constraint, or [`ChainRefusal::ActionNotGranted`] when
+/// no parent rule has that kind.
 fn narrow_actions(
     parents: &[crate::action::ActionRule],
     children: &[crate::action::ActionRule],
@@ -1870,16 +1807,8 @@ mod tests {
         assert_eq!(facts.actions, rules);
     }
 
-    /// "ACTIONS ONLY" DOOR: A FILE GRANT WITH AN EMPTY FILE LIST IS VALID.
-    ///
-    /// Stage 2 specification (§4.1) relies on this and requests test confirmation:
-    /// a door needing only actions needs no files, yet its anchor
-    /// is still the file grant because an action has no container header
-    /// from which to obtain the author key.
-    ///
-    /// Until now, this was verified ONLY by code inspection (`check_entries` checks
-    /// the upper limit and says nothing about a lower one). "Accepted today" and "promised
-    /// to be accepted" differ: an accidental edit can change the former.
+    /// An action-only holder can use a file grant with an empty file list.
+    /// The verified grant still supplies the author-key anchor for action rules.
     #[test]
     fn a_file_grant_with_no_files_still_anchors_its_actions() {
         let mut g = grant();

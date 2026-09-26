@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Explore access decisions using synthetic facts, without a server or device.
 
 use oc_policy::{

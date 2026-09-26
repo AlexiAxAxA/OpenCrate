@@ -1,38 +1,13 @@
-//! RSA-PSS-SHA256 signature verification: editing-device signature.
+// SPDX-License-Identifier: MPL-2.0
+//! RSA-PSS-SHA256 verification for editing-device signatures.
 //!
-//! # Why our own implementation rather than a crate
+//! The format fixes RSA-2048, exponent 65537, and a 32-byte salt; other shapes are
+//! rejected (`docs/format.md`, version 3, item 7). Only public operations run here,
+//! using `crypto-bigint`, already supplied by `p256`. The verifier also builds for
+//! WASM; signing belongs to the host's TPM adapter.
 //!
-//! Verification must live in a PURE crate: `oc-format` and `oc-protocol` verify signatures and
-//! build for `wasm32-unknown-unknown`, ruling out
-//! platform CNG. The dependency tree lacks the `rsa` crate, and taking it is undesirable:
-//! it carries RUSTSEC-2023-0071 (Marvin); although only indirectly relevant
-//! here (the attack concerns private operations, while the TPM signs), an exception
-//! would have to be granted manually.
-//!
-//! `crypto-bigint` is already in the tree via `p256`. Beyond it, all we need
-//! is modular exponentiation with a PUBLIC exponent and parsing
-//! the PSS encoding. **The operation contains no secrets**, so constant
-//! time is unnecessary; that is exactly why "our own crypto" is acceptable here,
-//! not because it is cheaper.
-//!
-//! # The danger and its consequences
-//!
-//! Historically, VERIFIERS were what broke: Bleichenbacher's `e = 3` attack targeted
-//! careless padding parsing, not RSA strength. Therefore:
-//!
-//! * **the exponent is not a parameter.** Fixed internally at 65537, with no way to pass `e = 3`.
-//!   A verifier need not support anything our signer does not produce;
-//! * **salt length is required, not recovered.** The format fixes it at 32 bytes
-//!   (`docs/format.md`, "VERSION 3 OPENED", item 7), so another salt length means
-//!   rejection, not "accept if it verifies". Recovering length from a delimiter
-//!   accepts more than the format allows;
-//! * **modulus length is specified by type.** RSA-2048 only.
-//!
-//! # What has been verified by execution
-//!
-//! The vector in `tests/kat/rsa_pss.kat` came from this machine's LIVE TPM
-//! (`spikes/rsa-pss-tpm/`), not invention or documentation. It cannot be rederived
-//! from the specification.
+//! `tests/kat/rsa_pss.kat` contains a frozen signature obtained from a TPM.
+//! The custom padding parser remains a security-review surface.
 
 use crate::CryptoError;
 use crypto_bigint::modular::{BoxedMontyForm, BoxedMontyParams};
@@ -173,22 +148,10 @@ pub fn verify_pss_sha256(
     }
 }
 
-// ---------------------------------------------------------------------------
-// ОТКРЫТЫЕ ОПЕРАЦИИ ДЛЯ ПРОВЕРКИ АТТЕСТАЦИИ (B6a, `docs/protocol.md` §9.11).
-//
-// Подпись редактировавшего устройства выше прибита к RSA-2048 и PSS с солью 32:
-// её производит наш подписывающий, и больше проверяющему уметь незачем. У
-// аттестации подписывающие чужие — вендоры TPM и сам TPM, — и им нужно
-// другое: PKCS#1 v1.5 (`sha256WithRSAEncryption` в сертификатах, RSASSA у
-// ключа удостоверителя) и модули 3072 и 4096 бит у корней вендоров. Плюс одна
-// операция в обратную сторону — OAEP-шифрование семени учётных данных на ключ
-// подтверждения (TPM2_MakeCredential).
-//
-// Секрета у проверяющего здесь по-прежнему нет, кроме семени OAEP, а оно —
-// ОСНОВАНИЕ, возводимое в открытую степень: время операции зависит от модуля и
-// показателя, не от него. Засев OAEP приходит параметром, как всякая
-// случайность в этом крейте.
-// ---------------------------------------------------------------------------
+// Attestation RSA operations (protocol §9.11): PKCS#1 v1.5 verification and
+// OAEP encryption for TPM2_MakeCredential, with 2048/3072/4096-bit public keys.
+// OAEP input is secret even though the exponent is public. Randomness arrives
+// as a parameter; heap cleanup and compiler-copy limits are documented below.
 
 /// Modulus lengths accepted by attestation verification: 2048, 3072, and 4096 bits.
 ///
@@ -231,6 +194,30 @@ fn public_op(modulus: &[u8], input: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>
         return Err(CryptoError::BadLength);
     }
     Ok(zeroize::Zeroizing::new(out.to_vec()))
+}
+
+fn oaep_public_op<const LIMBS: usize>(modulus: &[u8], input: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    use crypto_bigint::{Uint, modular::{FixedMontyForm, FixedMontyParams}};
+    use zeroize::Zeroizing;
+
+    if modulus.len() != Uint::<LIMBS>::BYTES || input.len() != Uint::<LIMBS>::BYTES {
+        return Err(CryptoError::BadLength);
+    }
+    if modulus.first().is_none_or(|byte| byte & 0x80 == 0) {
+        return Err(CryptoError::BadLength);
+    }
+    let n = Uint::<LIMBS>::from_be_slice(modulus);
+    let x = Zeroizing::new(Uint::<LIMBS>::from_be_slice(input));
+    if *x >= n {
+        return Err(CryptoError::BadSignature);
+    }
+    let odd = Odd::new(n).into_option().ok_or(CryptoError::BadLength)?;
+    let params = FixedMontyParams::new(odd);
+    // Fixed-width arithmetic keeps OAEP intermediates out of freed heap blocks.
+    // Wipe the named secret values; compiler-created stack copies are not covered.
+    let base = Zeroizing::new(FixedMontyForm::new(&x, &params));
+    let encrypted = base.pow(&Uint::<1>::from_u32(65537));
+    Ok(encrypted.retrieve().to_be_bytes().as_ref().to_vec())
 }
 
 /// Verify RSASSA-PKCS1-v1_5 with SHA-256 and exponent 65537.
@@ -341,12 +328,34 @@ pub fn encrypt_oaep_sha256(
     seed_slot.copy_from_slice(masked_seed.as_slice());
     masked_db.copy_from_slice(&db);
 
-    Ok(public_op(modulus, &em)?.to_vec())
+    match k {
+        256 => oaep_public_op::<{ crypto_bigint::U2048::LIMBS }>(modulus, &em),
+        384 => oaep_public_op::<{ crypto_bigint::U3072::LIMBS }>(modulus, &em),
+        512 => oaep_public_op::<{ crypto_bigint::U4096::LIMBS }>(modulus, &em),
+        _ => Err(CryptoError::BadLength),
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
+    #[test]
+    fn oaep_fixed_arithmetic_matches_public_operation_for_supported_widths() {
+        for size in [256, 384, 512] {
+            let modulus = vec![0xff; size];
+            let mut encoded = zeroize::Zeroizing::new(vec![0x51; size]);
+            *encoded.first_mut().unwrap() = 0;
+            let expected = super::public_op(&modulus, &encoded).unwrap();
+            let actual = match size {
+                256 => super::oaep_public_op::<{ crypto_bigint::U2048::LIMBS }>(&modulus, &encoded),
+                384 => super::oaep_public_op::<{ crypto_bigint::U3072::LIMBS }>(&modulus, &encoded),
+                512 => super::oaep_public_op::<{ crypto_bigint::U4096::LIMBS }>(&modulus, &encoded),
+                _ => unreachable!(),
+            }.unwrap();
+            assert_eq!(actual, *expected);
+        }
+    }
+
     use super::*;
 
     /// Derived lengths must match the PSS layout rather than being

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // Индексирование, срезы и чтение файла разрешены ЗДЕСЬ и только здесь, тем же
 // порядком, что в `agent_vectors.rs`: вектор лежит вне кода намеренно, чтобы
 // вторая реализация могла свериться, не читая наш Rust. Запрет часов, файлов и
@@ -13,26 +14,10 @@
     clippy::disallowed_types
 )]
 
-//! Frozen ACTION door vectors: bodies, transcripts and signatures.
+//! Frozen action-grant and action-lease bodies, transcripts and signatures.
 //!
-//! A separate file rather than a module: these tests need real signing keys,
-//! meaning the complete `oc-crypto`, and read the vector file here too.
-//!
-//! # What is frozen, and why the SIGNATURE rather than only the body
-//!
-//! The same rationale as `agent_grant.kat`: the body means nothing by itself.
-//! An action grant is an AUTHOR assertion, a lease a SERVER assertion; without
-//! signatures both are mere sheets of paper. Freezing only bytes would leave the
-//! transcript, WHAT is signed, unfrozen. Divergence there is silent: the signature
-//! simply fails to verify, making it look as though "the server broke".
-//!
-//! # Why a separate LEASE vector in addition to the grant
-//!
-//! The server uses the same signing key for file leases and action
-//! leases; ONLY the label separates the domains. The lease vector checks
-//! that the label is present: a signature made in the grant domain will not match the frozen one.
-//!
-//! These vectors do not affect the container version: none of their bytes reside in `.cc`.
+//! The lease vector also guards domain separation from file leases using the same
+//! server key. These protocol documents are outside the `.cc` container version.
 
 use oc_crypto::sign::{Ed25519Signer, Signer as _};
 use oc_protocol::action::{

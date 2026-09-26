@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Container header: the immutable region signed by the author.
 //!
 //! Encoding uses TLV from [`crate::tlv`]. Parsing returns both a structure and
@@ -50,19 +51,10 @@ pub mod tag {
     /// field, but **excluded** from [`super::Header::core_hash`] to avoid a
     /// circular dependency: associated data binds the wrapper to the core hash.
     pub const WRAPPED_CEK: u16 = 17;
-    /// Membership authorized to administer the file. **Since version 4.**
+    /// Coauthor membership authorized to administer the file (version 4).
     ///
-    /// The first OPTIONAL tag in the signed header, deliberately, not
-    /// accidentally. The general rule, "a field tightening a requirement must be
-    /// critical", does not apply because this field tightens
-    /// nothing for the READER: coauthor membership changes neither keys nor access
-    /// rules, only whose orders the SERVER will execute.
-    /// A client skipping the tag opens the file entirely correctly.
-    ///
-    /// A critical tag would make an old viewer refuse
-    /// a file with two administrators instead of one: rejection without
-    /// cause, precisely the cost the optional range exists
-    /// to avoid.
+    /// Optional because it changes which orders the server accepts, not reader keys
+    /// or access rules. Older readers can skip it without misinterpreting access.
     pub const COAUTHORS: u16 = 0x8001;
 }
 
@@ -118,25 +110,12 @@ pub const FIRST_CONTAINER_VERSION: u16 = 1;
 pub const CONTAINER_VERSION: u16 = 5;
 /// Maximum client version: version 3 always requires reader 3 (§2.1).
 pub const SUPPORTED_READER_VERSION: u16 = 5;
-/// Minimum readable format version: the parsing LOWER bound.
+/// Minimum readable container version.
 ///
-/// Five rather than one: decision R-1 of 2026-09-19, not incidental
-/// tightening. Reading versions 1–4 is PERMANENTLY RETIRED: no container of those versions with
-/// magic `CLOSECR1` was ever issued. The 2026-09-08 rename changed
-/// the magic and all domain labels on the day version 5 was cut
-/// (`docs/format.md`, section "RENAME 2026-09-08"). The promise "versions
-/// 1–4 are readable" applied to an EMPTY SET and was tested only by iterating
-/// version numbers in a range, never by opening a single file.
-///
-/// The underlying rule is broader (R-3): **before the first file goes outside,
-/// the reader supports only the writer's version.** Reading version
-/// 5 will be removed just as reading 1–4 is today, on the day
-/// version 6 is cut and the writer switches. The rule ends
-/// when the first external file is issued; that date must be recorded in
-/// `docs/format.md`.
-///
-/// Numbering is NOT reset: [`FIRST_CONTAINER_VERSION`] remains
-/// a historical record, numbers 1–4 are not reused, and version 5 bytes do not change.
+/// Versions 1–4 were retired by decision R-1 (2026-09-19): no `CLOSECR1` containers
+/// of those versions had been issued. Historical numbers remain reserved.
+/// Future compatibility decisions belong in `docs/format.md`; do not change this
+/// bound merely to make a fixture pass.
 pub const MIN_READABLE_CONTAINER_VERSION: u16 = 5;
 /// Maximum readable format version.
 ///
@@ -249,23 +228,11 @@ pub struct KnownSlot {
     /// a recipient key directory: without a pinned value it could
     /// substitute its own key for the recipient's and assemble both shares.
     pub key_fpr: Option<Vec<u8>>,
-    /// Claim-code commitment (K8). Only for [`SlotKind::RecipientClaim`].
+    /// Claim-code commitment K8, only for [`SlotKind::RecipientClaim`].
     ///
-    /// A separate field rather than a reused `ct`, which deserves explanation.
-    /// A claim-code slot has **nothing to seal**: the recipient's share
-    /// is derived from a code they already hold. The container instead needs
-    /// to let the recipient check that the entered code is correct before expensive
-    /// work begins. That is K8.
-    ///
-    /// Putting it in `ct` would be tempting and wrong: throughout the format, `ct`
-    /// means "sealed secret with tag". A field meaning one thing in one slot
-    /// kind and another in a different kind is precisely the overloading
-    /// that is later misread.
-    ///
-    /// Field composition depends on slot kind, checked in both directions
-    /// (`encode`/`decode`): for sealing kinds the claim-code commitment
-    /// is **forbidden**, while `enc`, `nonce`, and `ct` are required; for claim-code slots,
-    /// the reverse applies.
+    /// A claim slot derives its share from the code, so it has no sealed ciphertext.
+    /// [`encode`](Header::encode) and [`decode`](Header::decode) enforce the slot-kind
+    /// field layout: claim slots carry this commitment; sealing slots carry ciphertext.
     pub claim_commit: Option<[u8; 32]>,
 }
 
@@ -289,27 +256,11 @@ pub struct Authority {
     /// Address list: rotation and self-hosted deployments are inevitable; a single
     /// hardcoded URL would eventually cause rejection.
     pub urls: Vec<String>,
-    /// Server sealing key identifier.
+    /// Identifier of the server key used when packing.
     ///
-    /// A RECORD, NOT A CHECK: easy to confuse. The value is the key to
-    /// which the writer sealed the `Server` slot (`oc_engine`: `sealing_kid` and
-    /// the slot recipient are the same value), but NOBODY compares it
-    /// with anything: neither `cc-cli` nor `cc-viewer` contains a comparison. Binding
-    /// to the server key comes from the fact that another key simply cannot
-    /// open the slot.
-    ///
-    /// Why no comparison exists or should be added: both copies, this field and the
-    /// `Server` slot's `key_fpr`, are under the author signature covering the whole header
-    /// (I-6), so only our own writer can desynchronize them;
-    /// a check would catch our bug, not an attacker. Worse, "`sealing_kid`
-    /// verified" would read as "we confirmed we are talking to
-    /// the right server", although the field never leaves the author's machine and is never
-    /// shown to the server: `ActivateReq` does not contain it.
-    ///
-    /// Enforcing equality during parsing would cost even more: it would bake "the server
-    /// slot is always 32-byte X25519" into `[u8; 32]`, while `key_fpr`
-    /// depends on `kem_id` and occupies 1249 bytes for mechanism five. Removing
-    /// that constraint later would require a format version.
+    /// This is a signed record, not proof of the identity of a contacted server.
+    /// Opening the server slot requires the corresponding private key; transport
+    /// identity and the lease-signing key are separate concerns.
     pub sealing_kid: [u8; 32],
     /// **Pinned** lease verification key.
     ///
@@ -409,22 +360,11 @@ pub struct HeaderSpans {
     pub wrapped_cek_record: Range<usize>,
 }
 
-/// File protection strength, determined by the AUTHOR slot.
+/// File protection strength, determined by the author slot.
 ///
-/// Container strength equals that of the weakest sufficient route to the CEK, and
-/// the author route is always sufficient. The specification therefore requires the author
-/// slot to be at least as strong as every recipient slot (`docs/format.md`, "AUTHOR
-/// SLOT MUST BE AT LEAST AS STRONG AS RECIPIENT SLOT"). Thus file strength is the
-/// author slot's strength and needs no other recipient slot: a recipient absent
-/// from the header and an heir learn it from the same source.
-///
-/// Variant order is the specification's requirement table: "five requires
-/// five, four requires four or five, classical requires nothing".
-/// This is NOT a scale of mechanism numbers: P-256 (`kem_id = 2`) is classical despite
-/// having a number greater than one, while `RsaOaep` (3) is not implemented at all.
-///
-/// Lives in the parser, not the client (E2, B8): the server applies the same rule
-/// to access requests; two copies of one rule would silently diverge.
+/// The author route is sufficient to recover CEK, so it must be at least as strong
+/// as every recipient route (`docs/format.md`, author-slot strength rule).
+/// Ordering follows that rule, not KEM numbers: P-256 remains classical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Strength {
     /// X25519, P-256, or RSA-OAEP: neither post-quantum protection nor a requirement on
@@ -779,20 +719,9 @@ fn decode_suite(bytes: &[u8]) -> Result<Suite, FormatError> {
             // шифром и решил бы, что файл повреждён.
             suite_tag::SIG => {
                 let parsed = SigAlg::from_u8(field.u8()?).map_err(|_| unsupported(field.tag))?;
-                // ЗДЕСЬ ГОДИТСЯ ТОЛЬКО Ed25519, и проверка нужна с тех пор, как
-                // `SigAlg` перестал быть одноместным.
-                //
-                // Номер 2 (RSA-PSS) сборка теперь ИСПОЛНЯЕТ — им подписывает
-                // правку редактировавшее устройство, — поэтому `from_u8` его
-                // пропускает. Но `suite.sig_alg` описывает подпись АВТОРА, и она
-                // заморожена версией 1: проверяется она `verify_strict` над
-                // Ed25519 безусловно.
-                //
-                // Без этой строки заголовок мог бы объявить RSA-PSS, а проверен
-                // был бы по Ed25519 — то есть объявление алгоритма снова стало бы
-                // украшением. Ровно тот дефект, ради которого заведён
-                // `ensure_supported`, только на уровень выше: там «умеем ли», а
-                // здесь «в этом ли месте».
+                // The author's suite signature is Ed25519. RSA-PSS support applies only to
+                // editing-device signatures; accepting it here would declare one algorithm
+                // while header verification still uses another.
                 if parsed != SigAlg::Ed25519 {
                     return Err(unsupported(field.tag));
                 }
@@ -805,27 +734,9 @@ fn decode_suite(bytes: &[u8]) -> Result<Suite, FormatError> {
                 tree_hash =
                     Some(TreeHashAlg::from_u8(field.u8()?).map_err(|_| unsupported(field.tag))?);
             }
-            // Правило диапазона действует и внутри вложенных map, а не только на
-            // верхнем уровне заголовка: иначе оно перестаёт быть свойством
-            // КОНТЕЙНЕРА и становится свойством конкретного декодера, а их в
-            // крейте несколько — `header`, `content`, `edit`, `footer`, — и все
-            // их пришлось бы помнить. Раньше здесь стоял безусловный отказ, то
-            // есть необязательного диапазона внутри `suite` не существовало
-            // вовсе.
-            //
-            // «Свойство контейнера», а не «свойство формата», и это уточнение
-            // стоило правки: разборщиков в самом крейте несколько, и правило
-            // обязано быть одним на всех.
-            //
-            // Документы протокола (`oc-protocol`) с 2026-09-21 подчиняются ТОМУ
-            // ЖЕ правилу и зовут ту же `unknown_tag_action` (`docs/protocol.md`
-            // §0.1). До того дня они отвергали любой незнакомый тег, в каком бы
-            // диапазоне тот ни стоял, и исключением был один лизинг; вопрос,
-            // оставленный решением Р-2 открытым, закрыт тем, что стороны после
-            // выпуска обновляются в разное время. Исключение теперь одно и
-            // обратное по смыслу: решение автора (`oc_protocol::access`)
-            // остаётся строгим, потому что его подпись покрывает не сырые
-            // байты, а пересобранное тело.
+            // Nested maps follow the same unknown-tag range rule as the outer container.
+            // Protocol codecs share that rule except access decisions, whose signature is
+            // reconstructed from parsed fields and therefore cannot skip unknown bytes.
             other => match unknown_tag_action(other) {
                 UnknownTag::Refuse => {
                     return Err(FormatError::UnknownCriticalField { tag: other });
@@ -847,42 +758,11 @@ fn unsupported(tag: u16) -> FormatError {
     FormatError::UnknownCriticalField { tag }
 }
 
-/// Character set permitted in a server address.
+/// Require printable ASCII without spaces: `0x21..=0x7E`.
 ///
-/// Printable US-ASCII excluding space: `0x21..=0x7E`. Deliberately narrow,
-/// for reasons unrelated to URL aesthetics.
-///
-/// # Why restrict something we do not even parse
-///
-/// Currently the product only PRINTS this field to a person
-/// (`cc activate`, `cc inspect`) to compare author-specified addresses with
-/// their intended destination. Human consent is the protection
-/// mechanism, and comparison is meaningful only while the string cannot:
-///
-/// * **move the cursor or color the screen**: `ESC` (0x1B) starts a control
-///   sequence, allowing an address printed below to erase a line
-///   printed above. "Going to this address" ceases to be true while remaining
-///   on screen;
-/// * **reverse character order**: U+202E RIGHT-TO-LEFT OVERRIDE
-///   displays `moc.dab` as `bad.com`;
-/// * **masquerade as another letter**: Cyrillic `а` (U+0430) and Latin `a`
-///   look identical in any font.
-///
-/// All three concern DISPLAY; all are blocked by one input restriction:
-/// printable ASCII contains neither control bytes nor bidirectional marks nor
-/// alternative forms of the same letter.
-///
-/// # Why this does not exclude non-Latin names
-///
-/// Because they have a wire representation: punycode (`xn--…`), required by
-/// DNS itself. The restriction matches what is sent over the network; what it excludes
-/// is precisely the U-form whose display constitutes the attack.
-///
-/// # Why check when writing too
-///
-/// For the same reason as zero keys: writing checks prevent issuance of such a container;
-/// parsing checks prevent accepting one already issued.
-/// A one-sided check would leave the other possibility open.
+/// Addresses are displayed for human comparison. This excludes terminal controls,
+/// bidirectional marks, and Unicode lookalikes; international hostnames can use
+/// punycode. Both writing and parsing enforce the same display constraint.
 fn check_address_charset(url: &str) -> Result<(), FormatError> {
     for byte in url.as_bytes() {
         if !matches!(byte, 0x21..=0x7E) {
@@ -1074,44 +954,12 @@ fn encode_known_slot(version: u16, slot: &KnownSlot) -> Result<Vec<u8>, FormatEr
     Ok(w.finish().to_vec())
 }
 
-/// A slot's field composition must match its kind.
+/// Validate the slot-kind field layout (`docs/format.md` §2.0).
 ///
-/// Necessary because otherwise fields become optional "on average": a slot
-/// sealing a secret while also carrying a claim-code commitment
-/// is meaningless yet structurally valid, and a reader
-/// encountering it would silently choose one of two interpretations.
-///
-/// **Every** distinction in the §2.0 table is checked, not merely commitment presence,
-/// along with the claim-code slot mechanism (§2 item 5).
-///
-/// A sealing slot must carry nonempty ciphertext: empty means no secret,
-/// making the slot appear usable while yielding nothing. A claim-code slot
-/// must carry empty ciphertext: nonempty `ct` there is data nobody is accountable
-/// for, because the reader never opens it (the share is derived from the
-/// code), and room for a covert channel inside an author-signed header.
-///
-/// The remaining two columns were added by item R-4, using the same argument
-/// by which the specification forbids nonempty `ct`. Only `ct` and
-/// `claim_commit` were checked, allowing a claim-code slot to carry 32 bytes of `key_fpr`
-/// and 56 arbitrary bytes in `enc` and `nonce`, pass both checks, and reside inside
-/// an author-signed header without anyone reading them. Precisely the
-/// "room for a covert channel" the table guards against: the specification required
-/// the full table to be enforced, but code enforced two thirds.
-///
-/// A claim-code slot forbids `key_fpr` because it has nothing to confirm: it
-/// seals to no key, and the code identifies its recipient. Zeroed `enc` and
-/// `nonce` are not structural placeholders but their only meaningful values;
-/// anything else would imply something the reader does not know
-/// about this slot.
-///
-/// The `key_fpr` check is deliberately **one-way**. It is forbidden in claim-code slots,
-/// but not required in sealing slots, because §2 (tag 6) calls the
-/// field optional; requiring it would reject files that can
-/// be opened. The table column means "when present, this field is the key
-/// to which the slot was sealed", not "it must be present". The first check was
-/// two-way and failed the format's own tests, where slots without `key_fpr`
-/// are valid: precisely a case where test failure indicated an incorrect change,
-/// not an obsolete test.
+/// Sealing slots require ciphertext and forbid a claim commitment. Claim slots
+/// require that commitment and forbid ciphertext, `key_fpr`, and nonzero `enc` or
+/// `nonce`: those fields have no meaning without a recipient key. `key_fpr`
+/// remains optional for sealing slots, as specified by tag 6.
 fn check_slot_shape(
     kind: SlotKind,
     kem: KemAlg,
@@ -1138,19 +986,9 @@ fn check_slot_shape(
         });
     }
     if !seals {
-        // МЕХАНИЗМ У СЛОТА КОДА-ПРЕТЕНЗИИ ПРИБИТ К ЕДИНИЦЕ, и это требование §2
-        // п.5, записанное там дословно: «объявляет `kem_id = 1` всегда».
-        //
-        // Причина в спеке названа, и она про БАЙТЫ, а не про стройность: длина
-        // нулевого `enc` берётся из механизма, и слот, объявивший P-256, несёт
-        // 65 нулей вместо 32. Оба числа проходят проверку «все нули», обе длины
-        // законны каждая для своего механизма — то есть `claim.cc` мог быть
-        // выпущен в двух разных байтовых видах, оба принимаемые. Для формата,
-        // объявленного замороженным, это и есть «байты поехали молча».
-        //
-        // Проверка стоит и на записи, и на чтении. Опытная проба показала, что
-        // до неё слот с `kem_id = 2` и 65 нулями принимали ОБЕ стороны: писатель
-        // производил то, что читатель обязан был отвергнуть.
+        // Claim slots always use kem_id = 1 (format §2, item 5).
+        // That fixes zero enc to 32 bytes and prevents two accepted encodings for the
+        // same claim slot. Enforce the rule on both writing and reading.
         if kem != KemAlg::X25519HkdfSha256 {
             return Err(FormatError::BadFieldLength { tag: slot_tag::KEM, len: kem as usize });
         }
@@ -1178,22 +1016,11 @@ fn decode_slots(version: u16, bytes: &[u8]) -> Result<Vec<KeySlot>, FormatError>
     Ok(slots)
 }
 
-/// `enc` length this format version can validate, by mechanism.
+/// Encapsulation length defined for a format-version/KEM pair.
 ///
-/// `None` means not "error" but "this version does not parse slots of this mechanism
-/// and may not inspect their field lengths".
-///
-/// Necessary because 32-byte `enc` is the **X25519** shape, not the universal slot
-/// shape: a P-256 public key takes 33 or 65 bytes, RSA-OAEP encapsulation
-/// hundreds, an ML-KEM hybrid over a thousand. While §3.3 unconditionally specified `bytes[32]`,
-/// a slot using any other mechanism was not "unknown" but **impossible**:
-/// the length check inside the field parsing loop propagated an error, rejecting
-/// the whole container even alongside our own fully openable slot.
-/// The §3.3 promise "an unknown `kem_id` slot is skipped rather than rejecting the file"
-/// could not be satisfied at all.
-///
-/// `match` without `_`: adding a mechanism to [`KemAlg`] must break compilation here,
-/// beside the length table, rather than silently accept it in another mechanism's shape.
+/// `None` means this version does not define the mechanism's shape, so its slot
+/// may be skipped rather than checked as X25519. The exhaustive match keeps new
+/// mechanisms visible when the table changes.
 fn expected_enc_len(version: u16, kem: KemAlg) -> Option<usize> {
     match (version, kem) {
         (_, KemAlg::X25519HkdfSha256) => Some(X25519_PUBLIC_LEN),
@@ -1409,20 +1236,9 @@ fn decode_coauthors(bytes: &[u8]) -> Result<Coauthors, FormatError> {
 }
 
 fn decode_slot(version: u16, bytes: &[u8]) -> Result<KeySlot, FormatError> {
-    // Разбор в ДВА прохода, и это не стиль.
-    //
-    // Первый проход только раскладывает поля по срезам и выясняет, наш ли это слот:
-    // вид, механизм, нет ли незнакомого критичного тега. Второй — уже зная, что
-    // слот наш, — применяет точные длины.
-    //
-    // Раньше проход был один, и длина `enc` проверялась в нём же, до того как
-    // становилось известно, чей это слот. Из-за этого слот на чужом механизме
-    // отвергал весь файл (см. [`expected_enc_len`]), а ветка «незнакомый механизм →
-    // пропустить слот» была недостижима: она стоит после цикла.
-    //
-    // И-8 при этом не ослаблен. Для слота, который эта версия разбирает, длина
-    // по-прежнему проверяется на точное соответствие, и несоответствие по-прежнему
-    // фатально: короткое не дополняется нулями, длинное не обрезается.
+    // First collect fields and identify the slot's kind, mechanism and critical tags.
+    // Apply exact lengths only after deciding the slot is supported. Checking them
+    // earlier would reject a file whose unfamiliar slot should simply be skipped.
     let mut reader = TlvReader::new(bytes);
     let mut kind_raw = None;
     let mut kem = None;
@@ -1451,24 +1267,9 @@ fn decode_slot(version: u16, bytes: &[u8]) -> Result<KeySlot, FormatError> {
             slot_tag::KEY_FPR => key_fpr = Some(field.value),
             slot_tag::NONCE => nonce = Some(field.value),
             slot_tag::CLAIM_COMMIT => claim_commit = Some(field.value),
-            // Неизвестный тег ВНУТРИ слота разбирается тем же правилом диапазона,
-            // что и снаружи, но последствие у критичного тега другое: непригоден
-            // СЛОТ, а не файл.
-            //
-            // Молча пропустить критичное поле нельзя. Слот — не пассивный мешок
-            // байтов: из него достаётся ключевой материал, и поле, добавленное
-            // будущей версией в критичном диапазоне, меняет то, КАК его
-            // доставать. Пропустив, клиент открыл бы слот не по тем правилам и
-            // решил бы, что всё в порядке.
-            //
-            // Но и отвергать весь файл нельзя — а раньше делалось именно это, и
-            // получалось, что точка расширения, ради которой слоты и заведены,
-            // закрыта: любой будущий вид слота с новым критичным полем делал файл
-            // нечитаемым для клиентов версии 1, даже когда у них есть собственный
-            // вполне открываемый слот. Правило чтения §3.3 звучит иначе: понять
-            // хотя бы один пригодный слот, остальные игнорировать. Незнакомый вид
-            // слота и незнакомый `kem_id` уже пропускаются именно так —
-            // незнакомое критичное поле обязано вести себя так же.
+            // An unknown critical field makes this slot unusable, not the entire file.
+            // Do not interpret a partially understood key slot; skip it and allow another
+            // supported slot to serve the recipient. Optional fields follow the shared range rule.
             other => match unknown_tag_action(other) {
                 UnknownTag::Refuse => unusable = true,
                 UnknownTag::Ignore => {}
@@ -1582,21 +1383,9 @@ mod tests {
     use super::*;
     use oc_policy::{Action, Policy};
 
-    /// LENGTH TABLES ARE SILENT PRECISELY FOR THE MECHANISM THE BUILD CANNOT EXECUTE.
-    ///
-    /// Length and executability are DIFFERENT questions and must not be conflated: length
-    /// depends on the "version × mechanism" pair (P-256 is unknown to version 1, hybrids
-    /// to versions before four), while executability belongs to the build. Therefore
-    /// the check is not table equality but one implication: a mechanism is executable if and
-    /// only if AT LEAST ONE readable version defines BOTH lengths for it.
-    ///
-    /// Without this probe agreement relied on memory: adding a mechanism to
-    /// [`oc_crypto::seal::supports_kem`] but forgetting the table here produces
-    /// a slot the build can open but the parser silently skips
-    /// as foreign. The reverse omission is worse: a shape without execution support.
-    ///
-    /// Members come from parsing, not a manually remembered list, so a new registry
-    /// number enters automatically.
+    /// Executable KEMs must have both length entries in at least one readable version.
+    /// Versions define wire shapes; the build defines support. Enumerating registry
+    /// identifiers catches a new implementation whose parser length table was omitted.
     #[test]
     fn the_length_tables_are_silent_exactly_about_the_unexecutable_mechanism() {
         let all: Vec<KemAlg> = (0u8..=255).filter_map(|v| KemAlg::from_u8(v).ok()).collect();
@@ -2036,23 +1825,12 @@ mod tests {
         );
     }
 
-    /// THE ENTIRE RECORD IS EXCLUDED: TAG, LENGTH, AND VALUE, NOT JUST THE VALUE.
+    /// Core hashing excludes each complete key-material record: tag, length and value.
     ///
-    /// The neighboring test above (`..._ignores_the_key_material_but_notices_everything_else`)
-    /// does NOT guard this, for a reason worth stating: it substitutes slot contents
-    /// and wrapped key WITHOUT CHANGING THEIR LENGTHS: `ct` stays 48 bytes,
-    /// while I-2 fixes `wrapped_cek` at 72 bytes. If code excluded
-    /// only the value and left tag and length, those remaining bytes would match
-    /// exactly in both headers, their hashes would agree, and the probe would remain silent.
-    /// Previously ONLY frozen vectors caught this, reporting "bytes differ at position
-    /// N", which does not identify the culprit.
-    ///
-    /// Here the expected value is recomputed INDEPENDENTLY: header bytes
-    /// are concatenated around both record ranges. This is a second expression of rule
-    /// I-3, "`SHA-256("CC/v1/core-hash" ‖ 0x00 ‖ Header without these records)`",
-    /// and disagreement with the first means the exclusion shifted. Record 17 is covered
-    /// only this way: its length is constant, so no behavioral counterpart
-    /// like the probe below can exist for it.
+    /// Changing only same-length values cannot detect accidental retention of tag/length.
+    /// This independent construction concatenates header bytes around the full record
+    /// ranges and compares `SHA-256("CC/v1/core-hash" ‖ 0x00 ‖ Header without these records)`.
+    /// Record 17 has fixed length, so it especially needs this exclusion check.
     #[test]
     fn the_core_hash_cuts_whole_records_tag_and_length_included() {
         let bytes = sample().encode().unwrap();

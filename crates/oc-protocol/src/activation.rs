@@ -1,48 +1,13 @@
-//! Activation documents: device request, server grant, refusal.
+// SPDX-License-Identifier: MPL-2.0
+//! Activation documents and the shared request/response envelope.
 //!
-//! # Why separate the document from its delivery mechanism
+//! Device keys perform agreement, not signing. Authentication and proof of
+//! possession belong to the handshake (`docs/protocol.md` §9.4), not to a device
+//! signature in these documents. A claimed fingerprint alone proves no identity.
 //!
-//! Because these are different things, and confusing them is costly. A document is a commitment;
-//! a socket carries bytes. The lease already works this way (`signature ‖ body`), so it
-//! survives any transport change: it does not know whether it arrived by network, file,
-//! or USB drive.
-//!
-//! Had we done the reverse — wire first, document second — the request's shape would
-//! have been dictated by convenient transmission, and would have to change with
-//! the transport. The decision is recorded in `docs/protocol.md` §9.
-//!
-//! # What these documents do NOT carry
-//!
-//! **A device signature.** There is none to obtain: the device key is for agreement,
-//! cannot sign, and `cc-keystore` has no signing function.
-//! Proof of possession uses sealing: the server sends a challenge,
-//! the device returns an echo (`docs/protocol.md` §9.4) — a SEPARATE step,
-//! not yet present here.
-//!
-//! The direct consequence must be stated explicitly: **the activation
-//! request is currently authenticated by nobody.** While a human brings it,
-//! that does not matter. Once it arrives from a socket, lack of proof of
-//! possession lets someone consume another's limits merely by presenting their
-//! fingerprint — so network activation is exposed ONLY together with §9.4.
-//!
-//! # The same parsing rules as the rest of the format
-//!
-//! Tags strictly increase (I-7), lengths must exactly match their types
-//! (I-8), and trailing bytes after the parsed document are rejected. This parses hostile
-//! input: messages come from another party, and leniency
-//! would mean the parties interpret the layout differently.
-//!
-//! # The envelope also carries ACCESS REQUEST documents
-//!
-//! ALL message kinds live here — both activation and access requests
-//! (`crate::access`). One socket must have one kind registry: if we introduced
-//! another envelope, the same first byte would mean different things depending
-//! on whose parser read it — yet this very byte chooses the parser, meaning
-//! the decision precedes knowing whose document
-//! has arrived.
-//!
-//! Access-request documents themselves remain in `crate::access`: the envelope knows
-//! their names, not their layouts.
+//! The envelope's kind registry also covers access requests; their layouts live
+//! in [`crate::access`]. Codecs enforce field order, exact lengths, and complete
+//! consumption of the input independently of transport.
 
 use oc_format::tlv::{TlvReader, TlvWriter};
 use oc_format::{FormatError, MAX_HEADER_LEN};
@@ -80,22 +45,11 @@ pub mod req_tag {
     /// Hardware clock reading: `u32le` reset_count ‖ `u64le` clock_ms ‖
     /// `i64le` sampling time. Optional — absent on a machine without a TPM.
     pub const DEVICE_CLOCK: u16 = 8;
-    /// Operation identity (K28, `docs/protocol.md` §9.10). 32 bytes.
-    /// Optional — requests without it execute as before.
+    /// Operation identity (K28, protocol §9.10), 32 bytes; optional.
     ///
-    /// # Why critical (≤ `0x7FFF`)
-    ///
-    /// Because the field changes the MEANING of retry: the server must return
-    /// the stored outcome rather than execute again. An unaware server that
-    /// silently skipped the field would retry by issuing a second grant — exactly
-    /// what the client sent the field to prevent. An unknown critical field fails parsing,
-    /// so an older server does NOT execute the request at all; the client learns
-    /// this through refusal without echo ([`super::grant_tag::OPERATION_ID`]).
-    ///
-    /// Activation-document parsing does not recognize the optional range anyway
-    /// (any unknown tag is rejected); this choice records not this build's parser
-    /// behavior but the number's meaning in the registry: a field without whose
-    /// meaning a request must not execute.
+    /// This is a critical tag because it changes retry semantics: the server
+    /// returns the stored outcome instead of executing again. A server that does
+    /// not understand it must reject the request rather than issue another grant.
     pub const OPERATION_ID: u16 = 9;
 }
 
@@ -233,20 +187,14 @@ pub enum Request {
     Requests { file_id: [u8; 16] },
     /// Collect the author's decision, if already made.
     Collect(CollectReq),
-    /// File-event subscription: server keeps the connection and announces events itself.
+    /// Subscribe to file events on this connection.
     ///
-    /// A subscription TAILS THE JOURNAL: `since` is the first record number
-    /// the subscriber has not seen (zero means from the beginning); the server first
-    /// sends everything from it, then live events. Disconnection thus loses nothing:
-    /// resubscribe with the last number and receive what was missed. Up to
-    /// [`MAX_WATCH_FILES`] files per subscription: one connection per client,
-    /// not per file.
-    ///
-    /// Requires no proof of possession, like `Requests`: notifications reveal
-    /// nothing absent from the public queue and journal; decisions
-    /// are still retrieved through `Collect` with proof. This request does NOT end
-    /// the conversation: notifications continue while the pipe lives or until the server
-    /// closes the subscription on expiry.
+    /// `since` is the first unseen journal record; zero starts at the beginning.
+    /// The server sends the backlog, then live events for up to [`MAX_WATCH_FILES`]
+    /// files. Reconnect with the next unseen record number to resume.
+    /// Notifications expose public queue/journal data and need no possession proof;
+    /// decisions still require `Collect`. The conversation lasts until disconnect
+    /// or subscription expiry.
     Watch { files: Vec<[u8; 16]>, since: u64 },
     /// Subscription to “all the author's files” (`docs/protocol.md` §9.9, B5).
     ///
@@ -505,29 +453,15 @@ pub enum Response {
     ReplicaAck(Vec<u8>),
     /// Grant or link accepted and recorded. No content — the fact matters.
     ChainStored,
-    /// Holder's chain and, optionally, this server's lease-signing key.
+    /// Holder chain with optional lease-signing key and action grant.
     ///
-    /// `documents`: grant and links in order, each preceded by a `u32 le` length
-    /// ([`join_chain`], [`split_chain`]). Opaque body rather than
-    /// parsed documents, for the same reason as the request queue:
-    /// their consumer parses them; a second parser in the envelope
-    /// would diverge. Link signatures cover bytes — they must not be rebuilt
-    /// in transit.
-    ///
-    /// `lease_verify_key` is `authority.lease_verify_key`, used by the door to
-    /// verify an ACTION lease (`crate::action::ActionLease`, stage 2, §4.3).
-    /// Usually the door obtains it from any grant file's header, where the author's
-    /// signature pins it; a door granted ONLY ACTIONS has no files,
-    /// so nowhere to obtain it. Optional because the stage-one server
-    /// did not send it, and a stage-two reader must read older
-    /// responses too; it adds no trust — the server names its own
-    /// public key, and a door with at least one grant file must
-    /// compare that value with the header.
-    ///
-    /// `action_grant`: this chain's `crate::action::ActionGrant` bytes, if
-    /// present. Signed with the author key and independently verified by the door;
-    /// without it, the door does not know its rules and cannot deny BEFORE networking
-    /// (see [`chain_tag::ACTION_GRANT`]).
+    /// `documents` is an ordered grant/link stream with `u32le` lengths
+    /// ([`join_chain`], [`split_chain`]). Preserve the signed document bytes.
+    /// `lease_verify_key` supports action-only holders without a file header.
+    /// It is the server's claim, not a trust anchor; compare it with a signed
+    /// header when one is available.
+    /// `action_grant`, when present, requires separate author-key verification
+    /// before the door uses its rules for local checks.
     Chain {
         documents: Vec<u8>,
         lease_verify_key: Option<[u8; 32]>,
@@ -651,19 +585,9 @@ const KIND_ASKED: u8 = 11;
 const KIND_DECIDED: u8 = 12;
 const KIND_WAITING: u8 = 13;
 const KIND_ACCEPTED: u8 = 14;
-/// The author queries their file's queue.
+/// Author query for a file's request queue.
 ///
-/// # Why in the COMMON registry, not the caller's
-///
-/// The first author-side revision defined this kind LOCALLY in `cc-cli`, because
-/// the common envelope was unavailable. It built without warnings;
-/// both sides passed their own tests — yet in a live run the server
-/// answered “unknown critical field 15.”
-///
-/// One socket must have ONE kind registry: the first byte chooses parsing
-/// before the document's owner is known. Caught by an end-to-end run, not a unit
-/// test — each side verified itself while diverging from the
-/// other.
+/// The message kind belongs to the shared registry used by both endpoints.
 const KIND_REQUESTS: u8 = 15;
 /// Its response: queue as consecutive `u32le length ‖ document`.
 const KIND_QUEUE: u8 = 16;
@@ -788,22 +712,12 @@ pub mod chain_tag {
     /// the stage-one server did not send it; readers must accept responses
     /// without it (I-7).
     pub const LEASE_VERIFY_KEY: u16 = 0x8001;
-    /// This chain's complete author-signed ACTION grant.
-    /// OPTIONAL (tag > `0x7FFF`): the chain may have no action grant
-    /// at all; stage-one readers must accept responses without it (I-7).
+    /// Complete author-signed action grant for this chain.
     ///
-    /// # Why the door needs it
-    ///
-    /// Otherwise the door does not know its permissions; “you were not granted this”
-    /// would come only from the server, AFTER the conversation.
-    /// The stage 2 specification (§5, step 2) requires the reverse: validate arguments
-    /// locally and return refusal with words BEFORE networking. Holder rules reside
-    /// in the signed action grant and optional link tag
-    /// (`agent::link_tag::ACTIONS`); the door receives links in the document stream,
-    /// and the root action grant here.
-    ///
-    /// This adds no trust: bytes arrive signed by the author key, and the
-    /// door verifies them itself (`agent::verify_grant_chain_with_actions`).
+    /// Optional tag (`> 0x7FFF`); chains without action grants remain valid.
+    /// The door verifies these bytes using the author key, then combines the root
+    /// rules with link restrictions for local checks before networking
+    /// ([`crate::agent::verify_grant_chain_with_actions`]).
     pub const ACTION_GRANT: u16 = 0x8002;
 }
 
@@ -886,9 +800,8 @@ fn decode_view_request(body: &[u8]) -> Result<(u64, u64), FormatError> {
 }
 
 const NOTICE_HEARTBEAT: u8 = 0;
-/// Kinds 1–3 of the first revision (“request,” “decision,” “revocation”) were discarded
-/// with it on 2026-09-02: notifications became journal records, making separate
-/// wire kinds unnecessary — `event` distinguishes them.
+/// Journal-event notification kind. Values 1–3 are retired; `event` identifies
+/// the journal record type.
 const NOTICE_EVENT: u8 = 4;
 /// Event body: number (8) ‖ kind (1) ‖ file (16) ‖ has-fingerprint (1) ‖
 /// fingerprint (32, zeros if absent). Fixed layout, exact length.

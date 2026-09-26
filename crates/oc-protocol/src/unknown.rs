@@ -1,44 +1,19 @@
-//! The crate's shared rule for unknown tags (I-7, decision of 2026-09-21).
+// SPDX-License-Identifier: MPL-2.0
+//! Shared unknown-tag handling for protocol codecs (I-7).
 //!
-//! Tag decisions are made by `oc_format::tlv::unknown_tag_action`, the same
-//! function the container uses. There is deliberately no second implementation here: two places
-//! computing the critical-range boundary would silently diverge, and do so
-//! in exactly the direction of "skipped what should have been rejected".
-//!
-//! # Why a helper rather than a line in every parser
-//!
-//! The crate has fourteen document parsers; three `match` lines repeated verbatim
-//! fourteen times are a known repository problem: one path
-//! gets fixed while its neighbor is forgotten. Here there is nothing to forget: one rule in
-//! one place.
-//!
-//! # Why the second helper REMEMBERS skipped entries
-//!
-//! Some documents check themselves: the parsed structure
-//! is re-encoded and must reproduce the ORIGINAL bytes (`control::Binding`,
-//! `ControlRequest`, `Receipt`, `Transfer`, `directory::Record`). This check
-//! is deliberate: it establishes canonicality. A body our encoder does not
-//! reproduce lacks a unique representation, yet its exact bytes determine
-//! the signature, countersignature and directory journal leaf.
-//!
-//! A skipped optional tag breaks this comparison: re-encoding loses it.
-//! Thus the comparison uses the body WITHOUT skipped entries rather than the entire body:
-//! canonicality of KNOWN fields remains guarded, while unknown optional fields
-//! bypass that check. Entire entries (tag, length, value) are removed using the same
-//! technique as I-3.
+//! `oc_format::tlv::unknown_tag_action` decides whether to reject or skip a field.
+//! Codecs that check canonical re-encoding must omit skipped entries from that
+//! comparison, since their encoder cannot reproduce unknown fields. Signatures
+//! still authenticate the original body, including those entries.
 
 use core::ops::Range;
 use oc_format::FormatError;
 use oc_format::tlv::{FIELD_PREFIX_LEN, Field, UnknownTag, unknown_tag_action};
 
-/// Decision for an unknown tag: reject critical, skip optional.
-///
-/// The error variant is the one the crate returned for EVERY unknown tag before
-/// the decision of 2026-09-21: behavior for the critical range is entirely unchanged,
-/// including the rejection text.
+/// Reject an unknown critical tag; skip an optional one.
 ///
 /// # Errors
-/// [`FormatError::UnknownCriticalField`]: a tag from the critical range.
+/// [`FormatError::UnknownCriticalField`] for a critical tag.
 pub(crate) fn refuse_if_critical(tag: u16) -> Result<(), FormatError> {
     match unknown_tag_action(tag) {
         UnknownTag::Refuse => Err(FormatError::UnknownCriticalField { tag }),

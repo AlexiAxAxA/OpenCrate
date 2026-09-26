@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // Индексирование, срезы и чтение файла разрешены ЗДЕСЬ и только здесь, тем же
 // порядком, что в `lease_signature.rs`: вектор лежит вне кода намеренно, чтобы
 // вторая реализация могла свериться, не читая наш Rust. Запрет часов, файлов и
@@ -13,20 +14,10 @@
     clippy::disallowed_types
 )]
 
-//! Frozen Agent Protocol vectors: bodies, transcripts and signatures.
+//! Frozen agent-grant and delegation bodies, transcripts and signatures.
 //!
-//! A separate file rather than a module: these tests need real signing keys,
-//! meaning the complete `oc-crypto`, and read the vector file here too.
-//!
-//! # What is frozen, and why the SIGNATURE rather than only the body
-//!
-//! The body means nothing by itself: a grant is an AUTHOR assertion,
-//! while delegation is a DOOR assertion. Freezing only body bytes would leave
-//! the transcript, exactly WHAT is signed, unfrozen; divergence there
-//! is silent: the signature simply fails to verify, making it look as though "the server
-//! broke". The same rationale as `lease.kat` and `control.kat`.
-//!
-//! These vectors do not affect the container version: none of their bytes reside in `.cc`.
+//! Including signatures checks transcript agreement as well as encoding.
+//! These documents are outside the `.cc` container version.
 
 use oc_crypto::sign::{Ed25519Signer, Signer as _};
 use oc_protocol::access::Blob;

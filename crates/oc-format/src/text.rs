@@ -1,34 +1,11 @@
-//! Rules for displaying text chosen by AN OUTSIDER.
+// SPDX-License-Identifier: MPL-2.0
+//! Shared checks for displaying untrusted text.
 //!
-//! # Why a separate module
-//!
-//! The same rule existed in FOUR copies in the repository: filenames
-//! (`cc-cli`, finding V-8), server denial text (`activate.rs`), the request queue
-//! (`decide.rs`), and the note (`access.rs`); a fifth function of the same kind,
-//! `printable`, had no list at all. The copies diverged just as copies always
-//! do: nobody updated any of the nine-code-point lists,
-//! and nobody updated `printable` because a nearby comment promised
-//! that its input was already constrained.
-//!
-//! The rule lives here in the pure crate for two reasons: parsing must
-//! REJECT such text, while display must REPLACE it with a dot, and both must
-//! use the same list. The responses differ; the set is shared.
-//!
-//! # What is absent and why
-//!
-//! * **Restriction to printable ASCII.** Correct for server addresses, which
-//!   have a wire representation (non-Latin names use punycode), but incorrect for
-//!   anything a person writes: a document name may legitimately be Russian,
-//!   as may a note. CATEGORIES are excluded, not alphabets.
-//! * **A ban on U+200C and U+200D** (ZWNJ and ZWJ). Invisible but orthographically
-//!   REQUIRED in Persian, Arabic, and Devanagari, they also join composite
-//!   emoji. Banning them would repeat the mistake of restricting to
-//!   ASCII, one level deeper.
-//! * **A ban on combining marks.** "Zalgo" with a hundred diacritics breaks layout,
-//!   but combining marks belong to the writing systems of half the world. A
-//!   LENGTH limit applies here, rather than a ban on the category.
-//! * **A ban on variation selectors** (U+FE00..U+FE0F): these change the appearance
-//!   of the preceding character, rather than the order or visibility of the line.
+//! Parsers reject unsafe characters; display code replaces them. Both use this
+//! set to avoid differences between validation and rendering. Controls and
+//! bidirectional formatting are excluded without restricting text to ASCII.
+//! ZWNJ, ZWJ, combining marks, and variation selectors remain valid because they
+//! are used by ordinary writing systems and emoji. Callers enforce length limits.
 
 /// Code points that reorder displayed text.
 ///

@@ -1,15 +1,9 @@
-//! Secrets from dependency crates wipe on destruction too, not just ours.
+// SPDX-License-Identifier: MPL-2.0
+//! Require dependency secret types to implement `ZeroizeOnDrop`.
 //!
-//! `seal::open` COPIES the long-term device secret into
-//! `x25519_dalek::StaticSecret` for `diffie_hellman`, and the agreement result
-//! lives in `SharedSecret`. Both are stack-resident, untouched by a wiping
-//! allocator: only the type's own `Drop` wipes them. For `x25519-dalek`, the
-//! `zeroize` feature controls this; `default-features = false` removes it with the others,
-//! which is exactly what happened (review 2026-09-06): `Drop` was empty, leaving the device
-//! secret copy unchanged in the stack frame.
-//!
-//! The check is at type level: without the feature, `StaticSecret` lacks `ZeroizeOnDrop`,
-//! and this file fails to compile. Compilation proves the feature is enabled.
+//! Agreement copies use `x25519_dalek::StaticSecret` and `SharedSecret`; their
+//! cleanup depends on the `zeroize` feature. These trait bounds fail compilation
+//! if feature selection removes that cleanup. They do not prove stack-copy erasure.
 
 fn zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
 

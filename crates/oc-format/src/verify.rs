@@ -1,37 +1,14 @@
-//! Container parsing entry point.
+// SPDX-License-Identifier: MPL-2.0
+//! Container verification entry point.
 //!
-//! The operation order is part of the security contract, not an implementation
-//! detail: structural boundaries, then signature, and only then use of
-//! fields.
+//! [`Prologue::split`] checks structure, then the header decoder obtains the author
+//! key and algorithm suite needed to verify the original header bytes. Decoding
+//! therefore precedes signature verification, unlike the idealized order in §5.1.
+//! The decoder must safely handle unauthenticated and attacker-signed input.
 //!
-//! This **does not make the input trusted**. A hostile header may be
-//! perfectly signed with an attacker's key, so the decoder must tolerate
-//! all input; trust in the signer is a separate decision made above.
-//!
-//! # Departure from specification §5.1
-//!
-//! The specification requires signature verification **before** decoding. Literally,
-//! this is impossible: both the author's public key and the algorithm suite identifier
-//! are **inside** the header; without them verification lacks its key and input. Thus
-//! the actual order is:
-//!
-//! 1. structural splitting ([`Prologue::split`]), without cryptography;
-//! 2. header decoding to obtain two values: the author key and suite;
-//! 3. signature verification over the raw header bytes;
-//! 4. everything else.
-//!
-//! The departure is safe precisely insofar as the decoder is total: it does not
-//! panic, loop forever, or allocate based on an unchecked length. This
-//! §5.2 requirement exists regardless of order: "anyone can sign a hostile
-//! header". The decoder must therefore tolerate
-//! unverified input anyway, and step 2 imposes no work it would not already
-//! have to perform after step 3.
-//!
-//! The cost is explicit: a decoding error takes precedence over a signature
-//! error. A file with an unknown critical field and a garbage signature yields
-//! [`FormatError::UnknownCriticalField`] rather than a signature failure. This reveals
-//! one bit ("the header parsed"), which the attacker can already obtain
-//! by signing their own header with their own key.
+//! After signature verification, version checks and signer trust are evaluated.
+//! A valid signature proves possession of its key, not trust in the author.
+//! Because decoding runs first, its errors take precedence over signature errors.
 
 use crate::header::{
     MAX_READABLE_CONTAINER_VERSION, MIN_READABLE_CONTAINER_VERSION, ParsedHeader,
@@ -76,19 +53,11 @@ pub enum SignerTrust {
     Conflict,
 }
 
-/// Store of pinned author keys.
+/// Pinned author-key store, returning the trust verdict for an organization.
 ///
-/// Returns the complete verdict rather than "is this key known": only the store's owner
-/// can distinguish "first seen" from "a different key is known",
-/// and this layer has no basis for deciding on its behalf.
-///
-/// `org_id` is required in the query as a consequence of the format. The author's
-/// name is deliberately absent from the header (§2, tag 5): a name claimed in
-/// the header proves no more than the header itself. The only anchor
-/// for pinning is `org_id`, the tenant field. Hence the guarantee's
-/// boundary: this catches key substitution **for a known organization**, but not
-/// an attacker claiming to be a new organization; they simply become
-/// unknown, which is the honest state.
+/// Only the store knows whether the key is new or differs from a known key.
+/// Pinning can detect substitution for a known org_id; an unknown organization
+/// remains unknown rather than gaining trust from a name in the header.
 pub trait TrustStore {
     /// What is known about the "organization, author key" pair.
     fn lookup(&self, org_id: &[u8], author_key: &[u8; 32]) -> SignerTrust;
@@ -120,44 +89,25 @@ pub struct VerifiedHeader<'a> {
     pub trust: SignerTrust,
 }
 
-/// Algorithm suite identifier included in the header signature (§5).
+/// Signature-suite identifier included in the header transcript (§5).
 ///
-/// There is no separate scalar `suite_id` field in the header: the suite is defined by three
-/// identifiers within `SUITE`. This value is therefore derived from the
-/// parsed suite, specifically from the **signature algorithm**,
-/// the sole algorithm on which the signature being verified depends. When [`SigAlg`]
-/// gains a second value, this byte prevents presenting one scheme's signature as
-/// another's if their encodings can be made to collide.
-///
-/// The AEAD and tree hash identifiers deliberately do not enter this byte: they are
-/// within the header bytes, all covered by the signature. A second encoding
-/// of the same thing is a second place that may diverge from the first,
-/// causing silent rejection of a valid file.
+/// Derived from the signature algorithm rather than a separate header field.
+/// AEAD and tree-hash identifiers are already authenticated inside the header.
 ///
 /// [`SigAlg`]: oc_crypto::SigAlg
 pub fn suite_id(suite: &Suite) -> u8 {
     suite.sig as u8
 }
 
-/// Exact byte string covered by the author's signature (§5).
+/// Author-signature transcript (§5), shared by packers and verifiers.
 ///
 /// ```text
 /// "CC/v1/header-sig" ‖ 0x00 ‖ u8(suite_id) ‖ Magic ‖ u32le(HeaderLen) ‖ Header
 /// ```
 ///
-/// [`Transcript::new`] itself inserts the zero byte after the label, so it must not
-/// be added here: a second zero would produce a string absent from
-/// the specification, making files incompatible with any other implementation.
-///
-/// The header comes last without a length prefix: its length is already bound by
-/// the preceding field. [`Transcript`] provides
-/// [`Transcript::tail_after_declared_length`] for this case: it states that the missing
-/// prefix is deliberate, not forgotten.
-///
-/// Public because the packer must sign exactly the same string.
-/// Two independent constructions, one for writing and one for reading, could diverge and yield
-/// a file our writer signs but our reader rejects, requiring byte comparison
-/// to find the cause.
+/// [`Transcript::new`] inserts the label's zero separator; do not add another.
+/// HeaderLen already binds the trailing header, so use
+/// [`Transcript::tail_after_declared_length`] without a second length prefix.
 pub fn header_signing_transcript(
     header_bytes: &[u8],
     suite: &Suite,
@@ -180,21 +130,14 @@ pub fn header_signing_transcript(
 
 /// Parse and verify the container prologue.
 ///
-/// Sequence (see module documentation for its departure from §5.1):
-/// 1. structural boundaries: magic, length limit, sufficient bytes;
-/// 2. header decoding to obtain the author key and algorithm suite;
-/// 3. Ed25519 signature verification over the domain-labeled transcript;
-/// 4. version negotiation: `min_reader_version` and the `container_version` range;
-/// 5. signer trust determination using the store.
+/// 1. Check magic, length limit and available bytes.
+/// 2. Decode the header to obtain author key and suite.
+/// 3. Verify Ed25519 over the domain-separated transcript.
+/// 4. Check min_reader_version and readable container_version range.
+/// 5. Ask the store for signer trust.
 ///
-/// Step 4 precedes **any** substantive use of fields: a file
-/// requiring a newer client must be rejected even if everything else
-/// parsed and its signature matched. The author key and suite are read earlier,
-/// at step 2, but are not "applied": they only determine what to use and
-/// what to compute the signature over.
-///
-/// Success means "the signature matches", **not** "the signer is trustworthy":
-/// trust is returned separately in [`VerifiedHeader::trust`].
+/// Version checks precede substantive field use. A valid signature does not
+/// establish signer trust; that verdict is returned in [`VerifiedHeader::trust`].
 pub fn verify_and_parse<'a>(
     buf: &'a [u8],
     trust_store: &dyn TrustStore,
@@ -233,43 +176,12 @@ pub fn verify_and_parse<'a>(
         });
     }
 
-    // Версия самого формата проверяется отдельно от `min_reader_version`, и это
-    // не дублирование.
-    //
-    // `min_reader_version` — это ЗАЯВЛЕНИЕ ПИСАТЕЛЯ о том, что клиент такой-то
-    // версии его файл поймёт. Заявление подписано, но подписал его автор, а
-    // автором может быть противник: он вправе поставить `container_version: 999`
-    // и `min_reader_version: 1`, утверждая, что файл будущего формата
-    // читается по правилам нынешнего. Поверив, клиент применил бы правила
-    // версии 1 к семантике версии 999.
-    //
-    // Поэтому неизвестная версия формата — отказ. Продукт безопасности, увидев
-    // то, чего не понимает, обязан не открывать, а не «понять большинство
-    // полей». Прямая совместимость от этого не страдает: она обеспечена
-    // диапазоном необязательных тегов (§2), который позволяет добавлять поля
-    // БЕЗ смены версии формата, а смена версии как раз и означает, что
-    // изменилось нечто, чего старый клиент понять не может.
-    // Диапазон, а не только верхняя граница.
-    //
-    // Проверка одного лишь `>` пропускала версию 0 — формата, которого никогда
-    // не существовало, — и файл читался по правилам версии 1. Версия ниже
-    // читаемой опаснее версии выше: она не вызывает подозрений («это же старый
-    // файл»), хотя означает ровно то же самое — семантику, которой у нас нет.
-    //
-    // НИЖНЯЯ ГРАНИЦА — ПЯТЁРКА, А НЕ ЕДИНИЦА (решение Р-1, 2026-09-19). Версии
-    // 1–4 сожжены для чтения: ни один контейнер этих версий с magic `CLOSECR1`
-    // наружу не выходил, потому что переименование 2026-09-08 сменило magic и
-    // метки в тот же день, когда нарезалась пятая. Обещание «1–4 читаемы»
-    // относилось к пустому множеству и проверялось ровно здесь — перебором
-    // номера, а не открытием файла. Причина и правило Р-3 («до первого файла,
-    // ушедшего наружу, читатель держит только версию писателя») записаны у
-    // `MIN_READABLE_CONTAINER_VERSION`.
+    // `min_reader_version` — утверждение автора, а не описание формата.
+    // Проверяем саму версию независимо: подписанный файл с версией 999 и
+    // `min_reader_version = 1` не становится понятным этому читателю.
+    // Диапазон исключает и будущие версии, и снятые версии 1–4 (решение Р-1).
     let container_version = parsed.header.container_version;
-    // Диапазоном, а не двумя сравнениями: пока обе границы были единицами, форма
-    // записи не имела значения, а с их расхождением стало важно, что проверка
-    // одна и обе границы в ней названы вместе. Сегодня границы снова совпали, но
-    // диапазон остаётся: он разойдётся снова в день нарезки версии 6, и форма
-    // записи, меняющаяся туда-обратно, прячет то, что менялось по существу.
+    // Обе границы нужны: версия 0 и снятые версии тоже недопустимы.
     if !(MIN_READABLE_CONTAINER_VERSION..=MAX_READABLE_CONTAINER_VERSION)
         .contains(&container_version)
     {
@@ -296,20 +208,10 @@ pub fn verify_and_parse<'a>(
     })
 }
 
-/// Parse the prologue **without** signature verification.
+/// Parse without checking the signature, for decoder fuzzing only.
 ///
-/// Exists for exactly one use: decoder fuzzing, which needs
-/// access to deep branches without dealing with signatures.
-///
-/// Gated by `cfg`, not merely an awkward name. A name and `#[doc(hidden)]` are
-/// requests to a reviewer; bypassing signature verification is too costly to rely
-/// on requests: a function available in a production build will eventually
-/// be called there, from a debugging branch, a diagnostic utility, or
-/// a "temporary look inside". Now the `cc-cli` build lacks this
-/// symbol entirely, making it impossible to call even deliberately.
-///
-/// The fuzzer enables `fuzzing` explicitly: `--cfg fuzzing` (cargo-fuzz sets
-/// it automatically).
+/// Available only with cfg(fuzzing), set by cargo-fuzz through `--cfg fuzzing`.
+/// Production callers cannot use this signature-bypassing entry point.
 #[doc(hidden)]
 #[cfg(any(test, fuzzing))]
 pub fn parse_without_verifying_signature_for_fuzzing_only(
@@ -779,23 +681,11 @@ mod tests {
         }
     }
 
-    /// The reader accepts exactly the readable range and rejects both adjacent values.
+    /// Accept the full readable range and reject its two adjacent values.
     ///
-    /// Both boundaries, not just the upper one (§2.1 item 3). A version below the readable range is
-    /// more dangerous than one above: it arouses no suspicion, "it is just an old file",
-    /// although it means the same thing: semantics we do not support.
-    ///
-    /// FOUR IN THE REJECTION LIST IS A POSITIVE CONTROL FOR DECISION R-1,
-    /// not just another round number. Zero and `MAX + 1` were rejected before the decision:
-    /// testing them would also pass with the old boundary. What distinguishes the new behavior
-    /// is precisely the lower neighbor: version 4, readable yesterday and permanently retired today.
-    /// One appears for the same reason, but is weaker: it verifies that the lower
-    /// bound moved away from [`FIRST_CONTAINER_VERSION`], retained as a historical record.
-    ///
-    /// Iterating the range, rather than only [`CONTAINER_VERSION`], maintains the second
-    /// property this stage exists for: the reader learns a version BEFORE
-    /// the writer starts producing it. Today the bounds coincide and the iteration
-    /// has one step; it becomes substantive again when the reader version is bumped.
+    /// The lower neighbor distinguishes retirement of an old format from the former
+    /// upper-bound-only rule. Historical FIRST_CONTAINER_VERSION is not the readable
+    /// lower bound; keep this test tied to the reader range as it grows.
     #[test]
     fn the_reader_accepts_all_released_versions_and_refuses_the_neighbours() {
         let signer = signer(7);

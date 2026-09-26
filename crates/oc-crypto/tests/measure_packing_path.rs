@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // Литы сняты для ЗАМЕРА. `unwrap`/`expect`/`panic` — словарь инструмента,
 // останавливающегося на первой неудаче; арифметика и индексация — счёт по
 // чанкам; часы запрещены чистым крейтам, а здесь измеряется именно время.
@@ -11,33 +12,13 @@
     clippy::disallowed_types
 )]
 
-//! MEASUREMENT: what makes up packing throughput.
+//! Measure the three packing passes: nonce hedging, AEAD and leaf hashing.
 //!
-//! # Why it exists and what it corrects
+//! Hedging includes a SHA-256 pass over plaintext; omitting it overstates the
+//! cipher's share of total time. Compare the reciprocal-rate sum
+//! `1/(1/hedge + 1/aead + 1/leaf)` with measured packing throughput.
 //!
-//! From the answer to `docs/deferred.md` §14, "is hardware AEAD worthwhile for
-//! speed?" The answer there is no; analysis is in `docs/plan.md`, item `D-aead`.
-//!
-//! Something more important emerged en route. `D-measure` labeled its figure
-//! **"complete packing (AEAD + leaf)"**, incorrectly: there are **three** passes
-//! through chunk bytes, not two. The third is nonce hedging, `HKDF-SHA256`, with plaintext
-//! **as IKM**, meaning a complete SHA-256 pass for twenty-four
-//! bytes.
-//!
-//! The omission was not cosmetic: I inferred "AEAD ≈ 542 MiB/s" by subtraction
-//! and opened §14 on that basis. Direct measurement gives 690–800, so the conclusion
-//! rested on a figure nobody had measured.
-//!
-//! # What is measured here
-//!
-//! Three passes individually, and packing as their sum:
-//! `1/(1/hedge + 1/aead + 1/leaf)`. The calculation agrees with direct `D-measure` results
-//! (417–462 versus 454 MiB/s), making the model credible.
-//!
-//! Its main finding is the **ceiling**: even an instantaneous cipher would speed up
-//! packing only two- to threefold. One pass out of three cannot give more.
-//!
-//! Run (only `--release`, or this measures missing optimizations):
+//! Run with optimizations:
 //! `cargo test -p oc-crypto --release --test measure_packing_path -- --ignored --nocapture`
 
 use std::time::{Duration, Instant};

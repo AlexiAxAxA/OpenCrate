@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Key schedule: derivations K1…K9 from `docs/format.md`, section 3.5.
 //!
 //! Each function corresponds to exactly one table row. No label is
@@ -22,20 +23,11 @@ use zeroize::{Zeroize, Zeroizing};
 /// implementation detail.
 const KEK_IKM_LEN: usize = 64;
 
-/// Expand HKDF-SHA256 into a buffer whose length is specified by its type.
+/// Expand HKDF-SHA256 into a self-wiping fixed-size array.
 ///
-/// `expand` fails in only one case: requesting more than 255×32
-/// bytes; here the array type specifies output length, at most 32 bytes,
-/// so the error branch is unreachable. K1…K8 therefore return a key rather than `Result`:
-/// threading an impossible variant through every key-schedule call would
-/// train callers to use `?` where nothing can fail.
-/// Returns a wiping wrapper rather than a bare array.
-///
-/// This function outputs key material. A bare `[u8; N]` remains on the stack until
-/// the calling function ends and can enter the pagefile with it, without an owner
-/// to wipe it on destruction. The wrapper makes wiping
-/// a property of the type: previously every caller had to remember it individually,
-/// and not all did.
+/// Current callers request at most 32 bytes, below HKDF's 255×32-byte limit,
+/// so expansion cannot fail for those sizes. The wrapper wipes the owned
+/// key material when dropped.
 fn hkdf_sha256<const N: usize>(salt: &[u8], ikm: &[u8], info: &[&[u8]]) -> Zeroizing<[u8; N]> {
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
     let mut okm = Zeroizing::new([0u8; N]);
@@ -47,39 +39,17 @@ fn hkdf_sha256<const N: usize>(salt: &[u8], ikm: &[u8], info: &[&[u8]]) -> Zeroi
     okm
 }
 
-/// A nonce not wholly dependent on RNG state (hedged nonce).
+/// Hedge a nonce against repeated RNG state (`docs/format.md` §3.1, §6.1).
 ///
-/// **Why.** A random nonce is safe only while the RNG does not
-/// repeat, and nothing guarantees that: virtual-machine snapshot rollback,
-/// disk-image cloning, and backup restoration return
-/// the RNG to a previous state. A separate random value does not
-/// help: it comes from the same RNG and repeats with it,
-/// repeating the entire keystream. For slot sealing the cost is
-/// maximal: plaintexts are shares of a 2-of-2 secret-sharing scheme, and repetition gives
-/// `ct₁ ⊕ ct₂ = pt₁ ⊕ pt₂`, hence both shares, the KEK, and the content key without a single
-/// private key.
+/// Since version 3, `HKDF-Extract(salt = RNG seed,
+/// ikm = u32be(len(pt)) ‖ pt ‖ u32be(len(aad)) ‖ aad)`, followed by
+/// `Expand(info = label)`. Lengths separate variable-width inputs; AAD is exactly
+/// what AEAD authenticates. Unrepresentable lengths return `BadLength`.
 ///
-/// **How.** Since version 3, `HKDF-Extract(salt = RNG seed,
-/// ikm = u32be(len(pt)) ‖ pt ‖ u32be(len(aad)) ‖ aad)`, then `Expand(info = label)`.
-/// AAD is exactly what AEAD receives: with a repeated RNG, identical plaintext
-/// in a different context gets a different nonce. This is hedging, not SIV:
-/// the key is not part of the seed; fully repeated inputs still repeat the nonce.
-/// Both lengths are mandatory because the parts have variable widths (the K1 argument).
-/// Lengths unrepresentable as u32 and excessive output lengths return BadLength.
-///
-/// **This does not contradict "nonces are stored, not derived".** The rule
-/// exists to prevent a nonce being a function of values available to the reader:
-/// derived from the shared secret, it would match whenever that secret matched.
-/// Here, conversely, the nonce derives from what the reader lacks (seed,
-/// plaintext) and **is stored in the file**; the reader still takes it
-/// ready-made and never computes it.
-///
-/// The seed is never stored anywhere: it is needed only during computation.
-///
-/// The label has type [`label::Label`]: nonce hedging is also a domain, and
-/// its four labels (K17–K20) are registered alongside the others. Passing a
-/// fifth label invented on the spot would derive a nonce in a domain
-/// unknown to §3.6.
+/// Changed plaintext or AAD changes the nonce even if the random seed repeats.
+/// This is not SIV: the key is not an input, and fully repeated inputs still
+/// repeat the nonce. The sender stores the nonce; the reader never derives it.
+/// The seed is transient, and [`label::Label`] restricts the derivation domain.
 pub fn hedged_nonce<const N: usize>(
     label: label::Label,
     seed: &[u8],
@@ -117,53 +87,23 @@ fn hmac_sha256(key: &[u8], message: &[&[u8]]) -> [u8; 32] {
     tag
 }
 
-/// K23: proof of opening the challenge without revealing the secret itself.
-/// The challenge remains secret between two parties: the public echo cannot derive K24.
-/// All 64 bytes of the hardware challenge enter the HMAC key; output is always 32 bytes.
+/// Legacy K23 challenge echo, retained only for its frozen vector.
 ///
-/// **NOT USED by the protocol since 2026-09-21.** [`echo_transcript`] computes the echo
-/// (K31): the old form bound nothing but the
-/// secret to the conversation, so a recorded echo worked in any conversation repeating that secret.
-/// For the decision and its limits, see `docs/format.md`, section "ECHO BOUND TO THE CONVERSATION
-/// 2026-09-21".
-///
-/// Retained for the frozen `k23_prove_echo` vector
-/// (`tests/kat/derivations_wire.kat`): I-14 forbids changing frozen artifacts, and
-/// removing the derivation would leave the vector without the operation it checks.
-/// It must acquire no new callers; the guard
-/// `the_old_unbound_echo_has_no_callers_outside_its_vector` enforces that.
+/// All challenge bytes enter the HMAC key; output is 32 bytes. This form does not
+/// bind the conversation. The protocol uses [`echo_transcript`] (K31) instead,
+/// and `the_old_unbound_echo_has_no_callers_outside_its_vector` guards that boundary.
 pub fn prove_echo(challenge: &[u8], device_fpr: &[u8; 32]) -> [u8; 32] {
     hmac_sha256(challenge, &[label::PROVE_ECHO.as_bytes(), device_fpr])
 }
 
-/// K31, step 1: handshake transcript hash (`docs/protocol.md` §9.4).
+/// K31 handshake transcript hash (`docs/protocol.md` §9.4).
 ///
 /// `SHA-256("CC/v1/echo-transcript" ‖ 0x00 ‖ u32le(len(hello)) ‖ hello ‖
 /// u32le(len(challenge)) ‖ challenge)`.
 ///
-/// # What is included and why
-///
-/// Exactly two frames, both available in full to BOTH parties by echo time:
-/// the device hello (`kind ‖ TLV`: presented keys, `device_fpr`,
-/// mechanism number) and server challenge (`kind ‖ TLV`: sealed halves with
-/// their `enc`, nonces, and ciphertexts). Neither connection numbers nor clock
-/// readings are included deliberately: only the server knows the number, the parties have different clocks,
-/// and a value known to only one party cannot be a transcript.
-///
-/// # Why RAW bytes rather than reconstructed values
-///
-/// The same argument as I-5: reconstructing parsed data would yield one byte sequence for
-/// a canonical document and another for one whose canonicality is checked
-/// by nothing except our own encoder. An intermediary modifying a frame in transit
-/// must diverge from the honest party, which happens only when the hash
-/// covers what actually traveled over the wire.
-///
-/// # Why lengths are included
-///
-/// [`Transcript::field`](crate::transcript::Transcript::field) prefixes
-/// each piece with its length: otherwise ("ab", "c") and ("a", "bc") would give
-/// one hash, allowing an attacker to move bytes between hello and challenge
-/// without changing the echo.
+/// Both peers have these complete raw frames. Length prefixes prevent moving
+/// bytes between them without changing the hash. Re-encoding parsed values would
+/// lose changes to their original representation.
 #[must_use]
 pub fn handshake_transcript(hello_framed: &[u8], challenge_framed: &[u8]) -> [u8; 32] {
     use sha2::Digest as _;
@@ -172,27 +112,14 @@ pub fn handshake_transcript(hello_framed: &[u8], challenge_framed: &[u8]) -> [u8
     Sha256::digest(t.as_bytes()).into()
 }
 
-/// K31, step 2: proof-of-possession echo bound to the conversation.
+/// K31 proof-of-possession echo bound to the conversation.
 ///
 /// `HMAC-SHA256(key = challenge secret, "CC/v1/echo-transcript" ‖ device_fpr ‖
-/// handshake)`, where `handshake` is the output of [`handshake_transcript`].
+/// handshake)`, where `handshake` comes from [`handshake_transcript`].
 ///
-/// # What this fixes
-///
-/// K23 included only the fingerprint in the message. An echo recorded from the wire worked in
-/// ANY conversation with the same device whenever the secret repeated, and the server
-/// secret repeats after snapshot rollback (I-1, argument C-13; K30 addressed repetition,
-/// but not the construction itself). The safety margin depended on the server currently issuing
-/// nothing on `Proven` without a session MAC, making it just one edit thick.
-/// The echo is now a function of the conversation: the server seals anew
-/// in each conversation, with its own ephemeral `Seal` pair, so challenge bytes differ.
-///
-/// # What this does NOT provide
-///
-/// It does not fix full snapshot rollback TOGETHER with the clock: then both
-/// the secret (time is in K30's preimage) and the ephemeral sealing pair repeat,
-/// repeating the entire transcript. It does not address an attacker possessing
-/// the device private key: that attacker legitimately proves possession.
+/// Including the transcript prevents an echo from moving to a different handshake
+/// when the challenge secret repeats. It cannot distinguish a fully repeated
+/// transcript after snapshot and clock rollback, or protect against a stolen key.
 #[must_use]
 pub fn echo_transcript(
     challenge: &[u8],
@@ -209,37 +136,16 @@ pub fn derive_session_mac_key(challenge: &[u8], device_fpr: &[u8; 32]) -> Sessio
     ))
 }
 
-/// K27: device fingerprint for ANY agreement mechanism.
+/// K27 device fingerprint bound to its agreement mechanism and public key.
 ///
-/// The fingerprint is the single 32-byte value a person checks
-/// through a second channel and to which the author later seals a share. For X25519 these two
-/// roles coincide in the key itself: it is 32 bytes, and its fingerprint equals the key.
-/// This is exactly what the bequest, quorum, and approval doors relied on, and precisely
-/// why they were closed to anything longer: for P-256 (65 bytes) and
-/// hybrids (1216, 1249), the fingerprint was UNDEFINED, and an intermediary presenting
-/// someone else's fingerprint with its own key could receive the share under its key
-/// in someone else's name (review 2026-09-06, N-1 and N-4).
-///
-/// This definition closes the gap for every mechanism at once: the fingerprint becomes
-/// a COMMITMENT to the key. Whoever receives `(fpr, kem, public)` must
-/// check `fpr == device_fpr(kem, public)` BEFORE using any of
-/// the three; for X25519 this is the same comparison as before.
-///
-/// **The form is deliberately asymmetric.** For `kem_id = 1`, it returns the key itself,
-/// not its hash: K11, K21, K23, K24 vectors and the `Hello` layout freeze that behavior,
-/// and unifying the fingerprints would require reissuing them without a single
-/// new security fact. For the other mechanisms:
-/// `SHA-256("CC/v1/device-fpr" ‖ 0x00 ‖ u8(kem_id) ‖ public)`. The mechanism number
-/// is in the preimage: the same key bytes under two numbers produce different
-/// fingerprints, so relabeling a mechanism changes the device name.
-///
-/// Key length is checked against the mechanism, not taken "as received" (I-8): a fingerprint
-/// of an incorrectly sized key would do no harm, but one rule applies everywhere,
-/// and making an exception here would cost more than the check.
+/// X25519 returns the public key itself for compatibility with frozen vectors.
+/// Other supported mechanisms use
+/// `SHA-256("CC/v1/device-fpr" ‖ 0x00 ‖ u8(kem_id) ‖ public)`.
+/// Callers must compare this result with the presented fingerprint before using
+/// the key; the mechanism byte prevents relabeling the same bytes.
 ///
 /// # Errors
-/// `public` length does not match the mechanism, or the mechanism defines no length
-/// (RSA-OAEP: variable-length keys, with no defined fingerprint).
+/// `public` has the wrong length, or the mechanism has no defined fingerprint.
 pub fn device_fpr(kem: crate::KemAlg, public: &[u8]) -> Result<[u8; 32], CryptoError> {
     use crate::KemAlg;
     // Исполнимость спрашивается ОДНИМ именем, а не вторым `match` рядом с
@@ -297,28 +203,14 @@ pub fn request_mac(key: &SessionMacKey, framed: &[u8]) -> [u8; 32] {
     hmac_sha256(key.expose(), &[framed])
 }
 
-/// K28: wire operation identity (`docs/protocol.md` §9.10).
+/// K28 wire operation identity (`docs/protocol.md` §9.10).
 ///
-/// `SHA-256("CC/v1/operation-id" ‖ 0x00 ‖ seed(32) ‖ u8(kind) ‖ body)`, where body is
-/// the encoded request WITHOUT the identity field itself (for an activation request, without
-/// tag 9: a value cannot include itself).
+/// `SHA-256("CC/v1/operation-id" ‖ 0x00 ‖ seed(32) ‖ u8(kind) ‖ body)`.
+/// `body` is the encoded request without the identity field itself.
 ///
-/// # Why not bare random bytes
-///
-/// By the C-13 argument (I-1): RNGs repeat after VM snapshot rollback, image
-/// cloning, and backup restoration. A bare random identifier could match for
-/// two DIFFERENT requests, giving the second request the stored outcome of the first:
-/// "issued" for someone else's request or "already used" rejection for its own. Including the body in the seed
-/// separates different requests even when the RNG repeats; only identical
-/// requests remain identical, and sharing an outcome is correct for them.
-///
-/// No secret is present or needed: the identifier travels openly on the wire,
-/// and requires uniqueness rather than unpredictability. An intermediary observing
-/// the wire already learns it; there is nothing to forge: replay with a different body
-/// is rejected by the server's body hash, and activation bodies carry a session MAC.
-///
-/// The kind enters the seed because activation and renewal have the same body:
-/// without it, one seed would give two different operations one identity.
+/// Binding kind and body separates different operations when the RNG repeats;
+/// identical requests retain the same identity. This public value provides
+/// deduplication, not authentication.
 #[must_use]
 pub fn operation_id(seed: &[u8; 32], kind: u8, body: &[u8]) -> [u8; 32] {
     use sha2::Digest as _;
@@ -350,51 +242,17 @@ pub const FRESH_CREDENTIAL_SEED: u8 = 4;
 /// with an RSA EK.
 pub const FRESH_CREDENTIAL_OAEP: u8 = 5;
 
-/// K30: a fresh value generated by the SERVER (`docs/format.md`, section
-/// "SERVER FRESHNESS IS DERIVED 2026-09-20").
+/// K30 server freshness (`docs/format.md`, "SERVER FRESHNESS IS DERIVED").
 ///
 /// `prk = SHA-256("CC/v1/server-fresh" ‖ 0x00 ‖ seed(32) ‖ u8(kind) ‖
-/// i64be(now) ‖ device_fpr(32))`, then `HKDF-Expand(prk, info = label)` into a buffer
-/// of the required length.
+/// i64be(now) ‖ device_fpr(32))`, then `HKDF-Expand(prk, info = label)`.
 ///
-/// # Why not bare random bytes
-///
-/// By the C-13 argument (I-1): RNGs repeat after VM snapshot rollback, image
-/// cloning, and backup restoration. This is worse on the server than on the client: its state
-/// rolls back together with the RNG, so an "already issued" value
-/// becomes unissued again, and nobody notices the repetition.
-///
-/// # Why TIME separates values rather than request data
-///
-/// NONE of the consumers has plaintext capable of distinguishing repeats:
-/// an attestation challenge is pure freshness, as is a proof secret, and so are the three
-/// TPM credential values (`kind` 3–5, added 2026-09-21).
-/// A seed based only on
-/// request data (the device fingerprint) would separate DIFFERENT devices but still
-/// repeat for the same device, which is precisely the danger: two conversations with one
-/// device would receive one secret, hence one echo and one session MAC key.
-/// The server has a clock, and `now` already enters the handler as a parameter.
-///
-/// The fingerprint is a second separator rather than a replacement for time: within one
-/// second, two devices must receive different values.
-///
-/// # What this does NOT provide
-///
-/// Snapshot rollback TOGETHER with the clock cannot be distinguished: `now` returns to its old value,
-/// and the value repeats. This protects against RNG repetition, not an adversary
-/// controlling the server clock.
-///
-/// # Why Expand rather than a second hash with a counter
-///
-/// The proof-of-possession secret consists of several 32-byte halves, one per
-/// presented key, and its length is known only at runtime. Appending
-/// counter-based hashes would introduce a homemade KDF beside an existing one:
-/// `HKDF-Expand` uses the same counter, but standardized and already verified.
-/// Thus `N = 32` is no exception: even the attestation challenge gets its 32 bytes
-/// through Expand, giving one form for both applications.
+/// Time separates calls for one device when random state repeats; the fingerprint
+/// separates devices within one second. Fully repeated inputs, including clock
+/// rollback, still produce the same output. The caller supplies the clock and seed.
 ///
 /// # Errors
-/// [`CryptoError::BadLength`]: more than 255×32 bytes requested.
+/// [`CryptoError::BadLength`] if more than 255×32 bytes are requested.
 pub fn server_fresh(
     seed: &[u8; 32],
     kind: u8,
@@ -513,25 +371,11 @@ pub fn derive_content_mac_key(cek: &Cek, header_salt: &[u8; 32], file_id: &[u8; 
     ))
 }
 
-/// K12: access-state witness key.
+/// K12 key for authenticating a device's lease-cache head.
 ///
-/// Authenticates the lease-cache head stored in two places: inside and outside the profile. The label
-/// `"CC/v1/cached-lease"` was reserved in the §3.6 registry in advance and until now
-/// existed only as a constant; here it gains a consumer.
-///
-/// Derived from the DEVICE secret rather than a file key: there is one witness per
-/// machine, unrelated to any container. Otherwise a head would be needed
-/// for every file, defeating the meaning of "one number outside the profile".
-///
-/// The salt is deliberately empty. HKDF salt is optional, and none is available here:
-/// there is no file identifier or header salt, only a device. The label
-/// in `info` sets the domain, which suffices: separation comes from it, not
-/// from salt.
-///
-/// What this key does NOT provide: protection against the machine's owner. The device secret is in
-/// their profile, so they can derive the key too. Authentication here addresses a fellow machine user
-/// with write access to a shared directory, and accidental corruption, not
-/// whoever owns the profile.
+/// Derived from the device secret with empty salt and the registered cached-lease
+/// label. It is independent of any file. It protects against corruption and other
+/// users with write access to shared storage, not the owner of the device secret.
 pub fn derive_witness_key(device: &crate::secret::X25519Secret) -> MacKey {
     MacKey::from_bytes(*hkdf_sha256::<SECRET_LEN>(
         &[],
@@ -544,12 +388,9 @@ pub fn derive_witness_key(device: &crate::secret::X25519Secret) -> MacKey {
 /// "CC/v1/mark-choice" ‖ layout ‖ u64be(copy mark) ‖ u32be(point))`,
 /// the first eight bytes interpreted as `u64be`, modulo the variant count.
 ///
-/// The key is a SEPARATE organization marking key, not a device or
-/// author key: selection must be unpredictable for the recipient and reproducible for
-/// whoever investigates a leak; this key serves no other purpose. The layout is
-/// MAC-covered: one copy mark in two documents yields independent choices.
-/// For up to sixteen variants, modulo bias is on the order of 2^-60 and
-/// requires no correction.
+/// Use a separate organization marking key. The MAC-covered layout binds
+/// selection to the document. For up to sixteen variants, modulo bias is
+/// on the order of 2^-60.
 ///
 /// # Errors
 /// [`CryptoError::BadLength`]: zero variants.
@@ -567,28 +408,11 @@ pub fn mark_choice(key: &MacKey, layout: &[u8; 32], token: u64, point: u32, vari
     u32::try_from(value).map_err(|_| CryptoError::BadLength)
 }
 
-/// K14: claim-code secret derived from its canonical text.
+/// K14 claim secret from canonical code text: uppercase, without separators.
 ///
-/// Input is the code's **canonical characters**: no separators, uppercase
-/// (§3.4). Canonicalization belongs to the interface rather than the key schedule:
-/// alphabet, grouping, and whitespace tolerance determine how easily a code can
-/// be dictated, without affecting any key byte. Transforming text into a
-/// secret, however, affects everything and therefore lives here with the rest of the schedule and its
-/// domain label.
-///
-/// Hashes the text rather than bits assembled from the characters. The distinction matters:
-/// assembling bits is a second encoding of the same thing, and even a bit-order discrepancy
-/// would make the code printed by the author differ from the code
-/// entered by the recipient. Text is unambiguous by construction.
-///
-/// BLAKE3 rather than HKDF: there is neither salt nor a division into extract and
-/// expand; there is exactly one compression of variable-length input into 32 bytes. The separator
-/// `0x00` follows the label because text length is not predetermined;
-/// without it, `label‖code` would parse ambiguously.
-///
-/// Input entropy is **not checked here and cannot be**: the code is already
-/// text by this point, and its original randomness is not visible. The
-/// [`crate::MIN_CLAIM_BITS`] boundary is checked where the code is generated.
+/// Hashing the text avoids a second bit-level encoding. The interface performs
+/// canonicalization and checks generated entropy against [`crate::MIN_CLAIM_BITS`];
+/// this function cannot infer entropy from an already chosen string.
 pub fn claim_secret_from_code(canonical: &[u8]) -> ClaimSecret {
     let mut hasher = blake3::Hasher::new();
     hasher.update(label::CLAIM_CODE.as_bytes());
@@ -597,26 +421,11 @@ pub fn claim_secret_from_code(canonical: &[u8]) -> ClaimSecret {
     ClaimSecret::from_bytes(*hasher.finalize().as_bytes())
 }
 
-/// K7 and K8: recipient share derived from the claim code, and the code's commitment.
+/// Heir-device X25519 secret derived from a claim code.
 ///
-/// Returns `(secret_B, commitment)`. Only the commitment enters the
-/// container; the code itself is delivered through a second channel.
-/// Heir-device X25519 private key derived from the code.
-///
-/// # Why a keypair rather than a share
-///
-/// The heir's share is FIXED: this file's share B, which cannot be derived from
-/// an arbitrary code. The code therefore derives a pair, and the bequest
-/// is sealed to its public key with ordinary `seal`: to the server and wire,
-/// such an heir is indistinguishable from a device, and neither side
-/// knows anything about the code.
-///
-/// `salt = file_id`, just as for the code-derived share, for the same reason: the same
-/// code issued twice produces different pairs for different files; shared tables cannot
-/// be constructed.
-///
-/// X25519 scalar multiplication "accepts" any 32 bytes: `from_bytes` performs
-/// clamping itself, so no special validation of KDF output is required.
+/// The bequest seals the existing share B to this derived device key; it does not
+/// derive a replacement share. `file_id` is the salt, separating reuse of the same
+/// code across files. X25519 performs scalar clamping when the key is used.
 #[must_use]
 pub fn device_secret_from_claim(file_id: &[u8; 16], claim: &ClaimSecret) -> [u8; 32] {
     *hkdf_sha256::<SECRET_LEN>(file_id, claim.expose(), &[label::CLAIM_DEVICE.as_bytes()])
@@ -635,26 +444,12 @@ pub fn secret_b_from_claim(file_id: &[u8; 16], claim: &ClaimSecret) -> (SecretB,
     (SecretB::from_bytes(*share), *commitment)
 }
 
-/// K9: slot commitment, `HMAC-SHA256(KEK, "CC/v1/slot-commit"‖core_hash)`.
+/// K9 slot commitment: `HMAC-SHA256(KEK, "CC/v1/slot-commit"‖core_hash)`.
 ///
-/// Checked in constant time **before** opening AEAD. Without it, the claim code
-/// becomes a partitioning oracle: XChaCha20-Poly1305 is not
-/// key-committing, and an attacker constructs a wrapper that opens under many
-/// candidate KEKs.
-///
-/// Bound to `core_hash`, not `file_id`, for two reasons. First:
-/// the binding is strictly stronger: the header-core hash already includes `file_id` and changes
-/// when any other author-signed field is substituted. Second: `core_hash`
-/// is available where the CEK wrapper is computed, whereas `file_id` is not
-/// passed in its signature.
-///
-/// No circular dependency: `core_hash` covers the header **without** the key-slot
-/// record, precisely why that record is excluded.
-///
-/// There is exactly one function. Previously there were two, bound to `file_id` and
-/// `core_hash`, violating "no domain label is used
-/// twice": one label served two distinct bindings, meaning a tag from one
-/// context could be presented in the other.
+/// Checked in constant time before AEAD opening: XChaCha20-Poly1305 alone is not
+/// key-committing and could expose a claim-code partitioning oracle. `core_hash`
+/// binds the header while excluding the slot and wrapped-key records, avoiding
+/// a circular dependency.
 pub fn slot_commitment(kek: &Kek, core_hash: &[u8; 32]) -> [u8; 32] {
     hmac_sha256(kek.expose(), &[label::SLOT_COMMIT.as_bytes(), core_hash.as_slice()])
 }

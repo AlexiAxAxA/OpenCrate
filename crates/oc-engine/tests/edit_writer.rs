@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Edit writer: frame reuse, fresh nonces, tree, signature.
 //!
 //! Central property: I-1 during editing. Different plaintext at the same index receives

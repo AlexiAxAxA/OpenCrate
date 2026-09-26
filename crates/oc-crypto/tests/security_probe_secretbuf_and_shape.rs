@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // Файл-проба состязательной проверки. Запреты рабочего кода к пробам не
 // применяются — проба вправе делать то, чего продукт делать не должен.
 //
@@ -285,19 +286,8 @@ fn a_signature_over_a_length_prefixed_field_does_not_move_to_a_resplit() {
 // Часть II. Заведены как воспроизведение дефектов; ПОЧИНЕНО, теперь регрессия.
 // ---------------------------------------------------------------------------
 
-/// BUG (fixed): `as_capacity_mut` returned writable storage WITHOUT wiping the buffer,
-/// while `declare_len` could then declare any length up to capacity. Plaintext
-/// from a previous longer write escaped through `as_slice`.
-///
-/// Type promise: "even the tail beyond meaningful data must be wiped,
-/// or remnants of a previous longer chunk survive a shorter write".
-/// `fill_from` fulfilled this promise, but `as_capacity_mut` plus
-/// `declare_len` did not. That is the path used by
-/// `cc-cli::payload::seal_stream`.
-///
-/// Fixed by wiping inside `as_capacity_mut` itself. Retained as a
-/// regression: "long write → short write → long again" is shorter than any
-/// scenario exposing the flaw in a real file.
+/// Write long, then short, then long through capacity/length accessors.
+/// `as_capacity_mut` must wipe old contents before `declare_len` can expose the tail.
 #[test]
 fn probe_bug_declare_len_hands_out_stale_plaintext_written_before_the_current_one() {
     let mut buf = SecretBuf::with_capacity(64);
@@ -321,21 +311,11 @@ fn probe_bug_declare_len_hands_out_stale_plaintext_written_before_the_current_on
     );
 }
 
-/// BUG (fixed): the proof did not bind the (index, leaf count) pair.
+/// Reuse an identical leaf and proof across index/count pairs through 16 leaves.
 ///
-/// Closed by binding the root to leaf count (`root_of`). Retained as a
-/// regression: enumerates trees through 16 leaves, seeking a second pair
-/// under which the same path verifies, checking absence of collisions rather than
-/// one known case.
-///
-/// Verification follows path shape, and pair (i, n) may share a shape
-/// with (j, m), with i ≠ j and n ≠ m. Then identical leaf bytes and the same
-/// path verify TWO different claims about a chunk's position in a file.
-///
-/// The ordinary probe (`a_proof_does_not_move_to_another_index_or_another_leaf_count`)
-/// misses this: it recomputes the leaf for another index, and `leaf_of` includes
-/// the chunk index. Here the leaf is IDENTICAL, testing
-/// `verify_proof` itself rather than `leaf_of`.
+/// The root's leaf-count binding must reject changed claims even when path shapes
+/// match. Keeping the leaf unchanged isolates `verify_proof` from `leaf_of`'s
+/// separate index binding.
 #[test]
 fn probe_bug_a_proof_verifies_under_a_second_pair_of_index_and_leaf_count() {
     let mut collisions: Vec<(u32, u32, u32, u32)> = Vec::new();

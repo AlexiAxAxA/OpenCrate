@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // Запрет `disallowed_methods` в `clippy.toml` адресован ПРОДУКТУ: ввод-вывод в
 // чистых крейтах жить не должен. Тест векторов читает файл по определению — векторы
 // затем и лежат отдельным файлом, чтобы вторая реализация могла свериться, не читая
@@ -10,30 +11,12 @@
     clippy::arithmetic_side_effects,
     clippy::disallowed_methods
 )]
-//! Frozen header vectors: policy, `core_hash`, and the mutable region.
+//! Frozen policy, core-hash and mutable-region vectors.
 //!
-//! They live in `oc-format`, not `oc-crypto`, because policy encoding and the
-//! hash transcript live here. The vector file loader is repeated (twenty lines),
-//! deliberately: the file format is primitive precisely so anyone can parse it,
-//! including a second implementation. A second parser for it in this
-//! repository is therefore not duplicated logic.
-//!
-//! ## What is frozen and why
-//!
-//! Two vectors, both closing gaps from the second review round.
-//!
-//! `policy_value`: **the complete policy bytes**. Before R-8 the byte layouts of
-//! `validity` and `network` variants (first-byte discriminant, little-endian fields, requirement
-//! of no trailing bytes for fieldless variants) and the distinction "field absent" ↔ "field present but empty"
-//! for `max_opens` existed ONLY in code, although §4 declares its numbers normative.
-//! Assembling the same bytes from the document was impossible.
-//!
-//! `policy_hash`: **the transcript**. Before R-10, §4 merely said "over raw bytes",
-//! specifying neither algorithm nor boundaries. The convention here is opposite to `core_hash`:
-//! only the record VALUE is hashed, without the six tag and length bytes, while `core_hash` excludes
-//! entire records. An implementation reasoning by analogy would obtain the wrong result,
-//! appearing as "the slot does not open; the file is damaged": `policy_hash` enters the
-//! associated data of every slot.
+//! `policy_value` covers discriminants, little-endian fields, trailing-byte rejection
+//! and absent/empty distinctions. `policy_hash` hashes the record value without
+//! its six-byte tag/length prefix. It enters slot AAD, so its boundaries must match
+//! across implementations.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -200,20 +183,10 @@ fn frozen_content_desc() -> ContentDesc {
     }
 }
 
-/// `core_hash` and the entire mutable region, including its MAC.
+/// Compare `core_hash` with its frozen header bytes and the full mutable region.
 ///
-/// Both values have been recorded as outstanding work in `tests/kat/README.md` since vectors
-/// first appeared, and both are completed before version 1 freezes.
-///
-/// `header_bytes` is deliberately frozen with `core_hash`. The hash is computed over
-/// a **byte range**, not a re-encoding of a parsed structure
-/// (§5), so a vector lacking the bytes would test only half the claim: a second
-/// implementation could not tell whether it diverged in hashing or header
-/// encoding.
-///
-/// The mutable region is frozen fully assembled: `ContentDescLen(4) ‖ body ‖
-/// MAC(32)`, exactly what is in the file. Those are the 32 MAC bytes
-/// §1.2 warns must not be omitted from arithmetic.
+/// Hash raw byte ranges, not a re-encoded structure. The region includes
+/// `ContentDescLen(4) ‖ body ‖ MAC(32)`; the MAC contributes to layout arithmetic.
 #[test]
 fn the_header_core_hash_and_content_desc_match_their_frozen_vectors() {
     let v = load("header.kat");

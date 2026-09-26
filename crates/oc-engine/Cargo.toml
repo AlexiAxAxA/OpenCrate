@@ -7,14 +7,13 @@ readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-# Source-available core; see the complete grant and earlier-version rights.
-license-file = "../../LICENSE-OPENCRATE"
+license = "MPL-2.0"
 publish.workspace = true
 
 [dependencies]
-oc-format = { version = "=0.0.2", path = "../oc-format" }
-oc-crypto = { version = "=0.0.2", path = "../oc-crypto" }
-oc-policy = { version = "=0.0.2", path = "../oc-policy" }
+oc-format = { version = "=0.0.5", path = "../oc-format" }
+oc-crypto = { version = "=0.0.5", path = "../oc-crypto" }
+oc-policy = { version = "=0.0.5", path = "../oc-policy" }
 # Те же версии, что у `oc-crypto` и `cc-cli`: новых крейтов в дереве ноль.
 rand_core = { version = "0.10.1", default-features = false }
 zeroize = { version = "1.9.0", features = ["derive"] }

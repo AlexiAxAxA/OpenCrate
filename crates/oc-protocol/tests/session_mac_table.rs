@@ -1,19 +1,9 @@
-//! Session MAC: authenticated-kind table and trailer separation, in the owning crate.
+// SPDX-License-Identifier: MPL-2.0
+//! Check the shared session-MAC kind table and trailer separation.
 //!
-//! Why a separate file when six tests in `cc-authority/tests/session_mac.rs`
-//! already make the server reject tampered frames? Because BOTH quantities live
-//! HERE, yet only the neighboring crate guarded them. Removing `KIND_ACTIVATE`
-//! from [`is_session_sealed`] broke none of the 104 `oc-protocol` tests,
-//! yet it removes activation's MAC entirely: the client uses the same table to decide
-//! whether to append the trailer, and both peers stop requiring it together. The function's doc comment
-//! explicitly calls it "one table for both ends of the wire"; such a
-//! quantity must have a test where it is defined, not only where
-//! it happened to be used.
-//!
-//! The test follows THE PATH: kind comes not from a constant but from the first byte of a frame
-//! built by [`encode_request`], exactly as read by `cc_cli::activate`
-//! (`seal_request`) and `cc_authority::serve` (`converse`). Comparing with the number 3
-//! would survive renaming a variant; frame construction would not.
+//! Both peers use this table, so omitting a kind could make them agree to stop
+//! protecting it. Derive kinds from encoded request frames to exercise the path
+//! used by callers.
 
 // Литы сняты по названным причинам: `unwrap`/`panic` — словарь проверки,
 // индексирование — чтение первого байта кадра заведомо непустой длины.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Lease signature: round trip from issuance to verification, and every way to reject it.
 //!
 //! A separate file rather than a module: these tests need a real signing key,

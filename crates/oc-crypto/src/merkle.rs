@@ -1,37 +1,14 @@
-//! Integrity tree over chunk frames.
+// SPDX-License-Identifier: MPL-2.0
+//! Integrity tree over authenticated chunk frames.
 //!
-//! A leaf binds chunk **ciphertext** together with its nonce and tag. Previously it
-//! bound only nonce and tag, which was insufficient: Poly1305 tags are not
-//! collision-resistant under a known key, allowing CEK holders to rewrite content
-//! while retaining the author-signed root. Details and executable verification:
-//! [`leaf_of`].
+//! Leaves bind ciphertext as well as index, nonce, and tag: Poly1305 tags alone
+//! are not collision-resistant for a holder of the payload key. Hashing ciphertext
+//! also lets readers check the author-signed root before decrypting.
 //!
-//! Provides verifiable random reads in O(log n), incremental
-//! updates on writes, and a root for future anchoring. File truncation is detected
-//! **not** by the tree, but by `total_len` and `chunk_count` under the mutable-region
-//! MAC.
-//!
-//! An odd node is **promoted** to the next level, as in RFC 6962, rather than
-//! duplicated: duplicating the final node reproduces the vulnerability class
-//! CVE-2012-2459, where different leaf sets yield identical roots.
-//!
-//! The tree apex (`apex`) is exactly RFC 6962 `MTH`, but the exposed value is instead
-//! a root bound to leaf count: `H(0x02 ‖ … ‖ u32be(n) ‖ apex)`. Without
-//! this binding, a proof does not determine which tree position it
-//! authenticates. The verification hash chain sees only a sequence of "sibling appended
-//! on the left or right", and a promoted level contributes nothing,
-//! so one chain matches many (index, leaf count)
-//! pairs: (0, 3) and (0, 4) have bitwise identical paths; (1, 2)
-//! matches (2, 3), (4, 5), (8, 9), … Enumeration through 20 leaves finds
-//! 43 such classes out of 47. Path shape cannot provide distinguishing information, so leaf
-//! count must enter the hash; otherwise an honest path for leaf i
-//! in an n-leaf tree also verifies another position in a tree
-//! of another size. RFC 6962 closes the same gap externally: tree size is included
-//! in the signed STH.
-//!
-//! With leaf count fixed, path shape determines the index uniquely
-//! (verified exhaustively through 4096 leaves), so binding `n` suffices for
-//! the proof to determine the entire pair.
+//! Odd nodes are promoted, as in RFC 6962, rather than duplicated. The exposed root
+//! binds the leaf count as well as the tree apex, so a proof cannot authenticate
+//! a position in a differently sized tree. The mutable-region MAC separately
+//! authenticates `total_len` and `chunk_count` for truncation checks.
 
 use crate::{CryptoError, TreeHashAlg};
 
@@ -42,24 +19,10 @@ use crate::{CryptoError, TreeHashAlg};
 /// `tree_hash_id` in the signed header must equal.
 pub const IMPLEMENTED_TREE_HASH: TreeHashAlg = TreeHashAlg::Blake3;
 
-/// Whether this build can compute a tree using the declared algorithm.
+/// Reject a tree algorithm this build does not implement.
 ///
-/// A second boundary for `tree_hash_id`. Without it, an identifier in a signed
-/// header controls nothing: a file declaring SHA-256 would still be read
-/// using BLAKE3 and accepted. This is the defect class that produced
-/// `alg: none` in JWS: the declared algorithm is not enforced, making the declaration
-/// decorative. Another failure follows: two readers (ours and an
-/// honest SHA-256 implementation) get different roots from the same
-/// file, disagreeing on which file is authentic.
-///
-/// Rejection was chosen over supporting a second hash: implementing SHA-256 trees
-/// means a second set of format constants and a second branch at each of four sites
-/// encoding the promotion rule, for an algorithm used by none of our
-/// files. Rejecting what the build cannot execute is more honest and does not
-/// increase the surface.
-///
-/// The `match` deliberately lacks `_`: adding a [`TreeHashAlg`] member must break
-/// the build here, beside the hasher, rather than pass silently.
+/// The algorithm declared by the signed header must select the computation;
+/// accepting SHA-256 while computing BLAKE3 would misinterpret that header.
 pub fn ensure_supported(alg: TreeHashAlg) -> Result<(), CryptoError> {
     match alg {
         TreeHashAlg::Blake3 => Ok(()),
@@ -76,54 +39,11 @@ pub struct Leaf(pub [u8; 32]);
 /// Compute the leaf:
 /// `H(0x00 ‖ "CC/v1/leaf" ‖ u32be(index) ‖ u64be(ct_len) ‖ nonce ‖ tag ‖ ct)`.
 ///
-/// Prefix `0x00` distinguishes a leaf from an internal node (`0x01`), preventing
-/// an internal node from masquerading as a leaf.
-///
-/// ## Why ciphertext enters the leaf
-///
-/// Previously the leaf used only `index ‖ nonce ‖ tag`, a mistake
-/// underlying the format's central promise. The author-signed
-/// `original_root` is the only thing a CEK holder cannot forge: the mutable-region MAC
-/// uses a CEK-derived key, allowing them to rewrite `tree_root`,
-/// length, and version counter themselves. The root therefore must depend on
-/// content, yet depended only on tags.
-///
-/// A tag cannot do that job. Poly1305 is a universal hash function, not a
-/// collision-resistant one: it is unforgeable only to someone who **does not know** the key. A
-/// CEK holder derives the payload key, takes `(r, s)` as ChaCha20 block 0 for
-/// `(key, nonce)`, where nonce is public in the file, and solves the linear equation
-/// `Δ_j·r^a + Δ_k·r^b ≡ 0 (mod 2^130−5)` for one block. This is
-/// **computation, not search**: one modular inversion. The tag is truncated to 2^128 with
-/// p = 2^130−5, so each tag corresponds to roughly four accumulator values,
-/// and a solution takes only a few attempts. Executable verification: a 64 KiB forgery
-/// with a bitwise identical tag was accepted by the reference
-/// XChaCha20-Poly1305 implementation, costing 16 garbage bytes in a block **chosen
-/// by the attacker**.
-///
-/// Hence `ct` in the preimage. BLAKE3 is collision-resistant regardless of what
-/// the adversary knows, so the signed root again binds every byte
-/// of content.
-///
-/// The property "root verified before decryption" remains intact:
-/// hashing ciphertext needs no key, so the reader's first pass remains
-/// keyless. O(log n) incremental updates remain too: only the leaf preimage
-/// changes, not tree shape.
-///
-/// ## Why length is explicit
-///
-/// `ct` comes last, so the encoding is unambiguous even without length. `u64be(ct_len)`
-/// still comes first: injectivity should not rest on "the tag is
-/// always the final 16 frame bytes, so the boundary is visible". That argument is true
-/// today and silently breaks at the first frame-layout change.
-///
-/// Width is `u64`, not `u32`, although chunk size is capped at a megabyte: `u32`
-/// would require fallible conversion from `usize`, and a function with no
-/// reason to fail should not return `Result` for an impossible branch.
-///
-/// No "algorithm" parameter, deliberately: the only algorithm
-/// this build agrees to execute is selected earlier, at header parsing through
-/// [`ensure_supported`]. An argument with exactly one acceptable value would
-/// add no check while creating an illusion of choice at every call.
+/// The prefix separates leaves from nodes. Ciphertext enters the hash because a
+/// payload-key holder can construct Poly1305 tag collisions; tags alone cannot
+/// bind content to the author-signed root. Hashing needs no key, so verification
+/// can precede decryption. The explicit length fixes the ciphertext boundary.
+/// [`ensure_supported`] selects the supported tree algorithm before this call.
 pub fn leaf_of(index: u32, nonce: &[u8; 24], tag: &[u8; 16], ct: &[u8]) -> Leaf {
     let mut h = blake3::Hasher::new();
     h.update(&[0x00]);
@@ -150,19 +70,8 @@ pub fn node_of(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 
 /// Root: `H(0x02 ‖ "CC/v1/node" ‖ u32be(leaf_count) ‖ apex)`.
 ///
-/// `apex` is the RFC 6962 tree apex; the root adds the leaf count.
-/// This is the only place tree shape enters a hash: the verification chain itself
-/// cannot distinguish it (see module documentation); without this binding one
-/// proof would authenticate different positions in differently sized trees.
-///
-/// A third prefix byte, not a third label: the byte itself separates
-/// domains (`0x00` leaf, `0x01` node), and fixed-width `u32be` prevents
-/// parsing from "slipping". Introducing `label::ROOT` would require another entry in
-/// the prefix-free registry for a domain already separated unambiguously.
-///
-/// Binding leaf count does not prevent appending: adding a chunk
-/// already changes the entire root, unlike `chunk_count` in chunk AAD, forbidden by
-/// §6.4 precisely because it would invalidate every chunk at once.
+/// `apex` follows RFC 6962. Binding leaf count prevents a proof from being reused
+/// for a different tree size; prefix `0x02` separates roots from leaves and nodes.
 pub fn root_of(leaf_count: u32, apex: &[u8; 32]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(&[0x02]);
@@ -398,22 +307,15 @@ impl MerkleTree {
         crate::digest_eq(&candidate, root)
     }
 
-    /// Consistency proof (RFC 9162, §2.1.4.1): the tree over the first
-    /// `old_count` leaves is a prefix of this tree.
+    /// Prove that the first `old_count` leaves are a prefix of this tree
+    /// (RFC 9162, §2.1.4.1).
     ///
-    /// Needed by the log witness (D3): it stores only an old head, not entries;
-    /// without such a proof, only someone holding the full log could verify
-    /// "the new head extends the old one".
-    ///
-    /// One difference from the RFC follows from [`root_of`]: the verifier knows
-    /// ROOTS rather than apexes. The RFC omits the old tree's apex when
-    /// `old_count` is a power of two, since the verifier can supply it. Here
-    /// there is nothing to supply, so it is placed at the path's start and is not
-    /// taken on trust: verification maps it through `root_of` to the
-    /// old head's root.
+    /// This format authenticates roots through [`root_of`], not raw apexes. For a
+    /// power-of-two old tree, include its apex at the path's start; verification
+    /// maps it through `root_of` before comparing the old root.
     ///
     /// # Errors
-    /// [`CryptoError::IndexOutOfRange`]: `old_count` is zero or exceeds the tree size.
+    /// [`CryptoError::IndexOutOfRange`] if `old_count` is zero or exceeds the tree size.
     pub fn consistency(&self, old_count: u32) -> Result<Vec<[u8; 32]>, CryptoError> {
         let leaves = self.levels.first().ok_or(CryptoError::TreeMismatch)?;
         let m = usize::try_from(old_count).map_err(|_| CryptoError::IndexOutOfRange)?;

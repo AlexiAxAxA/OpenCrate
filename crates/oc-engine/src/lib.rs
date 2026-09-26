@@ -1,61 +1,18 @@
-//! Packing engine: everything that DECIDES, nothing that processes content bytes.
+// SPDX-License-Identifier: MPL-2.0
+//! Packing keys, recipient slots and the container header.
 //!
-//! # Why this crate exists
-//!
-//! The product plan divides work as follows: the server decides (content
-//! key, shares, slots, header construction and hashes); the device
-//! computes (AEAD over document bytes). The boundary is established NOW
-//! so the key-holding component can later move into an enclave through a hosting change
-//! rather than a rewrite.
-//!
-//! Before this crate there was no boundary: `cc_cli::container::protect` performed
-//! both halves consecutively, making "move the engine into an enclave" meaningless:
-//! the repository contained nothing to move.
-//!
-//! # What is forbidden here and why the build checks it
-//!
-//! No I/O, clocks, or internal RNG: the RNG arrives
-//! as a parameter. This crate passes the same purity gate as `oc-format`,
-//! `oc-protocol`, `oc-crypto`, and `oc-policy`: compilation for
-//! `wasm32-unknown-unknown` and the `SystemTime` ban in `clippy.toml`.
-//!
-//! For the other four, the gate preserves deterministic tests. Here it preserves the
-//! boundary itself: an enclave cannot accept a component already dependent on
-//! the host machine. Relying on a reviewer to check every change is equivalent to
-//! not checking.
-//!
-//! # Call order and why there are two calls rather than one
+//! The host supplies randomness and processes document bytes. The engine has no
+//! I/O or clocks and retains CEK while returning the derived payload key.
 //!
 //! ```text
-//!   plan()       → secrets, payload key                     (engine)
-//!   seal_chunks  → ciphertext, tree root, length            (device)
-//!   assemble()   → header, signature transcript, descriptor (engine)
-//!   sign+write   → author signature and file write          (device)
+//! plan()      -> session and payload key
+//! seal_chunks -> ciphertext, length, and tree root (host)
+//! assemble()  -> header and mutable region
+//! sign+write  -> author signature and container (host)
 //! ```
 //!
-//! The middle step is `oc_crypto::stream::seal_chunks`. It belongs to crypto,
-//! not here, a substantive placement: the engine DECIDES, while that loop PROCESSES
-//! bytes and therefore belongs to the device. It moved from `cc_cli::payload` into
-//! crypto on 2026-09-09 when there were two devices: the recipient's machine plus
-//! a wasm host for other languages. A second implementation of the same loop would
-//! silently diverge from the first (`oc_crypto::stream` module documentation).
-//!
-//! No other split works: private metadata contains document LENGTH, known
-//! only to whoever processed the stream. The engine must therefore release the key, await
-//! the result, and only then assemble the header.
-//!
-//! # What the engine does not do, by decision rather than omission
-//!
-//! **It does not sign.** The AUTHOR's key signs the entire header,
-//! including slots (I-6); the engine supplies the transcript and the device
-//! applies the signature. Literally following the product plan, "the server signs
-//! the policy", would require a second header signature and thus a new format
-//! version during a split that must preserve bytes.
-//!
-//! **The engine does not release CEK.** It exposes only `payload_key`, derived from
-//! CEK for the specific chunk size and algorithm. If it released CEK, the enclave
-//! would prove image integrity and nothing more: the key unwrapping everything
-//! else would reside outside.
+//! Assembly follows streaming because private metadata includes final length.
+//! The host derives the signing transcript from the completed header and signs it.
 
 use rand_core::CryptoRng;
 use oc_crypto::secret::{Cek, ClaimSecret, PayloadKey, SecretA, SecretB};
@@ -93,6 +50,8 @@ pub enum EngineError {
     Crypto(CryptoError),
     /// The assembled header is internally inconsistent.
     CoreHashMismatch,
+    /// Assembly changed the planned chunk size or recipient.
+    PlanMismatch,
     /// Hybrid recipient, but no author hybrid half was supplied.
     ///
     /// A distinct error, not a downgrade to a classical slot: downgrading
@@ -118,6 +77,7 @@ impl core::fmt::Display for EngineError {
         match self {
             Self::Format(e) => write!(f, "{e}"),
             Self::Crypto(e) => write!(f, "{e}"),
+            Self::PlanMismatch => f.write_str("assembly request differs from the encryption plan"),
             Self::CoreHashMismatch => {
                 write!(f, "хеш ядра заголовка изменился после добавления слотов")
             }
@@ -164,8 +124,7 @@ pub enum Recipient {
     Identity { public_key: [u8; 32] },
     /// Recipient hybrid key: `kem_id = 4`, X-Wing (format version 4).
     ///
-    /// Boxed because 1216 bytes in an enum would inflate EVERY
-    /// variant to that size, including `None`.
+    /// Boxed so the 1216-byte public key does not enlarge every enum variant.
     Hybrid { public_key: Box<[u8; oc_crypto::xwing::PUBLIC_KEY_LEN]> },
     /// Recipient HARDWARE hybrid: `kem_id = 5`, MLKEM768-P256 (version 5).
     ///
@@ -188,6 +147,25 @@ enum RecipientPlan {
     Hybrid(Box<[u8; oc_crypto::xwing::PUBLIC_KEY_LEN]>),
     HardwareHybrid(Box<[u8; oc_crypto::mlkem_p256::PUBLIC_KEY_LEN]>),
     Claim([u8; 32]),
+}
+
+impl RecipientPlan {
+    fn matches(&self, file_id: &[u8; 16], requested: &Recipient) -> bool {
+        match (self, requested) {
+            (Self::None, Recipient::None) => true,
+            (Self::Identity(planned), Recipient::Identity { public_key }) =>
+                oc_crypto::public_key_eq(planned, public_key),
+            (Self::Hybrid(planned), Recipient::Hybrid { public_key }) =>
+                oc_crypto::public_key_eq(planned.as_slice(), public_key.as_slice()),
+            (Self::HardwareHybrid(planned), Recipient::HardwareHybrid { public_key }) =>
+                oc_crypto::public_key_eq(planned.as_slice(), public_key.as_slice()),
+            (Self::Claim(planned), Recipient::Claim { secret }) => {
+                let (_, commitment) = kdf::secret_b_from_claim(file_id, secret);
+                oc_crypto::digest_eq(planned, &commitment)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Public keys the engine places in the header and slots.
@@ -224,7 +202,6 @@ pub struct PublicKeys<'a> {
 }
 
 /// What to pack and under which rules.
-#[derive(Debug)]
 pub struct PackRequest<'a> {
     pub original_name: &'a str,
     pub policy: Policy,
@@ -260,19 +237,25 @@ pub struct SealedInfo {
     pub tree_root: [u8; 32],
 }
 
-/// What the engine returns after assembly.
+impl core::fmt::Debug for PackRequest<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PackRequest")
+            .field("original_name", &"<redacted>")
+            .field("policy", &self.policy)
+            .field("chunk_size", &self.chunk_size)
+            .field("org_id", &self.org_id)
+            .field("authority_urls", &self.authority_urls)
+            .field("recipient", &self.recipient)
+            .field("coauthors", &self.coauthors)
+            .finish()
+    }
+}
+
+/// Completed header and mutable region.
 ///
-/// # NO signing transcript here, deliberately
-///
-/// It existed and was removed when the engine began moving into a separate process. The reason
-/// is not protocol convenience: the device must sign what ITSELF
-/// derived from the header it intends to write, not what the engine
-/// sent. Otherwise a hostile engine could pair one header's transcript
-/// with another header's bytes, making the author's signature authenticate the wrong file.
-///
-/// Transcript derivation is a pure function of the header and suite
-/// (`oc_format::verify::header_signing_transcript`), available to the device and
-/// essentially free. Omitting it would exchange verifiable data for supplied data.
+/// The host derives the signing transcript from the header it will write, using
+/// `oc_format::verify::header_signing_transcript`. Accepting a transcript supplied
+/// by an untrusted engine could authenticate a different header.
 #[derive(Debug)]
 pub struct Assembled {
     /// Entire header, ready to write.
@@ -289,6 +272,7 @@ pub struct Assembled {
 pub struct Session {
     file_id: [u8; 16],
     header_salt: [u8; 32],
+    chunk_size: u32,
     cek: Cek,
     secret_a: SecretA,
     secret_b: SecretB,
@@ -357,7 +341,7 @@ pub fn plan<G: CryptoRng + ?Sized>(request: &PackRequest<'_>, rng: &mut G) -> (S
         kdf::derive_payload_key(&cek, &header_salt, &file_id, request.chunk_size, suite().aead);
 
     (
-        Session { file_id, header_salt, cek, secret_a, secret_b, plan },
+        Session { file_id, header_salt, chunk_size: request.chunk_size, cek, secret_a, secret_b, plan },
         Plan { file_id, payload_key, chunk_size: request.chunk_size, aead: suite().aead },
     )
 }
@@ -372,7 +356,8 @@ impl Session {
     ///
     /// # Errors
     /// Returns [`EngineError`] on encoding or sealing failure, or a
-    /// recomputed core-hash mismatch.
+    /// recomputed core-hash mismatch. The chunk size and recipient must match
+    /// the request used by [`plan`], otherwise [`EngineError::PlanMismatch`].
     pub fn assemble<G: CryptoRng + ?Sized>(
         self,
         request: &PackRequest<'_>,
@@ -380,7 +365,11 @@ impl Session {
         sealed: SealedInfo,
         rng: &mut G,
     ) -> Result<Assembled, EngineError> {
-        let Session { file_id, header_salt, cek, secret_a, secret_b, plan } = self;
+        let Session { file_id, header_salt, chunk_size, cek, secret_a, secret_b, plan } = self;
+        // Keep the K3 chunk size and recipient selected during planning.
+        if request.chunk_size != chunk_size || !plan.matches(&file_id, &request.recipient) {
+            return Err(EngineError::PlanMismatch);
+        }
 
         let private_meta =
             seal_private_meta(&cek, &header_salt, &file_id, request, sealed.total_len, rng)?;
@@ -481,23 +470,10 @@ impl Session {
             RecipientPlan::Claim(claim_commit) => slots.push(claim_slot(claim_commit, commitment)),
         }
 
-        // АВТОРСКИЙ СЛОТ НЕ ВПРАВЕ БЫТЬ СЛАБЕЕ СЛОТА ПОЛУЧАТЕЛЯ.
-        //
-        // Здесь безусловно стоял классический слот — на ключ в TPM либо на
-        // программный, — и он несёт ОБЕ доли разом (`both_shares`). Значит
-        // гибридный слот получателя не давал контейнеру ничего: противник,
-        // умеющий решать дискретный логарифм, брал авторский слот, получал A‖B,
-        // выводил KEK и открывал файл, не притрагиваясь к ML-KEM. Стойкость
-        // контейнера равна стойкости СЛАБЕЙШЕГО достаточного пути к CEK, а
-        // авторский путь достаточен всегда.
-        //
-        // Поэтому при гибридном получателе авторский слот тоже гибридный.
-        //
-        // Цена названа вслух: X-Wing определён на X25519, а ключ в TPM — P-256,
-        // поэтому на таком файле автор ТЕРЯЕТ аппаратную привязку. Это та же
-        // взаимоисключимость, что записана для получателя (`docs/threat-model.md`
-        // §2), только теперь и на стороне автора. Выбор между «постквантово» и
-        // «ключ не покидает TPM» делает автор, называя получателя.
+        // The author slot contains both shares and can recover CEK by itself, so it must
+        // be at least as strong as the recipient slot. Hybrid recipients require a
+        // matching hybrid author slot. X-Wing uses software X25519; the hardware hybrid
+        // uses the P-256 provider rather than claiming the same hardware properties.
         let author_slot = match (hardware_recipient, keys.device_hardware_hybrid) {
             // Получатель на аппаратном гибриде — авторский слот тот же механизм.
             // Слабее нельзя: авторский слот несёт ОБЕ доли, и классический
@@ -785,24 +761,11 @@ fn seal_private_meta<G: CryptoRng + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    //! RNG consumption order is NAMED rather than implied.
+    //! Check RNG byte destinations as well as draw lengths.
     //!
-    //! [`plan`]'s documentation freezes the order: `file_id`,
-    //! `header_salt`, `CEK`, share A, share B. Until now only golden
-    //! artifacts guarded it: those in `cc-cli` and adjacent `hardware_hybrid_golden.rs`. An artifact
-    //! responds to swapped adjacent calls with "bytes differ at
-    //! position N", insufficient to reconstruct order: all file bytes
-    //! change together because everything else derives from these five
-    //! values.
-    //!
-    //! Four of five requests are 32 bytes, so lengths alone CANNOT reveal
-    //! neighbor swaps. Therefore we also check WHERE the bytes went: stream
-    //! piece K must land in field X, and on a shift
-    //! the probe names what took its place.
-    //!
-    //! This probe is inside the crate rather than `tests/`: [`Session`] fields are private;
-    //! exposing them for comparison would widen the engine API for a test,
-    //! releasing file secrets to anyone importing the crate.
+    //! The frozen order is file_id, header_salt, CEK, share A, share B. Four draws
+    //! have the same size; checking only lengths would miss their permutation.
+    //! Tests live here to inspect private Session fields without exposing file secrets.
 
     // Литы сняты для теста: `unwrap`/`panic` — словарь проверки, индексирование
     // и арифметика — нарезка потока заведомо известной длины.

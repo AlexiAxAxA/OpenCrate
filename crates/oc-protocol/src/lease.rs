@@ -1,32 +1,10 @@
-//! Lease: server-signed permission to open one file on one device.
+// SPDX-License-Identifier: MPL-2.0
+//! Server-signed permission to open one file on one device.
 //!
-//! # Why a separate document rather than a container field
-//!
-//! The container is signed by the author and does not change after release. A lease has its own
-//! lifecycle: issuance, expiration, renewal, revocation, many times for the
-//! same file. Placing it inside would require rewriting the container
-//! on every renewal, meaning a new author signature for a file the author had not touched.
-//!
-//! A useful practical consequence: **the container format version does not change**.
-//! Server fields in the header are already allocated and signed (`authority.urls`,
-//! `authority.sealing_kid`, `authority.lease_verify_key`), while the lease has
-//! its own version and lifecycle.
-//!
-//! # What makes a lease trustworthy
-//!
-//! A signature under `authority.lease_verify_key`, the very key that **the author
-//! pinned in the header under their own signature**. A fake server cannot substitute its key:
-//! replacing the verification key means replacing the author-signed header.
-//!
-//! This is the only point where the client trusts an external party; the trust chain
-//! is short precisely because the author established it personally.
-//!
-//! # What is signed
-//!
-//! **Raw body bytes, not a reconstructed structure.** The same rule as for the
-//! header (§5) and mutable area (I-5), for the same reason: reconstruction
-//! before verification reproduces the entire family of canonicalization errors known from
-//! JWS and XML-DSig. When parsed, verify what was on the wire.
+//! A lease is separate from the author-signed container so it can expire, renew,
+//! or be revoked without rewriting the header. Verification uses the server key
+//! pinned by the author in `authority.lease_verify_key`.
+//! Signatures cover raw body bytes and are checked before parsing.
 
 use oc_crypto::CryptoError;
 use oc_policy::{Attestation, LeaseFacts, Timestamp, TpmClock};
@@ -202,21 +180,11 @@ pub fn encode(lease: &Lease) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Parse a lease body. **The result is NOT VERIFIED.**
+/// Parse a lease body without verifying its signature.
 ///
-/// No signature is checked here, so the returned [`Lease`] is not
-/// evidence of anything: it is exactly as truthful as
-/// the bytes supplied to it. Access decisions must not be based
-/// on such a value.
-///
-/// # What to call instead
-///
-/// For EXTERNAL bytes, use [`verify_signed`]: it verifies the signature over the raw body
-/// BEFORE parsing, enforcing the order that callers otherwise must remember
-/// and might forget. This function remains public not to provide a choice of
-/// convenience, but for one legitimate case: parsing one's OWN issuance,
-/// where the reader is the same party that signed it and has nothing to verify
-/// (`cc-authority`, replay of a stored response).
+/// The result is untrusted and must not authorize access. For external
+/// `signature ‖ body` bytes, use [`verify_signed`]. This parser also supports
+/// replaying one's own stored issuance.
 pub fn decode(body: &[u8]) -> Result<Lease, FormatError> {
     let mut reader = TlvReader::new(body);
 
@@ -360,29 +328,15 @@ pub fn verify(
     oc_crypto::sign::verify(lease_verify_key, &signing_transcript(body), signature)
 }
 
-/// Verify the signature, then parse: in this order only.
+/// Verify the signature over raw body bytes, then parse the lease.
 ///
-/// `bytes` is the complete document: `signature(64) ‖ body`.
-///
-/// # Why a combinator while both halves remain available
-///
-/// Because the CALLER was responsible for "signature → parsing", and the product
-/// had to wrap these two calls itself (`cc_cli::lease`), although
-/// neighboring documents, [`crate::revocation::verify_signed`] and
-/// [`crate::order::verify_signed`], had that wrapper from the start. Parsing
-/// unauthenticated bytes is itself an oracle: distinguishable error codes report on
-/// something nobody signed (I-5 for documents). A single call prevents mistakes
-/// in the ordering.
-///
-/// The signature is checked over the RAW body bytes, not a reconstructed structure:
-/// the module rule that eliminates a class of canonicalization errors.
-///
-/// The caller checks that `file_id` and the policy hash match the container: there is
-/// no container here.
+/// `bytes` is `signature(64) ‖ body`. Authentication precedes parsing to avoid
+/// detailed errors for unauthenticated data. The caller must separately check
+/// `file_id` and policy hash against the container.
 ///
 /// # Errors
-/// [`FormatError::BadHeaderSignature`] for a short document or a
-/// failed signature; otherwise parsing errors, as in [`decode`].
+/// [`FormatError::BadHeaderSignature`] for a short document or failed
+/// signature; otherwise the parsing errors of [`decode`].
 pub fn verify_signed(bytes: &[u8], lease_verify_key: &[u8; 32]) -> Result<Lease, FormatError> {
     let (signature, body) =
         bytes.split_at_checked(SIGNATURE_LEN).ok_or(FormatError::BadHeaderSignature)?;

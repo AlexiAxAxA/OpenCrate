@@ -1,24 +1,9 @@
-//! File standing on the server: what the author sees when asking "what is set there?".
+// SPDX-License-Identifier: MPL-2.0
+//! Current server-side file standing for author queries.
 //!
-//! # Why a separate document
-//!
-//! The author gives the server orders: revoke, appoint an heir, set
-//! a limit. Before this document, there was no way to SEE which
-//! orders currently applied. The only mirror was the journal, a history
-//! of actions rather than their result: "heir appointed" and "heir appointed, then
-//! removed" are different histories with the same empty outcome, and the author should not
-//! have to distinguish them by reading the journal tail.
-//!
-//! This is especially true for the dead man's switch, whose result is irreversible: someone who appointed
-//! an heir has the right to verify that the interval is what they intended and that
-//! the event is still far away.
-//!
-//! # What is absent here
-//!
-//! Secrets. Everything here was already disclosed to the server by the author, and is visible to recipients
-//! in the queue and journal. The response therefore requires no proof of possession,
-//! like the request queue (`Requests`). The bequest is absent: it belongs to
-//! the heir, not anyone who asks, and is delivered by `Collect` after the event.
+//! This summarizes the result of orders rather than their journal history.
+//! It contains public queue/journal information and needs no possession proof.
+//! The heir's bequest is excluded; `Collect` delivers it after the event.
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
@@ -59,12 +44,9 @@ pub mod tag {
     pub const FROZEN: u16 = 17;
 }
 
-/// What the file specifies for the author's silence.
+/// Action configured for the author's silence.
 ///
-/// A separate enum rather than adjacent optional fields: "open,
-/// but to whom is unknown" and "close, but with an heir" are states that cannot
-/// occur, so there is no reason to make them representable. The same technique as on the server
-/// (`cc_authority::AfterSilence`) and in the order (`order::HeirMode`).
+/// The enum keeps heir recipients and closure mode mutually exclusive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeirStanding {
     /// No heir appointed; silence does not close the file.
@@ -89,12 +71,8 @@ pub struct Vote {
 
 /// A proposal awaiting signatures.
 ///
-/// The first signer's body is carried as a TEMPLATE. The first revision omitted it:
-/// "sign your own command, not someone else's bytes". That reasoning is valid: signing
-/// someone else's body is wrong, and it is also stale. But a coauthor signing through the UI
-/// must REPRODUCE the parameters, which the intent digest hides by construction.
-/// The solution is a template: the client extracts parameters, inserts its own time and
-/// signs with its own key. The same command, its own bytes.
+/// The first signer's body is a parameter template. Coauthors reconstruct the
+/// command with their own issuance time and sign their own body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProposalStanding {
     /// INTENT digest: identifies the proposal.
@@ -255,32 +233,15 @@ fn flatten(keys: &[[u8; 32]]) -> Vec<u8> {
 /// Vote record length: fingerprint, voter, decision, time.
 const VOTE_LEN: usize = 73;
 
-/// Parse the standing strictly: exact lengths, mode consistent with fields, and
-/// NO value has two representations.
+/// Parse standing with exact lengths and consistent mode/fields.
 ///
-/// # What has been rejected since 2026-09-20, and why
-///
-/// The writer [`encode`] omits everything meaning "nothing": an empty roster,
-/// a zero threshold, zero proposal lifetime and unfrozen standing are never
-/// written. Parsing formerly accepted both omission and explicit encoding of the same meaning,
-/// so each quantity had TWO wire representations, while
-/// canonicality (I-7) requires exactly one.
-///
-/// **Unfrozen standing remains valid**, and is the most common case,
-/// but is expressed by ABSENCE of tag 17, not by `frozen = 0`. The same applies to
-/// roster, threshold and lifetime: absence remains valid and reads as before;
-/// only the second form, which no writer produces, is rejected.
-///
-/// Roster and threshold are also checked against each other under the same rule as
-/// `oc_format::header::check_coauthors` and [`crate::order`]: the threshold must be
-/// achievable by the roster. The server never returns otherwise (`check_roster` rejects
-/// such an order, and `Coauthors` such a header), so the check excludes no
-/// reachable standing while preventing a manually crafted "quorum
-/// that nobody can ever reach".
+/// Canonical encoding omits an empty roster, zero threshold, zero proposal
+/// lifetime and an unfrozen flag. Explicit empty/zero forms are rejected;
+/// absence remains valid. The threshold must be achievable by the roster.
 ///
 /// # Errors
-/// [`FormatError`] for an unknown tag, invalid length, a value the
-/// writer never produces, or fields inconsistent with the mode.
+/// [`FormatError`] for an unknown critical tag, invalid length, noncanonical
+/// value or fields inconsistent with the mode.
 pub fn decode(bytes: &[u8]) -> Result<Standing, FormatError> {
     let mut file_id = None;
     let mut revoked = None;
@@ -721,16 +682,8 @@ mod tests {
         assert!(decode(&w.finish()).is_err(), "событие без наследника принято");
     }
 
-    /// VALUES NEVER PRODUCED BY THE WRITER ARE REJECTED (2026-09-20).
-    ///
-    /// Each quantity had TWO wire representations: omission
-    /// (no tag) and an explicit encoding of the same meaning. Nobody ever
-    /// produces the latter, yet parsing accepted it: two different byte sequences
-    /// meant the same thing, which I-7 forbids.
-    ///
-    /// The test enumerates them by name rather than checking that "something was rejected":
-    /// removing ANY one check must fail the test, and the message must
-    /// identify exactly which form passed.
+    /// Reject explicit empty/zero forms where canonical encoding omits the field.
+    /// Check each form separately so removing one validation fails this test.
     #[test]
     fn values_the_writer_never_writes_are_refused() {
         // Каждый случай — приписка к минимальному законному положению.

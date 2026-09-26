@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Footer: self-authenticating content after the frames (`docs/format.md`, "FOOTER AND
 //! TIMESTAMP", decision 2026-09-17, D3).
 //!

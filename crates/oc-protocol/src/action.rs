@@ -1,46 +1,14 @@
-//! ACTION DOOR documents: action grant, execution request and lease.
+// SPDX-License-Identifier: MPL-2.0
+//! Action grants, execution requests, and one-time leases.
 //!
-//! # What this conversation is and how it differs from an agent grant
+//! An [`crate::action::ActionGrant`] constrains arguments rather than authorizing file reads.
+//! The door and server both check them with [`crate::action::args_within`]. Grants are signed by
+//! the author; [`crate::action::ActionLease`] is signed by the server under its own domain label.
+//! Both verify raw bytes before parsing.
 //!
-//! An agent grant ([`crate::agent::AgentGrant`]) says "this door, this
-//! subtree, until this time", granting READ access. This asks something else:
-//! "this door may push this branch to this remote". The latter cannot be reduced
-//! to the former: reading concerns a file, whereas an action concerns ARGUMENTS that do
-//! not yet exist when the grant is issued. Thus an action grant names not actions but
-//! CONSTRAINTS on them; arguments are checked against those constraints
-//! twice: by the door before networking ([`crate::action::args_within`]), and by the server before issuing a lease.
-//!
-//! # Why a capability rather than a rule
-//!
-//! The sandboxed agent has no means of acting: no network, key or write access to
-//! the tree. Rejection relies not on someone saying "forbidden", but on
-//! absence of the means: the model cannot issue itself a lease, and the server will not sign
-//! arguments outside the constraints. Injection may persuade the model to ask;
-//! a request is all it can achieve.
-//!
-//! # Three documents and three different trust relationships
-//!
-//! * [`crate::action::ActionGrant`] is signed by the AUTHOR key, the same key as the container header
-//!   and agent grant. Layout `signature(64) ‖ body`, `verify_strict` verification over
-//!   raw bytes BEFORE parsing (I-5, I-6).
-//! * [`crate::action::ActionRequest`] is ENTIRELY UNSIGNED, like [`crate::access::AskAccess`]: the door
-//!   has a key-agreement key, which cannot sign. Requester identity is not trusted from
-//!   the document: the server compares `door_fpr` with the fingerprint proved in
-//!   the handshake, in constant time.
-//! * [`crate::action::ActionLease`] is signed by the SERVER with its lease-signing key
-//!   (`authority.lease_verify_key` from the header, pinned by the author's signature).
-//!   It has its own label ([`oc_crypto::label::ACTION_LEASE`]): the key is shared, so without
-//!   separate domains permission to open a file could serve as permission to push
-//!   a branch.
-//!
-//! # Why `force` is unrepresentable rather than forbidden
-//!
-//! [`crate::action::Args::GitPush`] has no field for it, required or optional.
-//! A prohibition written as a rule needs an enforcement point, and we have
-//! two (door and server): one path gets fixed, its neighbor forgotten.
-//! An absent field is enforced by parsing: an argument with an extra critical tag
-//! is rejected during parsing; an optional tag never reaches the executor, which
-//! reads the structure rather than the bytes.
+//! [`crate::action::ActionRequest`] is unsigned. The server must bind its `door_fpr` to the
+//! identity proved by the handshake. `GitPush` has no force option: the executor
+//! uses parsed arguments, so ignored optional fields cannot introduce one.
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
@@ -754,15 +722,10 @@ fn components(path: &str) -> impl Iterator<Item = &str> {
     path.split('/').filter(|part| !part.is_empty())
 }
 
-/// Tree path: relative, no `..`, no `.`, no empty components.
+/// Validate a relative tree path with no `.`, `..` or empty components.
 ///
-/// # Why the character set is so narrow
-///
-/// Because this path reaches the filesystem, and whatever it cannot express
-/// the door can never do. There is no fallback: a path the
-/// grant cannot encode is a path on which no action will execute.
-/// Forbidding backslash and colon removes Windows drives, NTFS streams and
-/// UNC paths at once; forbidding `..` prevents escaping the tree.
+/// Reject backslashes and colons to exclude Windows drives, UNC paths and NTFS
+/// streams. These lexical checks are part of the door's filesystem boundary.
 fn check_tree_path(text: &str, tag: u16) -> Result<(), FormatError> {
     if text.is_empty() || text.len() > MAX_ACTION_PATH {
         return Err(FormatError::BadFieldLength { tag, len: text.len() });
