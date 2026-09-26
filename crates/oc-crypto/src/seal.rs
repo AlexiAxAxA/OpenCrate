@@ -372,6 +372,14 @@ pub fn seal_xwing<R: CryptoRng + ?Sized>(
     plaintext: &[u8],
     rng: &mut R,
 ) -> Result<SealedBlob, CryptoError> {
+    if recipient_public.len() != crate::xwing::PUBLIC_KEY_LEN {
+        return Err(CryptoError::BadLength);
+    }
+    let (_, classical) = recipient_public
+        .split_last_chunk::<PUBLIC_KEY_LEN>()
+        .ok_or(CryptoError::BadLength)?;
+    // The recipient reconstructs a canonical public key for the combiner and K10.
+    validate_dh_public(classical, PUBLIC_KEY_LEN)?;
     let (shared, ciphertext) = crate::xwing::encapsulate(recipient_public, rng)?;
 
     let mut nonce_seed = Zeroizing::new([0u8; NONCE_LEN]);

@@ -92,7 +92,7 @@ impl std::error::Error for WireError {}
 /// is impossible. The methods below turn it into a "request plus public keys" pair,
 /// preventing a second set of engine fields that would diverge from
 /// the first.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PlanArgs {
     pub original_name: String,
     pub policy: Policy,
@@ -113,6 +113,17 @@ pub struct PlanArgs {
     /// Coauthor roster for tag `0x8001`. Travels as public signing keys,
     /// containing no secrets.
     pub coauthors: Option<oc_format::header::Coauthors>,
+}
+
+impl core::fmt::Debug for PlanArgs {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PlanArgs")
+            .field("original_name", &"<redacted>")
+            .field("chunk_size", &self.chunk_size)
+            .field("recipient", &self.recipient)
+            .field("author", &self.author)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PlanArgs {

@@ -36,12 +36,19 @@ pub const FIELD_PREFIX_LEN: usize = 6;
 /// The range is essential, not a convenience: policy and header core hashes use
 /// original bytes rather than a re-encoding of the parsed structure, avoiding
 /// the whole family of canonicalization bugs known from JWS and XML-DSig.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Field<'a> {
     pub tag: u16,
     pub value: &'a [u8],
     /// Value range in the buffer passed to [`TlvReader::new`].
     pub span: Range<usize>,
+}
+
+impl core::fmt::Debug for Field<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Field").field("tag", &self.tag)
+            .field("value_len", &self.value.len()).field("span", &self.span).finish()
+    }
 }
 
 impl<'a> Field<'a> {
@@ -80,11 +87,17 @@ impl<'a> Field<'a> {
 }
 
 /// Sequential field reading with increasing-tag validation.
-#[derive(Debug)]
 pub struct TlvReader<'a> {
     buf: &'a [u8],
     pos: usize,
     last_tag: Option<u16>,
+}
+
+impl core::fmt::Debug for TlvReader<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TlvReader").field("len", &self.buf.len())
+            .field("pos", &self.pos).field("last_tag", &self.last_tag).finish()
+    }
 }
 
 impl<'a> TlvReader<'a> {
@@ -162,10 +175,18 @@ impl<'a> TlvReader<'a> {
 /// then protect the file on disk but not the process that assembled it.
 /// Zeroizing does not harm public header fields: the cost is one memset
 /// when the writer is destroyed.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct TlvWriter {
     buf: Zeroizing<Vec<u8>>,
     last_tag: Option<u16>,
+}
+
+impl core::fmt::Debug for TlvWriter {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // TLV also carries key seeds and private metadata.
+        f.debug_struct("TlvWriter").field("len", &self.buf.len())
+            .field("last_tag", &self.last_tag).finish()
+    }
 }
 
 impl TlvWriter {

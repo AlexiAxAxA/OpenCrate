@@ -208,6 +208,30 @@ fn public_op(modulus: &[u8], input: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>
     Ok(zeroize::Zeroizing::new(out.to_vec()))
 }
 
+fn oaep_public_op<const LIMBS: usize>(modulus: &[u8], input: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    use crypto_bigint::{Uint, modular::{FixedMontyForm, FixedMontyParams}};
+    use zeroize::Zeroizing;
+
+    if modulus.len() != Uint::<LIMBS>::BYTES || input.len() != Uint::<LIMBS>::BYTES {
+        return Err(CryptoError::BadLength);
+    }
+    if modulus.first().is_none_or(|byte| byte & 0x80 == 0) {
+        return Err(CryptoError::BadLength);
+    }
+    let n = Uint::<LIMBS>::from_be_slice(modulus);
+    let x = Zeroizing::new(Uint::<LIMBS>::from_be_slice(input));
+    if *x >= n {
+        return Err(CryptoError::BadSignature);
+    }
+    let odd = Odd::new(n).into_option().ok_or(CryptoError::BadLength)?;
+    let params = FixedMontyParams::new(odd);
+    // Fixed-width arithmetic keeps OAEP intermediates out of freed heap blocks.
+    // Wipe the named secret values; compiler-created stack copies are not covered.
+    let base = Zeroizing::new(FixedMontyForm::new(&x, &params));
+    let encrypted = base.pow(&Uint::<1>::from_u32(65537));
+    Ok(encrypted.retrieve().to_be_bytes().as_ref().to_vec())
+}
+
 /// Verify RSASSA-PKCS1-v1_5 with SHA-256 and exponent 65537.
 ///
 /// The encoding is CONSTRUCTED from the message and compared with the recovered value in full,
@@ -316,12 +340,34 @@ pub fn encrypt_oaep_sha256(
     seed_slot.copy_from_slice(masked_seed.as_slice());
     masked_db.copy_from_slice(&db);
 
-    Ok(public_op(modulus, &em)?.to_vec())
+    match k {
+        256 => oaep_public_op::<{ crypto_bigint::U2048::LIMBS }>(modulus, &em),
+        384 => oaep_public_op::<{ crypto_bigint::U3072::LIMBS }>(modulus, &em),
+        512 => oaep_public_op::<{ crypto_bigint::U4096::LIMBS }>(modulus, &em),
+        _ => Err(CryptoError::BadLength),
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
+    #[test]
+    fn oaep_fixed_arithmetic_matches_public_operation_for_supported_widths() {
+        for size in [256, 384, 512] {
+            let modulus = vec![0xff; size];
+            let mut encoded = zeroize::Zeroizing::new(vec![0x51; size]);
+            *encoded.first_mut().unwrap() = 0;
+            let expected = super::public_op(&modulus, &encoded).unwrap();
+            let actual = match size {
+                256 => super::oaep_public_op::<{ crypto_bigint::U2048::LIMBS }>(&modulus, &encoded),
+                384 => super::oaep_public_op::<{ crypto_bigint::U3072::LIMBS }>(&modulus, &encoded),
+                512 => super::oaep_public_op::<{ crypto_bigint::U4096::LIMBS }>(&modulus, &encoded),
+                _ => unreachable!(),
+            }.unwrap();
+            assert_eq!(actual, *expected);
+        }
+    }
+
     use super::*;
 
     /// Derived lengths must match the PSS layout rather than being

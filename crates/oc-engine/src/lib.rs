@@ -50,6 +50,8 @@ pub enum EngineError {
     Crypto(CryptoError),
     /// The assembled header is internally inconsistent.
     CoreHashMismatch,
+    /// Assembly changed the planned chunk size or recipient.
+    PlanMismatch,
     /// Hybrid recipient, but no author hybrid half was supplied.
     ///
     /// A distinct error, not a downgrade to a classical slot: downgrading
@@ -75,6 +77,7 @@ impl core::fmt::Display for EngineError {
         match self {
             Self::Format(e) => write!(f, "{e}"),
             Self::Crypto(e) => write!(f, "{e}"),
+            Self::PlanMismatch => f.write_str("assembly request differs from the encryption plan"),
             Self::CoreHashMismatch => {
                 write!(f, "хеш ядра заголовка изменился после добавления слотов")
             }
@@ -147,6 +150,25 @@ enum RecipientPlan {
     Claim([u8; 32]),
 }
 
+impl RecipientPlan {
+    fn matches(&self, file_id: &[u8; 16], requested: &Recipient) -> bool {
+        match (self, requested) {
+            (Self::None, Recipient::None) => true,
+            (Self::Identity(planned), Recipient::Identity { public_key }) =>
+                oc_crypto::public_key_eq(planned, public_key),
+            (Self::Hybrid(planned), Recipient::Hybrid { public_key }) =>
+                oc_crypto::public_key_eq(planned.as_slice(), public_key.as_slice()),
+            (Self::HardwareHybrid(planned), Recipient::HardwareHybrid { public_key }) =>
+                oc_crypto::public_key_eq(planned.as_slice(), public_key.as_slice()),
+            (Self::Claim(planned), Recipient::Claim { secret }) => {
+                let (_, commitment) = kdf::secret_b_from_claim(file_id, secret);
+                oc_crypto::digest_eq(planned, &commitment)
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Public keys the engine places in the header and slots.
 ///
 /// PUBLIC only. No device secret enters here, enforced
@@ -181,7 +203,6 @@ pub struct PublicKeys<'a> {
 }
 
 /// What to pack and under which rules.
-#[derive(Debug)]
 pub struct PackRequest<'a> {
     pub original_name: &'a str,
     pub policy: Policy,
@@ -217,6 +238,20 @@ pub struct SealedInfo {
     pub tree_root: [u8; 32],
 }
 
+impl core::fmt::Debug for PackRequest<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PackRequest")
+            .field("original_name", &"<redacted>")
+            .field("policy", &self.policy)
+            .field("chunk_size", &self.chunk_size)
+            .field("org_id", &self.org_id)
+            .field("authority_urls", &self.authority_urls)
+            .field("recipient", &self.recipient)
+            .field("coauthors", &self.coauthors)
+            .finish()
+    }
+}
+
 /// What the engine returns after assembly.
 ///
 /// # NO signing transcript here, deliberately
@@ -246,6 +281,7 @@ pub struct Assembled {
 pub struct Session {
     file_id: [u8; 16],
     header_salt: [u8; 32],
+    chunk_size: u32,
     cek: Cek,
     secret_a: SecretA,
     secret_b: SecretB,
@@ -314,7 +350,7 @@ pub fn plan<G: CryptoRng + ?Sized>(request: &PackRequest<'_>, rng: &mut G) -> (S
         kdf::derive_payload_key(&cek, &header_salt, &file_id, request.chunk_size, suite().aead);
 
     (
-        Session { file_id, header_salt, cek, secret_a, secret_b, plan },
+        Session { file_id, header_salt, chunk_size: request.chunk_size, cek, secret_a, secret_b, plan },
         Plan { file_id, payload_key, chunk_size: request.chunk_size, aead: suite().aead },
     )
 }
@@ -329,7 +365,8 @@ impl Session {
     ///
     /// # Errors
     /// Returns [`EngineError`] on encoding or sealing failure, or a
-    /// recomputed core-hash mismatch.
+    /// recomputed core-hash mismatch. The chunk size and recipient must match
+    /// the request used by [`plan`], otherwise [`EngineError::PlanMismatch`].
     pub fn assemble<G: CryptoRng + ?Sized>(
         self,
         request: &PackRequest<'_>,
@@ -337,7 +374,11 @@ impl Session {
         sealed: SealedInfo,
         rng: &mut G,
     ) -> Result<Assembled, EngineError> {
-        let Session { file_id, header_salt, cek, secret_a, secret_b, plan } = self;
+        let Session { file_id, header_salt, chunk_size, cek, secret_a, secret_b, plan } = self;
+        // Keep the K3 chunk size and recipient selected during planning.
+        if request.chunk_size != chunk_size || !plan.matches(&file_id, &request.recipient) {
+            return Err(EngineError::PlanMismatch);
+        }
 
         let private_meta =
             seal_private_meta(&cek, &header_salt, &file_id, request, sealed.total_len, rng)?;

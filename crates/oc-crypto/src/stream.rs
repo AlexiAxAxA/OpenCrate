@@ -77,6 +77,10 @@ where
     G: rand_core::CryptoRng + ?Sized,
 {
     let capacity = usize::try_from(chunk_size).map_err(|_| StreamError::TooLarge)?;
+    // Zero capacity skips the source and would seal a nonempty file as empty.
+    if capacity == 0 {
+        return Err(CryptoError::BadLength.into());
+    }
     // Затирающий буфер фиксированной ёмкости: обычный вектор уносил бы каждый
     // прочитанный кусок исходного файла в кучу — и при уничтожении, и при росте
     // (И-11).

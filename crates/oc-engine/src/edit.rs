@@ -31,12 +31,23 @@ use oc_format::edit::{
 };
 
 /// A piece of the new revision.
-#[derive(Debug)]
 pub enum Piece<'a> {
     /// An old-file frame with THIS SAME index: `nonce ‖ ct ‖ tag`.
     Keep(&'a [u8]),
     /// New plaintext and a fresh nonce seed.
     Seal { plaintext: &'a [u8], seed: [u8; NONCE_LEN] },
+}
+
+impl core::fmt::Debug for Piece<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Keep(frame) => f.debug_tuple("Keep").field(&frame.len()).finish(),
+            Self::Seal { plaintext, .. } => f.debug_struct("Seal")
+                .field("plaintext_len", &plaintext.len())
+                .field("seed", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 /// Inputs needed to assemble a revision.
