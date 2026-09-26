@@ -3,6 +3,6 @@ contact_links:
   - name: Report a security vulnerability (private)
     url: https://github.com/AlexiAxAxA/OpenCrate/security/advisories/new
     about: Suspected vulnerabilities go through GitHub private vulnerability reporting, never through a public issue. See SECURITY.md.
-  - name: Website and commercial contact
+  - name: Project website
     url: https://closecrate.com/
-    about: Commercial licensing and anything business-sensitive goes privately to god@closecrate.com.
+    about: Open Crate core and the separate Close Crate service.
