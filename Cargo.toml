@@ -8,7 +8,7 @@ members = ["crates/oc-crypto", "crates/oc-format", "crates/oc-protocol", "crates
 oc-crypto = { path = "crates/oc-crypto" }
 
 [workspace.package]
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 rust-version = "1.90"
 license = "MPL-2.0"

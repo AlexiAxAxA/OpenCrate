@@ -24,11 +24,11 @@ decisions. It is the five-library core behind Close Crate.
 
 For a Rust project, add the `opencrate` facade to use all five libraries, or
 depend on the individual `oc-*` crates you need. The facade is version
-`0.0.4`; the five core libraries are also `0.0.4` on crates.io:
+`0.0.5`; the five core libraries are also `0.0.5` on crates.io:
 
 ```toml
 [dependencies]
-opencrate = "=0.0.4"
+opencrate = "=0.0.5"
 ```
 
 Your application supplies storage, transport, keys, secure randomness and time.
@@ -63,7 +63,7 @@ extension, or JSON and messages, for one recipient. It re-exports the separate
 
 ```toml
 [dependencies]
-opencrate = { version = "=0.0.4", features = ["app-data"] }
+opencrate = { version = "=0.0.5", features = ["app-data"] }
 ```
 
 ```sh

@@ -42,5 +42,5 @@ key protection and enforcement.
 See [Translation notes](translation-notes.md) for preserved literal examples and
 how to read the dated specification history.
 
-See [the 0.0.4 review](review-2026-09-26.md) for reproduced defects, checks and
+See [the 0.0.5 review](review-2026-09-26.md) for reproduced defects, checks and
 the scope of the readability changes.

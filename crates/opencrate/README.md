@@ -19,7 +19,7 @@ messages, or the bytes of any file up to 16 MiB, for one X25519 recipient.
 
 ```toml
 [dependencies]
-opencrate = { version = "=0.0.4", features = ["app-data"] }
+opencrate = { version = "=0.0.5", features = ["app-data"] }
 ```
 
 ```rust
@@ -55,7 +55,7 @@ For `.cc` containers or individual building blocks, use the default facade:
 
 ```toml
 [dependencies]
-opencrate = "=0.0.4"
+opencrate = "=0.0.5"
 ```
 
 | Module | Responsibility |
@@ -86,7 +86,7 @@ policy. Clone the repository to run them; the first Cargo build may take time.
 
 ## License
 
-Version 0.0.4 is licensed under
+Version 0.0.5 is licensed under
 [MPL-2.0](https://github.com/AlexiAxAxA/OpenCrate/blob/main/LICENSE).
 Commercial use is allowed. Distributed modifications to covered files remain
 under MPL-2.0; separate application files can use other terms.
