@@ -15,9 +15,9 @@ publish.workspace = true
 # кодек политики и таблица версий живут в `oc-format`. Обратной стрелки нет и
 # быть не может — ни один разборщик контейнера не зовёт ни один документ
 # протокола, и это проверено до переноса.
-oc-format = { version = "=0.0.3", path = "../oc-format" }
-oc-crypto = { version = "=0.0.3", path = "../oc-crypto" }
-oc-policy = { version = "=0.0.3", path = "../oc-policy" }
+oc-format = { version = "=0.0.4", path = "../oc-format" }
+oc-crypto = { version = "=0.0.4", path = "../oc-crypto" }
+oc-policy = { version = "=0.0.4", path = "../oc-policy" }
 
 [lints]
 workspace = true

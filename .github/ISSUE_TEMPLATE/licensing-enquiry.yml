@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Open Crate 0.0.3 uses
+        Open Crate 0.0.4 uses
         [MPL-2.0](https://github.com/AlexiAxAxA/OpenCrate/blob/main/LICENSE).
         Commercial use does not require a separate agreement.
         **Issues are public.** Keep private business details out of the issue.

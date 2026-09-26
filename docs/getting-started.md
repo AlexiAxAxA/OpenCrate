@@ -102,11 +102,11 @@ reproducible builds.
 ## Choose the libraries for your integration
 
 The five libraries and the `opencrate` facade are published to crates.io at
-`0.0.3`. To use the full core, add one dependency:
+`0.0.4`. To use the full core, add one dependency:
 
 ```toml
 [dependencies]
-opencrate = "=0.0.3"
+opencrate = "=0.0.4"
 ```
 
 The facade re-exports the libraries as `opencrate::{crypto, engine, format,
@@ -115,11 +115,11 @@ individually instead:
 
 ```toml
 [dependencies]
-oc-format = "=0.0.3"
-oc-crypto = "=0.0.3"
-oc-protocol = "=0.0.3"
-oc-policy = "=0.0.3"
-oc-engine = "=0.0.3"
+oc-format = "=0.0.4"
+oc-crypto = "=0.0.4"
+oc-protocol = "=0.0.4"
+oc-policy = "=0.0.4"
+oc-engine = "=0.0.4"
 ```
 
 To seal arbitrary application bytes or a small file without a `.cc` container,
@@ -130,7 +130,7 @@ extension up to 16 MiB; it does not save a key or envelope for later use.
 
 ```toml
 [dependencies]
-opencrate = { version = "=0.0.3", features = ["app-data"] }
+opencrate = { version = "=0.0.4", features = ["app-data"] }
 ```
 
 For persistent application data, follow the

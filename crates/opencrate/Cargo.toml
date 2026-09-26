@@ -4,7 +4,7 @@ description = "One-dependency entry point for the Open Crate Rust core"
 repository = "https://github.com/AlexiAxAxA/OpenCrate"
 homepage = "https://closecrate.com/"
 readme = "README.md"
-version = "0.0.3"
+version = "0.0.4"
 edition.workspace = true
 rust-version.workspace = true
 license = "MPL-2.0"
@@ -14,12 +14,12 @@ publish.workspace = true
 app-data = ["dep:opencrate-sdk"]
 
 [dependencies]
-oc-policy = { version = "=0.0.3", path = "../oc-policy" }
-oc-crypto = { version = "=0.0.3", path = "../oc-crypto" }
-oc-format = { version = "=0.0.3", path = "../oc-format" }
-oc-protocol = { version = "=0.0.3", path = "../oc-protocol" }
-oc-engine = { version = "=0.0.3", path = "../oc-engine" }
-opencrate-sdk = { version = "=0.0.3", optional = true }
+oc-policy = { version = "=0.0.4", path = "../oc-policy" }
+oc-crypto = { version = "=0.0.4", path = "../oc-crypto" }
+oc-format = { version = "=0.0.4", path = "../oc-format" }
+oc-protocol = { version = "=0.0.4", path = "../oc-protocol" }
+oc-engine = { version = "=0.0.4", path = "../oc-engine" }
+opencrate-sdk = { version = "=0.0.4", optional = true }
 
 [[example]]
 name = "seal-file"
