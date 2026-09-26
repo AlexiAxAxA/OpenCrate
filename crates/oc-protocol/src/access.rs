@@ -1,33 +1,13 @@
-//! ACCESS REQUEST documents: the recipient requests, the author approves.
+// SPDX-License-Identifier: MPL-2.0
+//! Recipient access requests and author decisions.
 //!
-//! # What this conversation is and how it differs from activation
+//! The author can release the existing share B to a new device without changing
+//! the container. The server queues and delivers the decision, but the share is
+//! sealed to the device key and remains unavailable to that intermediary.
 //!
-//! Activation asks "may THIS device open the file NOW?"
-//! and the server decides under rules written by the author beforehand. An access
-//! request asks a different question: "is this person among the intended
-//! recipients at all?" No server rule can answer that:
-//! the recipient was not named when the file was packed.
-//!
-//! The author decides. The server is a **blind intermediary**: it stores the queue, shows
-//! it to the author and delivers the answer. It sees neither share B nor the contents:
-//! the answer is sealed to the device key, not the server's.
-//!
-//! # Why this cost the format no bytes
-//!
-//! The `AuthorDevice` slot carries BOTH shares (`docs/format.md` §3.3), so the author
-//! can give share B to anyone without changing the container or re-signing
-//! the header. The issued share lives in a separate sealed block of the same shape
-//! already returned by the server; the recipient stores it alongside the lease.
-//!
-//! # Who the "author" is from the server's perspective
-//!
-//! The server has no accounts, and none had to be added. The container header
-//! carries `author_key` (tag 5), signed BY THAT SAME KEY with strict verification (I-6). Thus
-//! the server learns the author's key on file registration, from the file itself,
-//! and accepts approval only when signed by that key.
-//!
-//! The technique is the same as pinning the lease-signing key: authority to
-//! decide comes from the signed header, not the peer's claims.
+//! Decisions are authenticated with the author key registered from the container
+//! header. They answer who may receive a share; lease issuance separately decides
+//! whether that device may open the file now.
 
 use oc_format::tlv::{TlvReader, TlvWriter};
 use oc_format::{FormatError, MAX_HEADER_LEN};

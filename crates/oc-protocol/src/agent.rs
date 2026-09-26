@@ -1,39 +1,14 @@
-//! AGENT PROTOCOL documents: agent grant and delegation to a descendant.
+// SPDX-License-Identifier: MPL-2.0
+//! Agent grants and delegation chains.
 //!
-//! # What this conversation is and how it differs from approval
+//! A grant binds a door, subtree, expiry, and delegation depth. The door uses an
+//! agreement key for sealed shares and a separate Ed25519 key for delegations;
+//! the author's grant authenticates the latter as `door_verify`.
 //!
-//! Approval ([`crate::access::Decision`]) asks "is this person among
-//! the intended recipients of THIS file?": one `file_id`, one signature, no
-//! mention of expiration. An agent grant asks instead "this door, this SUBTREE,
-//! until this time". It cannot be reduced to a batch of approvals: that would be N
-//! human decisions, N signatures and nowhere for the door signing key,
-//! expiration or delegation depth.
-//!
-//! # Why the door has TWO key pairs
-//!
-//! A device in the protocol is a key-agreement public key (`activation.rs`), which
-//! cannot sign. A door must sign delegations to descendants,
-//! otherwise there is nothing to authenticate them with. Thus it has a second pair, Ed25519;
-//! the author names its public half in the grant as `door_verify`. This key is covered
-//! by the author's signature, so an intermediary cannot replace it without breaking
-//! the signature.
-//!
-//! # What is signed
-//!
-//! **Raw body bytes, not a reconstructed structure**; the signature PRECEDES
-//! the body, matching the layout of leases, revocations and orders
-//! (`signature(64) ‖ body`). It is checked BEFORE TLV parsing (I-5, I-6): parsing
-//! unauthenticated bytes is itself an oracle, yielding distinguishable error codes about
-//! material nobody signed.
-//!
-//! # Whose key verifies the grant
-//!
-//! The CALLER obtains `author_key` from the container header or the server's file
-//! record, not the submitted document. The embedded key
-//! is compared with the supplied key in constant time and serves just one purpose:
-//! making "to whom this grant is addressed" part of the signed body. The same technique
-//! pins the lease-signing key: authority to decide
-//! comes from the signed header, not the peer's claims.
+//! Signatures cover `signature(64) ‖ body` layouts and verify raw body bytes before
+//! TLV parsing. The caller supplies the trusted author key from the container or
+//! registered file record; a key embedded in the submitted grant cannot establish
+//! its own authority.
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};

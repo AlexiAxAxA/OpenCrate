@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Frozen control and replica document vectors (E2, B2/B4/B7).
 //!
 //! These documents arrive ENTIRELY FROM THE WIRE and must not change silently:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! An author's order to the server: what to do with a file.
 //!
 //! Before 2026-09-03, registration and revocation were operator `cca` commands on

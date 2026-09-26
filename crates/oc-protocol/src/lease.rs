@@ -1,32 +1,10 @@
-//! Lease: server-signed permission to open one file on one device.
+// SPDX-License-Identifier: MPL-2.0
+//! Server-signed permission to open one file on one device.
 //!
-//! # Why a separate document rather than a container field
-//!
-//! The container is signed by the author and does not change after release. A lease has its own
-//! lifecycle: issuance, expiration, renewal, revocation, many times for the
-//! same file. Placing it inside would require rewriting the container
-//! on every renewal, meaning a new author signature for a file the author had not touched.
-//!
-//! A useful practical consequence: **the container format version does not change**.
-//! Server fields in the header are already allocated and signed (`authority.urls`,
-//! `authority.sealing_kid`, `authority.lease_verify_key`), while the lease has
-//! its own version and lifecycle.
-//!
-//! # What makes a lease trustworthy
-//!
-//! A signature under `authority.lease_verify_key`, the very key that **the author
-//! pinned in the header under their own signature**. A fake server cannot substitute its key:
-//! replacing the verification key means replacing the author-signed header.
-//!
-//! This is the only point where the client trusts an external party; the trust chain
-//! is short precisely because the author established it personally.
-//!
-//! # What is signed
-//!
-//! **Raw body bytes, not a reconstructed structure.** The same rule as for the
-//! header (§5) and mutable area (I-5), for the same reason: reconstruction
-//! before verification reproduces the entire family of canonicalization errors known from
-//! JWS and XML-DSig. When parsed, verify what was on the wire.
+//! A lease is separate from the author-signed container so it can expire, renew,
+//! or be revoked without rewriting the header. Verification uses the server key
+//! pinned by the author in `authority.lease_verify_key`.
+//! Signatures cover raw body bytes and are checked before parsing.
 
 use oc_crypto::CryptoError;
 use oc_policy::{Attestation, LeaseFacts, Timestamp, TpmClock};

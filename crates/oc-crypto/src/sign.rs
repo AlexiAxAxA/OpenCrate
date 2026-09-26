@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Signatures.
 //!
 //! Only [`Transcript`] can be signed, and its constructor requires a domain

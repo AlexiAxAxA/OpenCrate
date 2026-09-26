@@ -1,37 +1,14 @@
-//! Container parsing entry point.
+// SPDX-License-Identifier: MPL-2.0
+//! Container verification entry point.
 //!
-//! The operation order is part of the security contract, not an implementation
-//! detail: structural boundaries, then signature, and only then use of
-//! fields.
+//! [`Prologue::split`] checks structure, then the header decoder obtains the author
+//! key and algorithm suite needed to verify the original header bytes. Decoding
+//! therefore precedes signature verification, unlike the idealized order in §5.1.
+//! The decoder must safely handle unauthenticated and attacker-signed input.
 //!
-//! This **does not make the input trusted**. A hostile header may be
-//! perfectly signed with an attacker's key, so the decoder must tolerate
-//! all input; trust in the signer is a separate decision made above.
-//!
-//! # Departure from specification §5.1
-//!
-//! The specification requires signature verification **before** decoding. Literally,
-//! this is impossible: both the author's public key and the algorithm suite identifier
-//! are **inside** the header; without them verification lacks its key and input. Thus
-//! the actual order is:
-//!
-//! 1. structural splitting ([`Prologue::split`]), without cryptography;
-//! 2. header decoding to obtain two values: the author key and suite;
-//! 3. signature verification over the raw header bytes;
-//! 4. everything else.
-//!
-//! The departure is safe precisely insofar as the decoder is total: it does not
-//! panic, loop forever, or allocate based on an unchecked length. This
-//! §5.2 requirement exists regardless of order: "anyone can sign a hostile
-//! header". The decoder must therefore tolerate
-//! unverified input anyway, and step 2 imposes no work it would not already
-//! have to perform after step 3.
-//!
-//! The cost is explicit: a decoding error takes precedence over a signature
-//! error. A file with an unknown critical field and a garbage signature yields
-//! [`FormatError::UnknownCriticalField`] rather than a signature failure. This reveals
-//! one bit ("the header parsed"), which the attacker can already obtain
-//! by signing their own header with their own key.
+//! After signature verification, version checks and signer trust are evaluated.
+//! A valid signature proves possession of its key, not trust in the author.
+//! Because decoding runs first, its errors take precedence over signature errors.
 
 use crate::header::{
     MAX_READABLE_CONTAINER_VERSION, MIN_READABLE_CONTAINER_VERSION, ParsedHeader,
@@ -233,43 +210,12 @@ pub fn verify_and_parse<'a>(
         });
     }
 
-    // Версия самого формата проверяется отдельно от `min_reader_version`, и это
-    // не дублирование.
-    //
-    // `min_reader_version` — это ЗАЯВЛЕНИЕ ПИСАТЕЛЯ о том, что клиент такой-то
-    // версии его файл поймёт. Заявление подписано, но подписал его автор, а
-    // автором может быть противник: он вправе поставить `container_version: 999`
-    // и `min_reader_version: 1`, утверждая, что файл будущего формата
-    // читается по правилам нынешнего. Поверив, клиент применил бы правила
-    // версии 1 к семантике версии 999.
-    //
-    // Поэтому неизвестная версия формата — отказ. Продукт безопасности, увидев
-    // то, чего не понимает, обязан не открывать, а не «понять большинство
-    // полей». Прямая совместимость от этого не страдает: она обеспечена
-    // диапазоном необязательных тегов (§2), который позволяет добавлять поля
-    // БЕЗ смены версии формата, а смена версии как раз и означает, что
-    // изменилось нечто, чего старый клиент понять не может.
-    // Диапазон, а не только верхняя граница.
-    //
-    // Проверка одного лишь `>` пропускала версию 0 — формата, которого никогда
-    // не существовало, — и файл читался по правилам версии 1. Версия ниже
-    // читаемой опаснее версии выше: она не вызывает подозрений («это же старый
-    // файл»), хотя означает ровно то же самое — семантику, которой у нас нет.
-    //
-    // НИЖНЯЯ ГРАНИЦА — ПЯТЁРКА, А НЕ ЕДИНИЦА (решение Р-1, 2026-09-19). Версии
-    // 1–4 сожжены для чтения: ни один контейнер этих версий с magic `CLOSECR1`
-    // наружу не выходил, потому что переименование 2026-09-08 сменило magic и
-    // метки в тот же день, когда нарезалась пятая. Обещание «1–4 читаемы»
-    // относилось к пустому множеству и проверялось ровно здесь — перебором
-    // номера, а не открытием файла. Причина и правило Р-3 («до первого файла,
-    // ушедшего наружу, читатель держит только версию писателя») записаны у
-    // `MIN_READABLE_CONTAINER_VERSION`.
+    // `min_reader_version` — утверждение автора, а не описание формата.
+    // Проверяем саму версию независимо: подписанный файл с версией 999 и
+    // `min_reader_version = 1` не становится понятным этому читателю.
+    // Диапазон исключает и будущие версии, и снятые версии 1–4 (решение Р-1).
     let container_version = parsed.header.container_version;
-    // Диапазоном, а не двумя сравнениями: пока обе границы были единицами, форма
-    // записи не имела значения, а с их расхождением стало важно, что проверка
-    // одна и обе границы в ней названы вместе. Сегодня границы снова совпали, но
-    // диапазон остаётся: он разойдётся снова в день нарезки версии 6, и форма
-    // записи, меняющаяся туда-обратно, прячет то, что менялось по существу.
+    // Обе границы нужны: версия 0 и снятые версии тоже недопустимы.
     if !(MIN_READABLE_CONTAINER_VERSION..=MAX_READABLE_CONTAINER_VERSION)
         .contains(&container_version)
     {

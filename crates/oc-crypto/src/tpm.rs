@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! TPM 2.0 credential protection: the computable part of `TPM2_MakeCredential`
 //! (B6a, `docs/protocol.md` §9.11).
 //!

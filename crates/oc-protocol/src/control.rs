@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Authority control documents (E2, B2; `docs/protocol.md` §9.16).
 //!
 //! Three documents, one codec:

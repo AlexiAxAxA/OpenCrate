@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Tag-range rule for PROTOCOL DOCUMENTS (I-7, decision of 2026-09-21).
 //!
 //! # What is tested here

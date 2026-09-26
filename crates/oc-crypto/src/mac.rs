@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Message authentication codes.
 //!
 //! A separate module because MACs serve where signatures cannot:

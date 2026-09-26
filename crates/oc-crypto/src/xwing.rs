@@ -1,26 +1,12 @@
-//! X-Wing: X25519 and ML-KEM-768 hybrid, slot mechanism `kem_id = 4`.
+// SPDX-License-Identifier: MPL-2.0
+//! X-Wing: X25519 and ML-KEM-768 hybrid (`kem_id = 4`).
 //!
-//! Normative source: `draft-connolly-cfrg-xwing-kem-10` (March 2, 2026),
-//! §5.2–5.5; decision choosing this construction and its rationale:
-//! `docs/format.md`, "VERSION 3 OPENED", item 1 (the item itself lives in version 4).
-//! Measurements supporting the decision: `spikes/ml-kem-cost/`.
+//! Implements `draft-connolly-cfrg-xwing-kem-10` §5.2–5.5, pinned by the format
+//! decision and `tests/kat/xwing.kat`. Both keypairs expand from a 32-byte seed.
+//! The combiner label follows the other inputs; moving it changes the construction.
 //!
-//! # What readers of this code should know
-//!
-//! **The private half is 32 bytes, not 2400.** Both pairs grow from one
-//! seed through SHAKE256, so `device.key` remains a thirty-two-byte
-//! file, as before the hybrid. This is a construction property, not our
-//! optimization, and must not be lost: storing an expanded ML-KEM key would introduce
-//! a second key-file format.
-//!
-//! **The combiner label comes LAST.** An implementation written from memory placed
-//! it first, a silent mistake: two parties making the same mistake agree
-//! with each other and disagree with the rest of the world. Caught by the draft's
-//! vectors (`tests/kat/xwing.kat`), not by reasoning.
-//!
-//! **The hybrid targets X25519, hence a SOFTWARE key.** TPM keys are P-256,
-//! where X-Wing is undefined. Post-quantum protection and recipient hardware
-//! binding are currently mutually exclusive; see `docs/threat-model.md` §2.
+//! X-Wing uses software X25519 keys. For a TPM-backed P-256 classical half, use
+//! [`crate::mlkem_p256`], a separate hybrid with its own combiner.
 
 use crate::CryptoError;
 use ml_kem::array::{Array, ArrayN};

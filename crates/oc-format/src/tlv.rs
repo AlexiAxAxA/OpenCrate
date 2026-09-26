@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Header encoding: fields with numeric tags, lengths, and values.
 //!
 //! The format is closed and third-party developers do not need to read it, so CBOR

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Witnessing a server journal head (`docs/protocol.md` §9.13, D3).
 //!
 //! # What this contains and why

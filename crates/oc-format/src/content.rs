@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! The container's mutable region.
 //!
 //! The author is not present when a file is edited and therefore cannot sign

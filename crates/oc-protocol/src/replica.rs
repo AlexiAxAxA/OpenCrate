@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Server state replication: push and acknowledgment (E2, B4;
 //! `docs/protocol.md` §9.17).
 //!

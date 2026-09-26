@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! One-dependency entry point for the five Open Crate core libraries.
 //! The modules re-export the same APIs as the individual `oc-*` crates.
 //! Enable `app-data` to access the separate, host-side SDK for small arbitrary

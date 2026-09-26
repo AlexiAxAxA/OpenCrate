@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! SOFTWARE RSA-PSS-SHA256 signer: ONLY for probes.
 //!
 //! # Why it exists at all

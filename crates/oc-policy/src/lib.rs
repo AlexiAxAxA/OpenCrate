@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // Здесь арифметика — это сроки, счётчики открытий и номера лизингов, то есть
 // ровно те величины, переполнение которых означает расширение доступа. Поднято
 // с `warn` до `deny`; причина выбора атрибута, а не строки в `Cargo.toml`, —
@@ -17,21 +18,11 @@
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Compare two 32-byte digests in constant time.
+/// Compare fixed-size public digests without an explicit early exit.
 ///
-/// A copy of `oc_crypto::digest_eq`, not a call to it: this crate **has and must have
-/// no dependencies at all**, neither `subtle` nor `oc-crypto`. Having no
-/// dependencies is a condition of verifiability, not hygiene: the pure access
-/// decision core is the only part of the system amenable to exhaustive
-/// model checking, and any external crate dependency destroys that possibility.
-///
-/// The implementation does not rely on optimizer promises that do not exist: the accumulator
-/// uses a `volatile`-like technique through `core::hint::black_box` so the
-/// compiler does not transform the loop into an early exit on the first difference.
-///
-/// Device fingerprints and policy hashes are public, but secrets, tags, and
-/// commitments are compared uniformly throughout the repository, avoiding
-/// a separate proof of early-exit safety at every site.
+/// This dependency-free crate uses XOR accumulation rather than `subtle`.
+/// `black_box` discourages optimization but does not provide a constant-time
+/// guarantee; keep secrets and authentication tags in the crypto comparison path.
 #[must_use]
 pub fn digest_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     let mut diff = 0u8;

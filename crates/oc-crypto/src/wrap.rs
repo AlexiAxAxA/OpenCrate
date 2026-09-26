@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Content-key wrapping.
 //!
 //! CEK is random and **wrapped** under KEK, not derived from it. The distinction

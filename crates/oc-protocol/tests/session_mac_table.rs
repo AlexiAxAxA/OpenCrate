@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Session MAC: authenticated-kind table and trailer separation, in the owning crate.
 //!
 //! Why a separate file when six tests in `cc-authority/tests/session_mac.rs`

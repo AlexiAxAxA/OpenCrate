@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Read any small file as bytes and round-trip it through the optional SDK.
 //! This demonstration keeps a temporary key in memory and writes no envelope.
 // The example is the host boundary: unlike the core libraries it accepts a path

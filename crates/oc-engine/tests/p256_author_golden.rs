@@ -1,89 +1,16 @@
-//! P-256 AUTHOR-SLOT LAYOUT GOLDEN ARTIFACT (`kem_id = 2`), AT ENGINE LEVEL.
+// SPDX-License-Identifier: MPL-2.0
+//! Frozen engine headers with P-256 author slots (`kem_id = 2`).
 //!
-//! # Why it exists
+//! `p256-author.header` covers an X25519 recipient; `p256-author-none.header`
+//! covers no recipient and therefore different slot positions. The engine accepts
+//! a fixed software P-256 public point, making these headers reproducible without
+//! a machine-specific TPM key.
 //!
-//! This slot is written TODAY and BY DEFAULT on every machine where PCP supplies
-//! a device key (`cc-cli/src/keys.rs`, sources `Auto` and `Hardware`), yet
-//! nothing previously guarded its layout. Review
-//! `docs/review/2026-09-21-p256-slot.md` found precisely this gap: all client probes
-//! use `CC_DEVICE_BINDING=software`, so no test container
-//! carries this slot. The ENDS are frozen (the primitive
-//! `tests/kat/seal_p256.kat` and synthetic length-table probe slots),
-//! but the middle, what the engine assembles from them, is not.
-//!
-//! The cost of blindness deserves repeating: the author slot is the only one
-//! carrying BOTH shares together. If a reader stopped recognizing `kem_id = 2`, the author
-//! would see "no key matched" for their own encrypted file while NOT ONE
-//! probe failed. This file introduces that failure detection.
-//!
-//! # Why here rather than beside container artifacts
-//!
-//! For the same reason as neighboring `hardware_hybrid_golden.rs`: no container
-//! artifact can be produced through `cc-cli`, which obtains its P-256 point only
-//! from a TPM; every TPM has its own key, making "a byte-identical container on
-//! another machine" cease to be meaningful
-//! (`cc-cli/tests/golden.rs`, `fixed_keys`, field `device_tpm`).
-//!
-//! The engine neither has nor should have this limitation: pure, it accepts
-//! the public point as a PARAMETER (`PublicKeys::device_tpm`), indifferent to
-//! whether it came from a TPM or fixed scalar. It needs only 65
-//! uncompressed-point bytes. This makes an artifact possible here and impossible
-//! one layer above.
-//!
-//! # What is frozen
-//!
-//! `Assembled::header` bytes for two recipient kinds, chosen not for
-//! exhaustive enumeration but because they are TODAY'S MAJORITY:
-//!
-//! * `p256-author.header`: a classical X25519 recipient. The ordinary path:
-//!   with a nonhardware, nonhybrid recipient and an available TPM point, the engine
-//!   writes an author slot with `kem_id = 2` (`oc-engine/src/lib.rs`, branch
-//!   `(false, _, Some(tpm_public))`).
-//! * `p256-author-none.header`: no recipient at all. Frozen because it is
-//!   nearly free and covers a DIFFERENT layout: no recipient slot appears in the header,
-//!   putting the author slot second rather than third. Record ordering and adjacency
-//!   are as much format properties as their contents.
-//!
-//! Both follow one engine branch, without duplication: the branch is shared,
-//! but the headers differ and can diverge independently.
-//!
-//! # What is NOT frozen, stated explicitly
-//!
-//! **No author signature here.** The engine deliberately has none (I-6): the author
-//! key signs the entire header and the caller appends the signature
-//! (`cc-cli/src/container.rs`, `write_all(output, &signature)` immediately after
-//! the header). These frozen bytes therefore are NOT a container and do not
-//! pass `verify::verify_and_parse`: `Header::decode` parses them, the same
-//! `oc-format` parser without the signature boundary. The artifact freezes
-//! layout, not signature presence.
-//!
-//! **`Assembled::content_desc` is excluded**, for the same reason as its neighbor:
-//! it derives from `CEK` and `SealedInfo`, yielding identical bytes for every
-//! recipient kind with the same seed; it cannot distinguish mechanism two from
-//! any other.
-//!
-//! **`Plan::payload_key` is excluded.** Deterministic, but a KEY; secrets never
-//! enter the repository in any form.
-//!
-//! **No live TPM here.** The scalar is software, explicitly: the artifact
-//! speaks to slot LAYOUT, not actual key non-exportability.
-//! The runs recorded in `CLAUDE.md` address live TPMs; this file does not.
-//!
-//! # Opening as well as comparing
-//!
-//! An artifact nobody can open freezes garbage, permanently.
-//! Opening probes therefore accompany byte comparison: the author
-//! slot opens using a SOFTWARE P-256 agreement party, through the same
-//! `seal::open_with` and `KeyAgreement` trait the device will use
-//! (`cc-cli/src/container.rs`, agreement-party iteration). The production
-//! party is hardware; here it is software. Key derivation changes by
-//! no bytes, since it depends on the shared secret rather than the key.
-//!
-//! # When version 6 is cut
-//!
-//! Like its neighbor, this artifact has NO witness: created for the current
-//! writer, it will require the same decision as container artifacts when
-//! version six is cut. This is recorded here, not performed.
+//! These are headers, not complete signed containers. They freeze slot layout,
+//! not author signatures, content descriptors, payload keys, or TPM isolation.
+//! Opening tests use software P-256 agreement through the same trait as the host.
+//! Changing fixtures requires a format decision; a version-6 witness has not been
+//! created for these artifacts.
 
 // Литы отключены только здесь и только те, без которых тест нечитаем:
 // `unwrap`/`expect`/`panic` — потому что провал пробы и есть паника, а

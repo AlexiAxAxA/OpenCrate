@@ -1,38 +1,13 @@
-//! RSA-PSS-SHA256 signature verification: editing-device signature.
+// SPDX-License-Identifier: MPL-2.0
+//! RSA-PSS-SHA256 verification for editing-device signatures.
 //!
-//! # Why our own implementation rather than a crate
+//! The format fixes RSA-2048, exponent 65537, and a 32-byte salt; other shapes are
+//! rejected (`docs/format.md`, version 3, item 7). Only public operations run here,
+//! using `crypto-bigint`, already supplied by `p256`. The verifier also builds for
+//! WASM; signing belongs to the host's TPM adapter.
 //!
-//! Verification must live in a PURE crate: `oc-format` and `oc-protocol` verify signatures and
-//! build for `wasm32-unknown-unknown`, ruling out
-//! platform CNG. The dependency tree lacks the `rsa` crate, and taking it is undesirable:
-//! it carries RUSTSEC-2023-0071 (Marvin); although only indirectly relevant
-//! here (the attack concerns private operations, while the TPM signs), an exception
-//! would have to be granted manually.
-//!
-//! `crypto-bigint` is already in the tree via `p256`. Beyond it, all we need
-//! is modular exponentiation with a PUBLIC exponent and parsing
-//! the PSS encoding. **The operation contains no secrets**, so constant
-//! time is unnecessary; that is exactly why "our own crypto" is acceptable here,
-//! not because it is cheaper.
-//!
-//! # The danger and its consequences
-//!
-//! Historically, VERIFIERS were what broke: Bleichenbacher's `e = 3` attack targeted
-//! careless padding parsing, not RSA strength. Therefore:
-//!
-//! * **the exponent is not a parameter.** Fixed internally at 65537, with no way to pass `e = 3`.
-//!   A verifier need not support anything our signer does not produce;
-//! * **salt length is required, not recovered.** The format fixes it at 32 bytes
-//!   (`docs/format.md`, "VERSION 3 OPENED", item 7), so another salt length means
-//!   rejection, not "accept if it verifies". Recovering length from a delimiter
-//!   accepts more than the format allows;
-//! * **modulus length is specified by type.** RSA-2048 only.
-//!
-//! # What has been verified by execution
-//!
-//! The vector in `tests/kat/rsa_pss.kat` came from this machine's LIVE TPM
-//! (`spikes/rsa-pss-tpm/`), not invention or documentation. It cannot be rederived
-//! from the specification.
+//! `tests/kat/rsa_pss.kat` contains a frozen signature obtained from a TPM.
+//! The custom padding parser remains a security-review surface.
 
 use crate::CryptoError;
 use crypto_bigint::modular::{BoxedMontyForm, BoxedMontyParams};

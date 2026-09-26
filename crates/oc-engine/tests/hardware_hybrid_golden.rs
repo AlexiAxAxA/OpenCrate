@@ -1,64 +1,14 @@
-//! HARDWARE-HYBRID SLOT-LAYOUT GOLDEN ARTIFACT (`kem_id = 5`), AT ENGINE LEVEL.
+// SPDX-License-Identifier: MPL-2.0
+//! Frozen engine header with MLKEM768-P256 slots (`kem_id = 5`).
 //!
-//! # Why here rather than beside container golden artifacts
+//! Fixed software key material makes the layout reproducible without a live TPM.
+//! The artifact covers the complete assembled header, including server, recipient,
+//! and author slot order, 1153-byte encapsulations, and 1249-byte public keys.
 //!
-//! Format version 5 was cut for ONE mechanism, MLKEM768-P256,
-//! but nothing froze its on-disk layout. A container golden artifact through
-//! `cc-cli` is fundamentally impossible, for the reason recorded in
-//! `a_hardware_hybrid_golden_is_not_producible_by_this_writer`
-//! (`crates/cc-cli/tests/golden.rs`): with mechanism five, the AUTHOR slot must
-//! use the same mechanism, while the writer obtains the author's public P-256 point
-//! only from the TPM. Every TPM has its own key, making "a byte-identical container on
-//! another machine" cease to be meaningful.
-//!
-//! The engine neither has nor should have this limitation: it is pure and accepts
-//! public keys as PARAMETERS (`PublicKeys::device_hardware_hybrid`), so it
-//! does not care whether a point came from a TPM or a fixed scalar. This
-//! makes a golden artifact possible here and impossible one layer above.
-//!
-//! # What is frozen
-//!
-//! `Assembled::header` bytes: the entire ready-to-write header, with server,
-//! recipient, and author slots. This is the probe's purpose: both
-//! hybrid records (1153-byte `enc`, 1249-byte `key_fpr`, nonce, ciphertext,
-//! commitment), their ORDER and position among other header fields.
-//!
-//! # What is NOT frozen, stated explicitly
-//!
-//! **No author signature here.** The engine deliberately has none (I-6): the author
-//! key signs the entire header and the caller appends the signature
-//! (`cc-cli/src/container.rs`, `write_all(output, &signature)` immediately after
-//! the header). These frozen bytes therefore are NOT a container and do not
-//! pass `verify::verify_and_parse`: `Header::decode` parses them, the same
-//! `oc-format` parser without the signature boundary. The artifact freezes
-//! layout, not signature presence.
-//!
-//! **`Assembled::content_desc` is excluded.** Also bytes and also
-//! deterministic, but unrelated to slots: derived from
-//! `CEK` and `SealedInfo`, it is identical for any recipient kind with the same RNG
-//! seed. Freezing it here would create an artifact
-//! that cannot distinguish mechanism five from any other, promising
-//! broader coverage than it provides.
-//!
-//! **`Plan::payload_key` is excluded.** Deterministic, but a KEY; secrets never
-//! enter the repository in any form.
-//!
-//! # Opening as well as comparing
-//!
-//! An artifact nobody can open freezes garbage, permanently.
-//! Byte comparison therefore sits beside
-//! [`both_hardware_hybrid_slots_open_for_their_owners`]: both slots open
-//! using software halves through the same code a device will use, with the path
-//! continued through to private-metadata plaintext.
-//!
-//! # When version 6 is cut
-//!
-//! Container artifacts have a witness at `tests/golden/v5/`, captured BEFORE
-//! switching the writer. This artifact has NO witness: created for the
-//! current writer, it will require the same decision as its neighbors when version six
-//! is cut. This is recorded here, not performed: creating a witness directory
-//! with nothing to hold today except a copy of an adjacent file would create
-//! a copy with no reader.
+//! It is not a signed container and does not cover TPM isolation, the content
+//! descriptor, or payload keys. Companion tests open both hybrid slots and reach
+//! the private metadata. Changing the artifact requires a format decision;
+//! its version-6 witness has not been created.
 
 // Литы отключены только здесь и только те, без которых тест нечитаем:
 // `unwrap`/`expect`/`panic` — потому что провал пробы и есть паника, а

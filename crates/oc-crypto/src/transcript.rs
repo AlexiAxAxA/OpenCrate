@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Transcript: the only way to obtain bytes for a signature or MAC.
 //!
 //! This type exists for one invariant: **signing bytes without domain

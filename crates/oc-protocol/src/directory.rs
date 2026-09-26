@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Organization key directory: a record, its leaf and proof
 //! (`docs/protocol.md` §9.14, D4).
 //!

@@ -7,21 +7,20 @@ readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-# Source-available core; see the complete grant and earlier-version rights.
-license-file = "../../LICENSE-OPENCRATE"
+license = "MPL-2.0"
 publish.workspace = true
 
 [dependencies]
 sha2 = "0.11.0"
-oc-crypto = { version = "=0.0.2", path = "../oc-crypto" }
-oc-policy = { version = "=0.0.2", path = "../oc-policy" }
+oc-crypto = { version = "=0.0.3", path = "../oc-crypto" }
+oc-policy = { version = "=0.0.3", path = "../oc-policy" }
 zeroize = "1.9.0"
 
 # Программный подписант RSA-PSS — только пробам правки (`tests/edit.rs`);
 # продуктовая сборка признака не видит (resolver 2 не сливает признаки
 # dev-зависимостей в обычную сборку).
 [dev-dependencies]
-oc-crypto = { version = "=0.0.2", path = "../oc-crypto", features = ["test-signer"] }
+oc-crypto = { version = "=0.0.3", path = "../oc-crypto", features = ["test-signer"] }
 
 [lints]
 workspace = true

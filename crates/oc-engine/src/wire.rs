@@ -1,43 +1,13 @@
-//! Wire between device and engine: message bytes and nothing else.
+// SPDX-License-Identifier: MPL-2.0
+//! Message codec between the host and packing engine.
 //!
-//! # Why the codec lives in a PURE crate
+//! Messages carry packing requests, public keys, the payload key, stream results,
+//! and the completed header. Document content and the CEK stay on their respective
+//! sides of the boundary. Transport and process management belong to the host.
 //!
-//! Because it handles bytes, not a pipe. Parsing a message arriving
-//! from another process is the same hostile-input parsing as parsing
-//! a header: strict lengths, rejection rather than guessing, no panics. Pure-crate
-//! lints already enforce all this; introducing a second parser in an I/O
-//! crate would remove those protections.
-//!
-//! Pipes, process spawning, and RNGs live outside, in `cc-engined` and
-//! the `cc-cli` client.
-//!
-//! # What crosses the boundary and what does NOT
-//!
-//! Crosses: packing requests (rules, public keys, filename), the payload
-//! key, sealed-stream information, and the completed header.
-//!
-//! **Does not cross: any document-content byte.** The engine neither
-//! sees nor should see content; the device runs streaming AEAD. This is the
-//! product promise "content bytes never leave the author's machine", made
-//! verifiable here: record everything passing through the pipe and
-//! search for a canary.
-//!
-//! The payload key deliberately crosses: the device cannot encrypt
-//! the stream without it. `CEK` remains inside the engine:
-//! `payload_key` cannot derive it, while `CEK` derives everything else.
-//!
-//! # Why messages are assembled in a buffer that NEVER GROWS
-//!
-//! Because secrets travel over this wire, the payload key in responses and
-//! claim code in requests, while a growing `Vec` returns its old block to the allocator
-//! **before any `Drop`** (I-11). An assembler pushing repeatedly left a heap
-//! copy of the message at every capacity doubling, where `Zeroizing` is powerless:
-//! destruction has not happened, leaving nothing it can wipe.
-//!
-//! The ENTIRE message size is therefore computed before the first write; the buffer
-//! is allocated exactly once to that size and wiped on destruction
-//! ([`Message`]). The calculation must match written bytes exactly: a mismatch means
-//! [`WireError::BadSize`], not appending into a grown buffer.
+//! Messages may contain secrets. Their size is computed before allocating
+//! [`Message`], so its fixed-capacity, zeroizing buffer never leaves old copies
+//! behind through reallocation. A size mismatch returns [`WireError::BadSize`].
 
 use core::ops::Deref;
 

@@ -1,28 +1,13 @@
-//! Payload chunk encryption.
+// SPDX-License-Identifier: MPL-2.0
+//! Payload chunk encryption: `nonce(24) ‖ ciphertext ‖ tag(16)`.
 //!
-//! On-disk frame: `nonce(24) ‖ ciphertext ‖ tag(16)`.
+//! The sender hedges each nonce over a random seed, plaintext, and AAD. The reader
+//! uses the stored nonce. Deriving it only from file ID and chunk index would reuse
+//! the keystream when a chunk is edited under the same key.
 //!
-//! The nonce is **stored, never derived by the reader**. Deriving it from `(file_id, chunk
-//! index)` is fatal: `file_id` must remain constant during editing, so
-//! rewriting a chunk under the same key would reuse a nonce with different
-//! plaintexts, recovering both plaintexts through XOR and recovering
-//!  the one-time Poly1305 key.
-//!
-//! 192 bits suffice against random collisions, but NOT against repeated
-//! RNG state, so the SENDER derives the nonce through hedging (§6.1
-//! and §3.1). This used to say that the width exists "precisely to make
-//! random values safe", a statement that contradicted §3.1 and
-//! survived decision C-13.
-//!
-//! This determines the crate's API shape, which is the main point here: production
-//! sealing paths accept a SEED rather than a nonce: [`seal_chunk_hedged`] and
-//! [`seal_metadata_hedged`]. There is no way to pass a ready-made nonce; this is a property
-//! of the signature, not caller discipline. Forms accepting a nonce
-//! (`seal_chunk`, `seal_metadata`) remain only behind the
-//! `explicit-nonce` feature, absent from production builds.
-//!
-//! An inviolable rule: unauthenticated bytes never leave the function.
-//! On error, the output buffer is wiped.
+//! Production entry points accept seeds, not caller-chosen nonces. Explicit-nonce
+//! forms are available only through the `explicit-nonce` feature for testing.
+//! Unauthenticated plaintext is never returned; failed output buffers are wiped.
 
 use crate::merkle::{leaf_of, Leaf};
 use crate::secret::{MetaKey, PayloadKey, SecretBuf};

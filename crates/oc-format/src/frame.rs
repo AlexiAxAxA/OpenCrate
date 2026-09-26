@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Message framing: four length bytes, least significant byte first.
 //!
 //! # Why this lives here rather than with the first consumer

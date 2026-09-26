@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Seal secrets to a slot recipient's public key.
 //!
 //! The construction is Base-mode DHKEM(X25519, HKDF-SHA256) with
@@ -27,42 +28,17 @@ use zeroize::Zeroizing;
 /// X25519 public-key length.
 pub const PUBLIC_KEY_LEN: usize = 32;
 
-/// KEM this build uses for sealing by default.
+/// Default slot-sealing mechanism.
 ///
-/// Previously named `DEFAULT_SEALING_KEM`, correctly when exactly one
-/// mechanism was implemented. Format version 2 implements two, making the old name
-/// untrue; [`supports_kem`] answers "can we execute it", not a
-/// constant. This rename is not cosmetic: a name that outlives its meaning
-/// is more dangerous than no name.
-///
-/// The default deliberately remains X25519. P-256 is needed when a key
-/// lives in a TPM: the provider lacks X25519. Choosing P-256 without that reason
-/// would pay for 65 bytes per slot and a slower curve for nothing.
+/// X25519 is the software default. P-256 supports TPM agreement keys, and the
+/// hybrids use their respective paths. [`supports_kem`] reports executability.
 pub const DEFAULT_SEALING_KEM: KemAlg = KemAlg::X25519HkdfSha256;
 
-/// Whether this build can open a slot using the declared mechanism.
+/// Whether this build implements the declared slot mechanism.
 ///
-/// Without this check, a slot's KEM identifier controls nothing: a slot
-/// relabeled from X25519 to P-256 would still open using X25519,
-/// making algorithm declaration decorative. The same defect class that
-/// produced `alg: none` in JWS.
-///
-/// The specification (§3.3) promises slots with different KEMs can coexist in one
-/// file, so an unknown KEM should not reject the entire file but
-/// skip that particular slot: another slot in the same file may be usable.
-/// The caller decides "skip or reject"; this only answers
-/// "supported or not".
-///
-/// The `match` deliberately lacks `_`: adding a [`KemAlg`] member must break
-/// the build here, beside implementation, rather than pass silently. Precisely why
-/// the table belongs here rather than on the type itself: sealing and opening implementations
-/// are neighboring functions in this file.
-///
-/// This is the SOLE answer to "is the mechanism executable" across the
-/// repository; [`KemAlg::ensure_supported`] is the same table expressed as `Result`,
-/// not a second opinion. Length tables (`oc_format::header`, [`crate::kdf`])
-/// answer a DIFFERENT question, "what shape are the fields"; agreement of their
-/// gaps with this table is tested rather than remembered.
+/// The caller decides whether an unsupported slot is skipped or rejected.
+/// Format-version and length checks belong to `oc-format`; this table answers
+/// only executability. The exhaustive match forces new KEMs to be considered.
 pub fn supports_kem(kem: KemAlg) -> bool {
     match kem {
         KemAlg::X25519HkdfSha256 => true,
@@ -90,23 +66,10 @@ pub fn supports_kem(kem: KemAlg) -> bool {
     }
 }
 
-/// Construct slot-sealing `info`.
+/// Construct the shared writer/reader slot-sealing `info`.
 ///
-/// One function for both parties rather than two identical ones: writer and
-/// reader constructions diverging by even one byte would yield a file our own
-/// packer sealed but our own unpacker could not open, with the cause found
-/// only by comparing bytes.
-///
-/// The KEM identifier enters `info` and therefore key derivation. Otherwise §3.3
-/// would promise coexistence of different mechanisms without cryptographic
-/// support: an adversary relabeling a slot with another `kem_id` would get
-/// exactly the same key. RFC 9180 addresses this with its `suite_id`, for
-/// the same reason: once multiple mechanisms exist, mixing them must be
-/// impossible rather than merely undesirable.
-///
-/// Purpose has type [`Label`], not bytes: it distinguishes slots,
-/// and a string invented outside the registry would introduce a fourth slot kind
-/// unknown to specification §3.6 and every I-12 probe.
+/// The registered [`Label`], KEM identifier, and file ID bind the derived key to
+/// the slot purpose and algorithm (`docs/format.md` §3.3, §3.6).
 pub fn slot_info(purpose: Label, kem: KemAlg, file_id: &[u8; 16]) -> Vec<u8> {
     let purpose = purpose.as_bytes();
     let mut info = Vec::with_capacity(purpose.len().saturating_add(17));
@@ -124,21 +87,7 @@ pub fn slot_info(purpose: Label, kem: KemAlg, file_id: &[u8; 16]) -> Vec<u8> {
 /// info = "CC/v1/a-to-device" ‖ u8(kem_id) ‖ file_id(16) ‖ device_fpr(32) ‖ u64be(seq)
 /// ```
 ///
-/// # Why in the core although this is a server message
-///
-/// For the same reason as [`slot_info`]: TWO parties assemble the bytes, the server
-/// sealing the share and the device unwrapping it. Before the move, this function
-/// was copied verbatim in `cc-authority` and `cc-cli`; each copy
-/// explained why duplication was acceptable: the client cannot depend on the server.
-/// The argument remains valid; the conclusion was wrong: a shared dependency
-/// belongs in the CORE both parties depend on, not in a second copy
-/// of normative bytes.
-///
-/// The cost of diverging copies is precise: different `info` yields a different key,
-/// appearing as "share does not unwrap", a cryptographic failure where
-/// there is none.
-///
-/// The lease sequence uses `u64be`, not `u64le`: K11's vector freezes the order.
+/// Both parties use this helper. The sequence's big-endian encoding is frozen.
 #[must_use]
 pub fn a_to_device_info(
     kem: KemAlg,
@@ -264,6 +213,11 @@ pub fn seal<R: CryptoRng + ?Sized>(
     plaintext: &[u8],
     rng: &mut R,
 ) -> Result<SealedBlob, CryptoError> {
+    // K10 связывает байты ключа, а получатель восстанавливает каноническую
+    // координату. Алиас с тем же DH дал бы конверт, который не откроется.
+    if !canonical_x25519_public(recipient_public) {
+        return Err(CryptoError::BadKey);
+    }
     // Эфемерная пара на каждый вызов даёт уникальность ключа AEAD.
     let mut eph_bytes = Zeroizing::new([0u8; SHARED_LEN]);
     rng.fill_bytes(eph_bytes.as_mut_slice());
@@ -313,6 +267,10 @@ pub fn seal_p256<R: CryptoRng + ?Sized>(
     plaintext: &[u8],
     rng: &mut R,
 ) -> Result<SealedBlob, CryptoError> {
+    // K10 связывает байты; public_key() получателя возвращает несжатую точку.
+    if recipient_public.len() != 65 || recipient_public.first() != Some(&0x04) {
+        return Err(CryptoError::BadLength);
+    }
     use crate::agreement::KeyAgreement as _;
 
     let eph = crate::agreement::P256Agreement::generate(rng);
@@ -359,6 +317,19 @@ fn seal_core(
         .map_err(|_| CryptoError::BadLength)?;
 
     Ok(SealedBlob { enc: eph_public.to_vec(), nonce, ct })
+}
+
+// Открытая little-endian координата должна быть меньше p = 2^255 - 19.
+// Это ограничение Seal; низкоуровневый X25519 по-прежнему принимает RFC7748 aliases.
+fn canonical_x25519_public(public: &[u8; PUBLIC_KEY_LEN]) -> bool {
+    let mut modulus = [0xff; PUBLIC_KEY_LEN];
+    if let Some(first) = modulus.first_mut() {
+        *first = 0xed;
+    }
+    if let Some(last) = modulus.last_mut() {
+        *last = 0x7f;
+    }
+    public.iter().rev().cmp(modulus.iter().rev()).is_lt()
 }
 
 /// Seal a slot using the X-Wing HYBRID, `kem_id = 4`.

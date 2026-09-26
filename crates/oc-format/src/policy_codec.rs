@@ -1,29 +1,10 @@
-//! Policy encoding.
+// SPDX-License-Identifier: MPL-2.0
+//! Policy encoding with deny-by-default semantics.
 //!
-//! The rule governing this entire module: **a reader encountering something unknown
-//! denies**. An action with an unknown tag is neither ignored nor allowed:
-//! it enters [`Policy::unknown_actions`], making the file less accessible, not
-//! more. Thus any action added in a future version
-//! (`ai_ingest`, `ocr`, `forward`) is also denied by old clients,
-//! without changing them at all.
-//!
-//! The opposite behavior, "unknown field means absent means allowed", is
-//! the classic way to bypass policy simply by presenting it to an older client.
-//!
-//! The same rule requires [`encode`] to write unknown actions
-//! back onto the wire: otherwise a client that does not understand them erases them
-//! through its own re-encoding, and the next reader receives a policy appearing
-//! fully understood. Then "present to an older client" becomes
-//! "pass the file THROUGH an older client": the same bypass in two steps.
-//!
-//! The rule also applies to an ABSENT field, not just an unknown
-//! tag (§4: "an absent field means denial"). The danger is that a
-//! restriction's "zero" value usually means "no restriction": `false` for
-//! an obligation removes it; `None` for a limit removes the limit. Therefore
-//! an absent field is NEVER read as the default value from
-//! `Default`: it either causes a parse failure or takes the strictest
-//! meaningful value. Each field's choice and rationale are in the
-//! documentation for [`decode`].
+//! Unknown actions enter [`Policy::unknown_actions`] and survive re-encoding;
+//! otherwise passing a file through an older client could erase restrictions.
+//! Missing fields either fail parsing or take a restrictive value, as documented
+//! by [`decode`]. A general `Default` would silently remove some restrictions.
 
 use crate::tlv::{TlvReader, TlvWriter};
 use crate::FormatError;
@@ -119,38 +100,13 @@ pub const FIRST_ACTION_BINDING_VERSION: u16 = 4;
 pub fn encode(version: u16, policy: &Policy) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
 
-    // Действия пишутся все шесть, включая запрещённые. Писать только разрешения
-    // было бы короче, но тогда «действие запрещено» и «поле потеряно при
-    // повреждении» стали бы неразличимы.
-    //
-    // Вместе с ними пишутся действия, которых ЭТОТ клиент не знает. Раньше их
-    // писать было нечем: [`decode`] честно складывал их теги в
-    // [`Policy::unknown_actions`], а сюда они не доезжали — и круг
-    // decode → encode стирал сам факт «правила поняты не целиком». Политика,
-    // прошедшая через клиента постарше, становилась слабее, чем её написал
-    // автор: тег исчезал, следующий читатель видел полностью понятую политику,
-    // и `oc_policy::evaluate` пропускал то, что обязан был запретить. Прогнать
-    // файл через старую версию — приём слишком дешёвый, чтобы оставлять его
-    // работающим.
-    //
-    // Теги внутри ACTIONS обязаны строго возрастать, а неизвестный тег может
-    // оказаться где угодно среди известных (тег 0 или 7 так же законен, как
-    // 999), поэтому известные и неизвестные сливаются в одну упорядоченную по
-    // тегу карту, а не дописываются в конец: дописав, мы получили бы
-    // `FieldsOutOfOrder` на первом же теге меньше шести.
+    // Записываем запреты и неизвестные действия, чтобы повторное кодирование
+    // старым клиентом не стирало ограничения. Общая упорядоченная карта сохраняет
+    // строгое возрастание тегов, даже если неизвестный тег меньше известного.
     let mut actions_by_tag: BTreeMap<u16, u8> = BTreeMap::new();
 
-    // Значением неизвестного действия пишется ЗАПРЕТ. Клиент не понял, что это
-    // за действие, и потому не вправе от имени автора утверждать, что тот его
-    // разрешил: пиши мы сюда `RULE_ALLOW`, противнику хватило бы прогнать
-    // запрещающую политику через старого клиента, чтобы получить разрешение —
-    // то есть та же брешь, только с другой стороны. Обратная потеря (автор
-    // разрешил, записан запрет) идёт в строгую сторону: доступа она не
-    // добавляет, а тег на месте, поэтому новый клиент видит, что действие
-    // упомянуто. Сохранить и байт разрешения сегодня негде —
-    // `Policy::unknown_actions` хранит только тег; расширять её ради
-    // послабления, которого никто не проверял, было бы обменом безопасности на
-    // удобство.
+    // Для неизвестного действия сохраняем тег и пишем запрет. Исходный байт
+    // правила не хранится в `unknown_actions`; восстановить разрешение нельзя.
     for unknown in &policy.unknown_actions {
         let _ = actions_by_tag.insert(*unknown, RULE_DENY);
     }
@@ -271,56 +227,16 @@ fn encode_binding(binding: Binding) -> u8 {
     }
 }
 
-/// Parse a policy.
+/// Parse a policy without weakening missing rules (`docs/format.md` §4).
 ///
-/// Total. An absent field is NEVER read as a default value:
-/// silent substitution would turn a damaged or truncated file into one with
-/// different and weaker rules, while §4 requires absence
-/// to move toward denial.
+/// Missing `ACTIONS`, `VALIDITY`, `NETWORK`, or `MIN_BINDING` returns
+/// [`FormatError::MissingField`]. An individual missing action remains denied.
+/// Missing `WATERMARK` requires a watermark. Missing `MAX_OPENS` permits one open;
+/// an explicitly present empty field instead means the author set no limit.
+/// [`encode`] always writes that field, preserving the distinction.
 ///
-/// Each field's absence is analyzed separately: there is no universal
-/// answer, and the "obvious" answer is wrong for half the fields.
-///
-/// **Rule** fields. Four fields present since the format's first day; a file missing
-/// any is not a strict file but one whose rules did not reach us.
-/// Opening it as valid would hide corruption or tampering from the user,
-/// so absence of any produces [`FormatError::MissingField`]:
-///
-/// * `ACTIONS`: otherwise the action set would be empty, and the file would "open" without
-///   allowing anything: the user would see a malfunction rather than an honest
-///   rejection. (An INDIVIDUAL action missing INSIDE the field is different:
-///   that means denial, based on `Policy::deny_all`.)
-/// * `VALIDITY`: "no validity period" would become "forever", the weakest value.
-/// * `NETWORK`: "no network requirement" would become "offline always permitted".
-/// * `MIN_BINDING`: an absence would become `Software`, the weakest binding.
-///
-/// **Modifier** fields applied over rules already read. Their absence does not prevent
-/// understanding what the author allowed, so rejecting opening has a cost without benefit:
-/// it would break every file written by a version predating the field,
-/// for protection also achieved by strict interpretation. Here absence means
-/// the strictest MEANINGFUL value:
-///
-/// * `WATERMARK`: a watermark is required. This was the finding: default `false` silently
-///   removed an author-imposed obligation merely by cutting the field out.
-///   The reverse mistake is impossible: an extra watermark does not break the file.
-/// * `MAX_OPENS`: `OPENS_WHEN_THE_FIELD_IS_ABSENT`, meaning one open.
-///   This deserves explanation because the reasoning is not obvious. "The author set
-///   no limit" is a legitimate policy state; the reader may not invent a number
-///   for the author. In that sense, no limit is indeed not
-///   a relaxation. But precisely for that reason, "no limit" must be WRITTEN:
-///   [`encode`] always writes the field, encoding `None` as an empty value. That
-///   leaves exactly two cases. Field present and empty: the author's intent; read `None`.
-///   Field entirely absent: it was cut out, lost, or a third-party implementation
-///   did not know how to write it. We know NOTHING of the author's intent, and reading
-///   that ignorance as "open as often as you want" presents the weakest
-///   possible value as author-signed. Zero ("never open")
-///   is unsuitable: it turns a removed field into an unopenable file,
-///   giving the attacker a cheap denial of service. One is the boundary between
-///   these errors: the recipient can open the file once, and the difference from
-///   the author's intent becomes immediately visible rather than silent.
-///
-/// The test `no_absent_field_ever_makes_the_policy_weaker` verifies that
-/// no combination of missing fields weakens the policy.
+/// `no_absent_field_ever_makes_the_policy_weaker` exercises combinations of omitted
+/// fields. These rules are field-specific; using `Default` would relax some of them.
 pub fn decode(version: u16, bytes: &[u8]) -> Result<Policy, FormatError> {
     let mut reader = TlvReader::new(bytes);
     let mut policy = Policy::deny_all();

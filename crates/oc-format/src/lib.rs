@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // Арифметика длин и смещений — это и есть границы формата, поэтому здесь она
 // поднята с `warn` (уровень workspace) до `deny`. Атрибутом крейта, а не строкой
 // в `Cargo.toml`: `[lints] workspace = true` не смешивается с локальными
@@ -10,55 +11,14 @@
 
 //! Parsing and assembling the `.cc` container.
 //!
-//! The crate slices bytes and computes offsets. It has no **I/O, clocks, or
-//! random number generator**, which is why it can be tested with pure
-//! data and built for `wasm32`.
+//! The host supplies bytes; this crate performs no I/O, clock reads, or random
+//! generation. Authentication uses original byte slices, never reserialization
+//! (`docs/format.md` §5). [`Prologue::split`] checks structural boundaries, and
+//! [`verify::verify_and_parse`] verifies the header and reports signer trust.
 //!
-//! The boundary is precise because the previous wording ("knows nothing of
-//! cryptography...") contradicted `Cargo.toml`: the crate depends on `oc-crypto` and
-//! `oc-policy` **for types**: algorithm identifiers, policy structure, and key
-//! types. This dependency is deliberate: otherwise parsing would return raw `u8` values
-//! instead of validated enums, and checking "can this build execute the declared
-//! algorithm" would move to callers and be repeated in each. What
-//! the crate truly does not do is cryptographic operations: it does not
-//! encrypt, sign, or derive keys.
-//!
-//! Everything it returns consists of borrowed slices of the original buffer, because
-//! signatures are verified over raw bytes rather than the result of
-//! reserialization (see `docs/format.md`, section 5).
-//!
-//! The entry point is [`Prologue::split`]. It is total: every buffer either parses
-//! or yields an error, but never panics.
-//!
-//! # What does NOT live here: the product protocol
-//!
-//! Documents exchanged between client, server, and witness: activation,
-//! author orders, file status, access requests, leases, revocations,
-//! attestation, journal, catalog, attribute rules, administrative operations, and
-//! replication were moved to `oc-protocol` by decision R-2 (`docs/plan.md`,
-//! "D-core-freeze"). This was a MOVE: wire bytes did not change.
-//!
-//! The boundary follows the rate of change, the only argument that
-//! sustains it. The container format FREEZES: once the first file goes outside,
-//! every header byte is promised forever and can change only through a new
-//! format version and a recorded decision (I-14). The product protocol
-//! GROWS with the server: a new request type appears when its mechanism
-//! appears. While both kinds lived in one crate, they were indistinguishable
-//! from outside, and the promise "this crate is frozen and open" also applied to
-//! eight and a half thousand lines changing every week.
-//!
-//! There is one dependency direction: `oc-protocol` → `oc-format`. No reverse edge:
-//! no container parser calls any protocol document. [`FormatError`] remains
-//! shared: decision R-2 did not require splitting the error type, and
-//! several variants (`UnsupportedLeaseVersion` and neighbors) now
-//! represent purely protocol events.
-//!
-//! Splitting was evaluated on 2026-09-20 and REJECTED: figures and rationale are in the docs for
-//! [`FormatError::BadHeaderSignature`]. Briefly, three variants are purely protocol-related:
-//! `UnsupportedLeaseVersion`, `BadNoteChar`, and `NotUtf8`. None is returned
-//! internally by `oc-format`, but a fourth, `BadHeaderSignature`, is
-//! inherently shared and cannot move without changing the error type across
-//! `oc-protocol` and affecting `cc-cli` denial messages and exit codes.
+//! Client/server documents live in `oc-protocol`, which depends on this crate.
+//! [`FormatError`] is shared with those codecs, so some variants describe protocol
+//! errors rather than container errors.
 
 pub mod content;
 pub mod edit;
@@ -247,32 +207,11 @@ pub enum FormatError {
     /// key holder, or moved from another file. Details are deliberately absent:
     /// the attacker has no need to know precisely which check failed.
     BadContentMac,
-    /// Header signature mismatch.
+    /// Header or signed-document signature mismatch.
     ///
-    /// Distinct from [`FormatError::BadContentMac`] although both mean
-    /// "authenticity not established": the header and mutable region are authenticated
-    /// by different keys and parties, and the user needs
-    /// different explanations. "The file was not signed by the expected signer" and "the file was edited
-    /// by someone other than the content key holder" are different events requiring different responses.
-    ///
-    /// # The name is BROADER than the meaning, deliberately acknowledged
-    ///
-    /// `oc-protocol` returns this same variant when a signature on ITS OWN
-    /// document fails: a lease, order, revocation, replication nudge,
-    /// or administrative operation, none of which has a header. The name dates from
-    /// when all these documents lived in `oc-format` alongside the header.
-    ///
-    /// Evaluated on 2026-09-20 and left unchanged. Introducing
-    /// `oc_protocol::ProtocolError::BadSignature` would change the error type
-    /// of 108 public `oc-protocol` functions (672 references to `FormatError`
-    /// within the crate) and rewrite error handling in every consumer currently
-    /// matching this variant: `cc_cli::lease` (→ `BadSignature`),
-    /// `cc_cli::binding` (→ `NotAnchored`), `cc_viewer::session` (→ session
-    /// erasure), and `cc_cli::exit`. The first three define denial TEXT for the user,
-    /// the fourth the exit CODE, and both are promised to stay unchanged. Cost: edits to hundreds
-    /// of places for naming precision; benefit: naming precision. A half-finished
-    /// split is worse than a shared enum, while completing it here costs more
-    /// than explicitly acknowledged imprecision.
+    /// Shared with protocol codecs using the same verification error. Mutable-region
+    /// MAC failures use [`FormatError::BadContentMac`] because they have a different
+    /// authentication key and recovery path.
     BadHeaderSignature,
 }
 

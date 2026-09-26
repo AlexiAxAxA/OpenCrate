@@ -1,48 +1,13 @@
-//! Activation documents: device request, server grant, refusal.
+// SPDX-License-Identifier: MPL-2.0
+//! Activation documents and the shared request/response envelope.
 //!
-//! # Why separate the document from its delivery mechanism
+//! Device keys perform agreement, not signing. Authentication and proof of
+//! possession belong to the handshake (`docs/protocol.md` §9.4), not to a device
+//! signature in these documents. A claimed fingerprint alone proves no identity.
 //!
-//! Because these are different things, and confusing them is costly. A document is a commitment;
-//! a socket carries bytes. The lease already works this way (`signature ‖ body`), so it
-//! survives any transport change: it does not know whether it arrived by network, file,
-//! or USB drive.
-//!
-//! Had we done the reverse — wire first, document second — the request's shape would
-//! have been dictated by convenient transmission, and would have to change with
-//! the transport. The decision is recorded in `docs/protocol.md` §9.
-//!
-//! # What these documents do NOT carry
-//!
-//! **A device signature.** There is none to obtain: the device key is for agreement,
-//! cannot sign, and `cc-keystore` has no signing function.
-//! Proof of possession uses sealing: the server sends a challenge,
-//! the device returns an echo (`docs/protocol.md` §9.4) — a SEPARATE step,
-//! not yet present here.
-//!
-//! The direct consequence must be stated explicitly: **the activation
-//! request is currently authenticated by nobody.** While a human brings it,
-//! that does not matter. Once it arrives from a socket, lack of proof of
-//! possession lets someone consume another's limits merely by presenting their
-//! fingerprint — so network activation is exposed ONLY together with §9.4.
-//!
-//! # The same parsing rules as the rest of the format
-//!
-//! Tags strictly increase (I-7), lengths must exactly match their types
-//! (I-8), and trailing bytes after the parsed document are rejected. This parses hostile
-//! input: messages come from another party, and leniency
-//! would mean the parties interpret the layout differently.
-//!
-//! # The envelope also carries ACCESS REQUEST documents
-//!
-//! ALL message kinds live here — both activation and access requests
-//! (`crate::access`). One socket must have one kind registry: if we introduced
-//! another envelope, the same first byte would mean different things depending
-//! on whose parser read it — yet this very byte chooses the parser, meaning
-//! the decision precedes knowing whose document
-//! has arrived.
-//!
-//! Access-request documents themselves remain in `crate::access`: the envelope knows
-//! their names, not their layouts.
+//! The envelope's kind registry also covers access requests; their layouts live
+//! in [`crate::access`]. Codecs enforce field order, exact lengths, and complete
+//! consumption of the input independently of transport.
 
 use oc_format::tlv::{TlvReader, TlvWriter};
 use oc_format::{FormatError, MAX_HEADER_LEN};

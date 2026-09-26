@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Editing: edit key certificate, editor signature, session head, and
 //! revision verification (`docs/format.md`, "EDITING IS EXECUTABLE", decision 2026-09-17).
 //!

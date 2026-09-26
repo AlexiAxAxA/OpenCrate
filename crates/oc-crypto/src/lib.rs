@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Cryptographic core of the `.cc` container.
 //!
 //! A crate-wide, lint-enforced rule: **no I/O,

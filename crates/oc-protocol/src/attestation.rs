@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Device key attestation documents on the wire (B6b, `docs/protocol.md`
 //! §9.11.1).
 //!

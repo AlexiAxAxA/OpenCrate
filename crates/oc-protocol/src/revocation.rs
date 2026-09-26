@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Revocation: a server-signed "file revoked" document.
 //!
 //! # Why a document when revocation already works

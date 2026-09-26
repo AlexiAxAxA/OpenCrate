@@ -1,61 +1,18 @@
-//! Packing engine: everything that DECIDES, nothing that processes content bytes.
+// SPDX-License-Identifier: MPL-2.0
+//! Packing keys, recipient slots, and the container header.
 //!
-//! # Why this crate exists
-//!
-//! The product plan divides work as follows: the server decides (content
-//! key, shares, slots, header construction and hashes); the device
-//! computes (AEAD over document bytes). The boundary is established NOW
-//! so the key-holding component can later move into an enclave through a hosting change
-//! rather than a rewrite.
-//!
-//! Before this crate there was no boundary: `cc_cli::container::protect` performed
-//! both halves consecutively, making "move the engine into an enclave" meaningless:
-//! the repository contained nothing to move.
-//!
-//! # What is forbidden here and why the build checks it
-//!
-//! No I/O, clocks, or internal RNG: the RNG arrives
-//! as a parameter. This crate passes the same purity gate as `oc-format`,
-//! `oc-protocol`, `oc-crypto`, and `oc-policy`: compilation for
-//! `wasm32-unknown-unknown` and the `SystemTime` ban in `clippy.toml`.
-//!
-//! For the other four, the gate preserves deterministic tests. Here it preserves the
-//! boundary itself: an enclave cannot accept a component already dependent on
-//! the host machine. Relying on a reviewer to check every change is equivalent to
-//! not checking.
-//!
-//! # Call order and why there are two calls rather than one
+//! The host supplies randomness and processes document bytes. The engine has no
+//! I/O or clocks, and retains the CEK while releasing only the derived payload key.
 //!
 //! ```text
-//!   plan()       → secrets, payload key                     (engine)
-//!   seal_chunks  → ciphertext, tree root, length            (device)
-//!   assemble()   → header, signature transcript, descriptor (engine)
-//!   sign+write   → author signature and file write          (device)
+//! plan()      -> session and payload key
+//! seal_chunks -> ciphertext, length, and tree root (host)
+//! assemble()  -> header and signing transcript
+//! sign+write  -> author signature and container (host)
 //! ```
 //!
-//! The middle step is `oc_crypto::stream::seal_chunks`. It belongs to crypto,
-//! not here, a substantive placement: the engine DECIDES, while that loop PROCESSES
-//! bytes and therefore belongs to the device. It moved from `cc_cli::payload` into
-//! crypto on 2026-09-09 when there were two devices: the recipient's machine plus
-//! a wasm host for other languages. A second implementation of the same loop would
-//! silently diverge from the first (`oc_crypto::stream` module documentation).
-//!
-//! No other split works: private metadata contains document LENGTH, known
-//! only to whoever processed the stream. The engine must therefore release the key, await
-//! the result, and only then assemble the header.
-//!
-//! # What the engine does not do, by decision rather than omission
-//!
-//! **It does not sign.** The AUTHOR's key signs the entire header,
-//! including slots (I-6); the engine supplies the transcript and the device
-//! applies the signature. Literally following the product plan, "the server signs
-//! the policy", would require a second header signature and thus a new format
-//! version during a split that must preserve bytes.
-//!
-//! **The engine does not release CEK.** It exposes only `payload_key`, derived from
-//! CEK for the specific chunk size and algorithm. If it released CEK, the enclave
-//! would prove image integrity and nothing more: the key unwrapping everything
-//! else would reside outside.
+//! Assembly follows streaming because private metadata includes the final length.
+//! The host signs the entire header with the author's key; the engine does not sign.
 
 use rand_core::CryptoRng;
 use oc_crypto::secret::{Cek, ClaimSecret, PayloadKey, SecretA, SecretB};

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Secret types.
 //!
 //! Each secret has its own type rather than `[u8; 32]`, for two reasons. First:

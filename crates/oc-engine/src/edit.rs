@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Edit writer: frames, tree, mutable region (`docs/format.md`,
 //! "EDITING IS EXECUTABLE", item G).
 //!

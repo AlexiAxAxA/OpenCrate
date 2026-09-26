@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Key agreement behind a trait: X25519 in software, P-256 in software or in a TPM.
 //!
 //! This module exists for one property: the private key may never leave

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! File standing on the server: what the author sees when asking "what is set there?".
 //!
 //! # Why a separate document

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Secrets from dependency crates wipe on destruction too, not just ours.
 //!
 //! `seal::open` COPIES the long-term device secret into

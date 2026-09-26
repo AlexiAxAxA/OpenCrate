@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Lease version 2: the server sends its OWN profile to the recipient under its signature.
 //!
 //! Checks three properties motivating the field, not merely "the field survived":

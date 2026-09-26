@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! File rule based on holder attributes: bytes (F-27, B4b).
 //!
 //! # Why the rule lives here rather than only on the server
