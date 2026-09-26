@@ -146,7 +146,7 @@
     "README.md": "2c77e6daec8d8eb62a3d42a7ae407e15b3eca6698f745dcbd4446b16f41154a1",
     "SECURITY.md": "839c254e62ea1cfa4628520ca6d1e145c5fc1f6b109ab4f2f9c711b3db26d930",
     "clippy.toml": "447c1c2ae9dc0dfef9bae35ca82cb04f08c09bf7943d3835823138b546c03621",
-    "crates/oc-crypto/Cargo.toml": "63a4268cf85daca35746b15080aee8b51fd703e59ae3a08ed76cf479f7970804",
+    "crates/oc-crypto/Cargo.toml": "811cc93fb4f8bfbc3f844ef6e09c201dd4ea941907f8ef3399281fae21dd4a1e",
     "crates/oc-crypto/LICENSE": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5",
     "crates/oc-crypto/README.md": "9384c17fef50f17bbf95132c02b63c2a412c7515842f4f9b3d37a4539e1b12cf",
     "crates/oc-crypto/src/aead.rs": "7ec9b62343d04b441965a598309122593e4b910e193346acfcfa363cdece4207",
