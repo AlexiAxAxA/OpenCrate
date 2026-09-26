@@ -1,24 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
-//! SOFTWARE RSA-PSS-SHA256 signer: ONLY for probes.
+//! Deterministic RSA-PSS signer for tests and probes.
 //!
-//! # Why it exists at all
-//!
-//! The production editing key resides in a TPM (`docs/format.md`, "EDITING IS EXECUTABLE",
-//! item G), and only the TPM signs. But every run must test editing verification,
-//! including Linux containers without TPMs, while PSS signatures are randomized: the live-TPM golden
-//! vector (`tests/kat/rsa_pss.kat`) covers one message, whereas
-//! probes need signatures over ARBITRARY regions. Hence a signer with HARDCODED
-//! test keys and a salt parameter: the same salt gives the same
-//! signature, making `tests/kat/edit.kat` reproducible.
-//!
-//! # Why it is permitted
-//!
-//! This module exists only under `cfg(test)` or feature `test-signer`, enabled
-//! only by `[dev-dependencies]` and testbed builds
-//! (guarded in `cc-cli/tests/repository_hygiene.rs`). The private operation here
-//! is NOT constant-time, and keys are public in source, precisely why no
-//! production path reaches it. The keys were generated for this file
-//! (2026-09-17, Miller–Rabin primes, 40 rounds) and live nowhere else.
+//! Embedded keys are public test fixtures, not real identities. A supplied salt
+//! makes signatures reproducible beyond the frozen live-TPM vector.
+//! Available under `cfg(test)` or `test-signer`; the private operation is not
+//! constant-time and must not be used with production keys.
 
 use crate::CryptoError;
 use crate::rsa::MODULUS_LEN;

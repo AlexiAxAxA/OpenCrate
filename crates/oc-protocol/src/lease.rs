@@ -180,21 +180,11 @@ pub fn encode(lease: &Lease) -> Result<Vec<u8>, FormatError> {
     Ok(w.finish().to_vec())
 }
 
-/// Parse a lease body. **The result is NOT VERIFIED.**
+/// Parse a lease body without verifying its signature.
 ///
-/// No signature is checked here, so the returned [`Lease`] is not
-/// evidence of anything: it is exactly as truthful as
-/// the bytes supplied to it. Access decisions must not be based
-/// on such a value.
-///
-/// # What to call instead
-///
-/// For EXTERNAL bytes, use [`verify_signed`]: it verifies the signature over the raw body
-/// BEFORE parsing, enforcing the order that callers otherwise must remember
-/// and might forget. This function remains public not to provide a choice of
-/// convenience, but for one legitimate case: parsing one's OWN issuance,
-/// where the reader is the same party that signed it and has nothing to verify
-/// (`cc-authority`, replay of a stored response).
+/// The result is untrusted and must not authorize access. For external
+/// `signature ‖ body` bytes, use [`verify_signed`]. This parser also supports
+/// replaying one's own stored issuance.
 pub fn decode(body: &[u8]) -> Result<Lease, FormatError> {
     let mut reader = TlvReader::new(body);
 
@@ -338,29 +328,15 @@ pub fn verify(
     oc_crypto::sign::verify(lease_verify_key, &signing_transcript(body), signature)
 }
 
-/// Verify the signature, then parse: in this order only.
+/// Verify the signature over raw body bytes, then parse the lease.
 ///
-/// `bytes` is the complete document: `signature(64) ‖ body`.
-///
-/// # Why a combinator while both halves remain available
-///
-/// Because the CALLER was responsible for "signature → parsing", and the product
-/// had to wrap these two calls itself (`cc_cli::lease`), although
-/// neighboring documents, [`crate::revocation::verify_signed`] and
-/// [`crate::order::verify_signed`], had that wrapper from the start. Parsing
-/// unauthenticated bytes is itself an oracle: distinguishable error codes report on
-/// something nobody signed (I-5 for documents). A single call prevents mistakes
-/// in the ordering.
-///
-/// The signature is checked over the RAW body bytes, not a reconstructed structure:
-/// the module rule that eliminates a class of canonicalization errors.
-///
-/// The caller checks that `file_id` and the policy hash match the container: there is
-/// no container here.
+/// `bytes` is `signature(64) ‖ body`. Authentication precedes parsing to avoid
+/// detailed errors for unauthenticated data. The caller must separately check
+/// `file_id` and policy hash against the container.
 ///
 /// # Errors
-/// [`FormatError::BadHeaderSignature`] for a short document or a
-/// failed signature; otherwise parsing errors, as in [`decode`].
+/// [`FormatError::BadHeaderSignature`] for a short document or failed
+/// signature; otherwise the parsing errors of [`decode`].
 pub fn verify_signed(bytes: &[u8], lease_verify_key: &[u8; 32]) -> Result<Lease, FormatError> {
     let (signature, body) =
         bytes.split_at_checked(SIGNATURE_LEN).ok_or(FormatError::BadHeaderSignature)?;

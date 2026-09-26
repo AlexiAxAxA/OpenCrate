@@ -722,15 +722,10 @@ fn components(path: &str) -> impl Iterator<Item = &str> {
     path.split('/').filter(|part| !part.is_empty())
 }
 
-/// Tree path: relative, no `..`, no `.`, no empty components.
+/// Validate a relative tree path with no `.`, `..` or empty components.
 ///
-/// # Why the character set is so narrow
-///
-/// Because this path reaches the filesystem, and whatever it cannot express
-/// the door can never do. There is no fallback: a path the
-/// grant cannot encode is a path on which no action will execute.
-/// Forbidding backslash and colon removes Windows drives, NTFS streams and
-/// UNC paths at once; forbidding `..` prevents escaping the tree.
+/// Reject backslashes and colons to exclude Windows drives, UNC paths and NTFS
+/// streams. These lexical checks are part of the door's filesystem boundary.
 fn check_tree_path(text: &str, tag: u16) -> Result<(), FormatError> {
     if text.is_empty() || text.len() > MAX_ACTION_PATH {
         return Err(FormatError::BadFieldLength { tag, len: text.len() });

@@ -1,18 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
-// Файл-проба состязательной проверки безопасности. Линтерные запреты рабочего
-// кода к пробам не применяются — проба вправе делать то, чего продукт делать не
-// должен.
-//
-// ИСТОРИЯ. Проба была выведена из сборки переименованием в `.rs.txt` и лежала в
-// docs/security-review, то есть не компилировалась и не исполнялась. При этом
-// именно эту конструкцию docs/format.md §3.3 называет «первым кандидатом на
-// внешнюю проверку». Тест, вынесенный из дерева сборки, — это удалённый тест с
-// видом сохранённого. Возвращена пунктом Д-13.
-//
-// Две проверки при возврате оказались красными, и обе переписаны на то, что есть
-// на самом деле, а не на то, чего хотел автор прежней редакции: расхождение с
-// RFC 9180 (осознанное, см. §3.3) и повтор потока ключей при полном повторе
-// состояния генератора (известное ограничение, решение — С-13 в docs/plan.md).
+// Seal construction probes with adversarial inputs.
+// The construction follows its own specification, rather than RFC 9180's
+// byte schedule. Rollback checks cover repeated RNG state with different plaintexts.
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -158,22 +147,10 @@ fn every_known_low_order_point_is_refused_both_on_seal_and_on_open() {
 
 #[test]
 fn no_info_can_make_two_slot_purposes_derive_the_same_key() {
-    // Проверяемых пар здесь две, и обе живы.
-    //
-    // Первая — исходная: `"CC/v1/seal-key"‖info1 == "CC/v1/seal-nonce"‖info2`
-    // означало бы равенство ключа и nonce. Метка `CC/v1/seal-nonce` НА МЕСТЕ
-    // (`oc_crypto::label::SEAL_NONCE`, format.md §3.6, строка K17): nonce
-    // читателем не вычисляется — он лежит в записи слота готовым, — но
-    // отправитель его выводит, чтобы значение перестало быть чистой функцией
-    // состояния генератора (решение С-13). Метка, которую кто-то выводит, — это
-    // метка, которую надо держать беспрефиксной.
-    //
-    // Вторая пара — та же опасность, переехавшая на назначения слотов. `info`
-    // приклеивается к метке БЕЗ разделителя (`expand_info`), а
-    // сам `info` — это `метка назначения слота ‖ kem_id ‖ file_id`. Значит
-    // столкнуть можно уже не ключ с nonce, а назначение слота с назначением
-    // другого слота: блоб, адресованный серверу, открылся бы как блоб,
-    // адресованный устройству автора. Условие ровно то же — беспрефиксность.
+    // Both derivation labels and slot-purpose labels must be prefix-free:
+    // `expand_info` concatenates label and info without a delimiter.
+    // The sender still derives `SEAL_NONCE`, although the receiver reads the
+    // stored nonce. Slot-purpose labels also distinguish server and author blobs.
     assert!(
         !label::SEAL_NONCE.as_bytes().starts_with(label::SEAL_KEY.as_bytes()),
         "метка nonce — расширение метки ключа: подобрав хвост info, отправитель \
@@ -331,20 +308,11 @@ fn rfc9180_derivation(
     (key, nonce)
 }
 
-/// The sealing construction DELIBERATELY DIFFERS from RFC 9180.
+/// Record the specified Seal construction's divergence from RFC 9180.
 ///
-/// `docs/format.md` §3.3 says "a hand-written construction **following** RFC 9180,
-/// not off-the-shelf HPKE", giving the reason there: NCrypt with Microsoft Platform
-/// Crypto Provider lacks X25519, so TPM agreement uses P-256
-/// over the raw `NCryptSecretAgreement` result, and such a key cannot be passed to an
-/// existing HPKE crate.
-///
-/// An earlier version of this test demanded byte-for-byte RFC 9180 agreement and
-/// failed. That requirement was its own invention: the specification never promised agreement.
-/// The test was rewritten to do something valuable: record divergence
-/// as fact and retain a reference RFC 9180 implementation showing
-/// exactly where it occurs. Suddenly matching values would mean the
-/// construction had silently been rewritten as HPKE, which must be noticed.
+/// The reference implementation identifies the schedule difference; byte-for-byte
+/// HPKE agreement is not this format's contract. Raw TPM P-256 agreement is supplied
+/// through the provider rather than an off-the-shelf HPKE key type.
 #[test]
 fn the_sealing_construction_deliberately_diverges_from_rfc9180() {
     let mut rng = SeedRng::seeded(33);
@@ -395,22 +363,11 @@ fn the_sealing_construction_deliberately_diverges_from_rfc9180() {
 // 5. Nonce выводится из того же prk, что и ключ
 // ---------------------------------------------------------------------------
 
-/// A full RNG-state repeat does not expose plaintexts (C-13).
+/// Repeat the RNG state with different secrets.
 ///
-/// A realistic, ordinary scenario: virtual-machine snapshot rollback, disk-image
-/// cloning, and backup restoration return the RNG to
-/// its previous state. Previously this repeated BOTH ephemeral pair AND nonce, taken
-/// consecutively from one RNG, repeating the entire keystream and
-/// making two ciphertexts reveal `ct₁ ⊕ ct₂ = pt₁ ⊕ pt₂`. These plaintexts
-/// are 2-of-2 secret shares, exposing both shares, KEK, and the content
-/// key without a single private key.
-///
-/// Random bytes now seed a derivation that also includes plaintext,
-/// so repeated RNG state with **different** secrets produces different nonces.
-/// The ephemeral pair still repeats, as it must, since it is computed
-/// before plaintext. Hence this check's structure: require
-/// the premise (the RNG repeated) to hold while XOR still
-/// fails to yield plaintext.
+/// The ephemeral key repeats, while plaintext-dependent nonce hedging changes the
+/// nonce. Check that ciphertext XOR does not equal plaintext XOR. This bounded
+/// case does not establish safety for every rollback or repeated-input scenario.
 #[test]
 fn a_full_generator_repeat_no_longer_reuses_the_keystream() {
     let pt_one = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";

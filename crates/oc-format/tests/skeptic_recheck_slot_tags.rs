@@ -120,49 +120,11 @@ fn an_unknown_critical_tag_inside_a_key_slot_is_not_dropped_in_silence() {
     }
 }
 
-/// A slot using a mechanism whose shape version 1 does not define must be skipped,
-/// not reject the entire container.
+/// Skip P-256 slots in version 1, whose slot-shape table does not define them.
 ///
-/// This is item R-3, concerning the §3.3 promise: "a slot with a known kind but unknown
-/// `kem_id` is skipped rather than rejecting the file". It was impossible to satisfy
-/// for a subtle reason. The fallback "unknown mechanism → `Unknown`"
-/// came AFTER the field parsing loop, while `enc` length was checked INSIDE it,
-/// unconditionally requiring 32 bytes; the fallback was never reached. Worse,
-/// a second issue made it unreachable: `KemAlg::from_u8` recognizes 2 and 3,
-/// so P-256 never counted as an "unknown mechanism" at all.
-///
-/// A P-256 public key takes 33 or 65 bytes, neither fitting in 32.
-/// A P-256 slot was therefore not "unknown" but **impossible**: any such
-/// container was entirely rejected even beside our own,
-/// fully openable slot. F-6 planned precisely P-256 through a TPM.
-///
-/// ## This test must break, and its tempting fix is wrong
-///
-/// It depends on version 1's P-256 shape being UNDEFINED. F-6 defines it: the
-/// `spikes/tpm-ecdh` spike showed PCP exports only uncompressed public keys, so
-/// the wire will carry `0x04 ‖ X ‖ Y`, precisely the 65 bytes constructed below. From then on
-/// the slot will stop being `Unknown`, become parseable, and fail this test.
-///
-/// The failure will be CORRECT; the obvious fix will not. Changing the expectation to
-/// `Known` turns a R-3 test into a test that P-256 works;
-/// the "unknown mechanism is skipped rather than breaking the file" branch loses all
-/// coverage, and the next regression of the same kind passes silently.
-///
-/// ## How this was actually resolved
-///
-/// The prescription above, "move to `kem_id = 3`", was correct when shape
-/// depended only on mechanism. Version 2 made it a function of the PAIR (version,
-/// mechanism), opening a better option: test both claims rather than
-/// replace one with the other.
-///
-/// This test stays about P-256 and is pinned to **version 1**, where its shape is
-/// undefined and will remain so forever: what a version cannot do is frozen
-/// as well as what it can. The R-3 claim remains verbatim, gaining the additional
-/// role of preventing retroactive semantics in version 1.
-///
-/// The "mechanism whose shape NO version defines" branch is guarded by the neighboring
-/// `kem_id = 3` test in a version 2 container, where P-256 already parses.
-/// Together they cover what either alone would cover only intermittently.
+/// Version and mechanism together determine the shape. This guards version 1
+/// semantics even though version 2 supports P-256. The neighboring RSA-OAEP test
+/// checks an undefined mechanism shape in version 2.
 #[test]
 fn a_slot_whose_kem_shape_this_version_does_not_define_is_skipped_not_fatal() {
     // Два слота: чужой (P-256 с 65-байтным `enc`) и наш. Контейнер версии 1.
@@ -293,21 +255,9 @@ fn a_claim_slot_cannot_smuggle_bytes_in_fields_it_does_not_use() {
     }
 }
 
-/// A claim-code slot declares `kem_id = 1`, always; this concerns BYTES.
-///
-/// §2 item 5 says verbatim: "A claim-code slot (`kind = 3`) declares
-/// `kem_id = 1` **always**, with zeroed `enc` and `nonce` of length 32 and 24.
-/// Without this statement, zeroed `enc` length would depend on an unrelated default
-/// mechanism choice, silently changing `claim.cc` bytes."
-///
-/// This statement had no check, and the omission was INVISIBLE: a slot with
-/// `kem_id = 2` carries 65 zeros instead of 32; both pass the "all zero" check,
-/// and each length is valid for its own mechanism. Thus the same
-/// `claim.cc` could be issued in two byte forms, both accepted.
-/// For a format declared frozen, this is precisely the danger §2 item 5 warns about.
-///
-/// Worse, both sides accepted it: the writer produced what the reader should
-/// reject. An empirical probe found this, not code inspection.
+/// Claim slots always use `kem_id = 1`, zero `enc` of 32 bytes and zero nonce
+/// of 24 bytes. A different KEM would create another representation of the claim
+/// slot even if its encapsulation bytes were all zero.
 #[test]
 fn a_claim_slot_must_declare_the_first_mechanism() {
     let claim_with = |kem: KemAlg, enc_len: usize| {
@@ -359,21 +309,10 @@ fn a_claim_slot_must_declare_the_first_mechanism() {
     );
 }
 
-/// A mechanism whose shape NO version defines is skipped in a version 2
-/// container, where P-256 already parses.
+/// Skip an RSA-OAEP slot in version 2: its number is known but its shape is not.
 ///
-/// Companion to the test above; without it coverage would be partial. That test is pinned to
-/// version 1 and prevents retroactive semantics there; this one guards
-/// the skip branch itself, ensuring it still works in the current version rather than only the past.
-///
-/// `kem_id = 3` (RSA-OAEP) is chosen because its registry number is assigned but its shape
-/// is undefined and unplanned: `KemAlg::from_u8` recognizes it, so the
-/// "unknown number" branch cannot apply. The slot must be skipped specifically because
-/// its shape is undefined: exactly the case that once broke an entire container.
-///
-/// The `enc` length is deliberately unlike 32 or 65: RSA-OAEP encapsulation
-/// occupies hundreds of bytes; checking another mechanism's shape with our own measure
-/// is precisely what must not happen.
+/// The nonstandard `enc` length must not be checked against X25519 or P-256
+/// lengths before the undefined-shape fallback.
 #[test]
 fn a_mechanism_no_version_defines_is_still_skipped_in_version_two() {
     let mut foreign = TlvWriter::new();
@@ -401,22 +340,11 @@ fn a_mechanism_no_version_defines_is_still_skipped_in_version_two() {
     );
 }
 
-/// A compressed P-256 point is rejected by the FORMAT; that claim belongs here.
+/// Reject compressed P-256 encapsulations at the format length boundary.
 ///
-/// The check was claimed in the wrong place. An `oc-crypto` probe said "P-256 rejects
-/// compressed form" while feeding `agree` thirty-three `0x04` bytes. Rejection came
-/// from SEC1 parsing (`0x04` prefixes an UNcompressed point; neither form looks like that),
-/// not from its form. The agreement layer does not have the claimed property:
-/// `from_sec1_bytes` parses both forms, and both yield the same secret.
-///
-/// The ban lives in the exact-length table (§3.3: `enc` for `kem_id = 2` is exactly 65
-/// bytes, uncompressed SEC1 point `0x04 ‖ X ‖ Y`), upheld by I-8. The specification's
-/// reason concerns BYTES: two valid forms of one key would yield two different
-/// slot records for one recipient, hence divergent `core_hash` and signatures
-/// between two conforming implementations.
-///
-/// EXACTLY `BadFieldLength { tag: ENC }` is required: "any error" is precisely
-/// the wording that let the previous probe pass for the wrong reason.
+/// Low-level agreement accepts valid compressed SEC1 points; the wire requires
+/// 65-byte uncompressed points. Require `BadFieldLength { tag: ENC }` to prove
+/// this rejection comes from the intended check.
 #[test]
 fn a_compressed_p256_point_is_refused_by_the_exact_length_table() {
     // Слот P-256 версии 2, отличающийся от корректного ровно длиной `enc`.

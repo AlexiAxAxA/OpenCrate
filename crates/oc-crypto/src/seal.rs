@@ -1,17 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Seal secrets to a slot recipient's public key.
+//! Seal secrets to a slot recipient using the container's key schedule.
 //!
-//! The construction is Base-mode DHKEM(X25519, HKDF-SHA256) with
-//! XChaCha20-Poly1305 AEAD, following RFC 9180. An off-the-shelf HPKE crate is deliberately
-//! not used: it would pull in a second curve25519-dalek version and an RNG with
-//! incompatible traits, while the TPM path in phase 1 already requires our own
-//! key-agreement abstraction: Microsoft Platform Crypto Provider does not offer
-//! X25519, and its private key cannot be passed to external code.
-//!
-//! **This is a hand-written construction and the first candidate for external review.**
-//!
-//! Key derivation includes both public keys, ephemeral and recipient. Otherwise
-//! the same ciphertext could be bound to someone else's identity.
+//! Supports classical agreement and hybrid KEMs with HKDF-SHA256 and
+//! XChaCha20-Poly1305. Providers allow hardware-held private keys.
+//! Derivation binds the encapsulation and recipient public bytes.
+//! This custom construction remains a surface for independent cryptographic review.
 
 use crate::{CryptoError, KemAlg};
 use crate::label::Label;
@@ -104,19 +97,14 @@ pub fn a_to_device_info(
     info
 }
 
-/// K21 derivation `info`: author → requesting device (`docs/format.md`,
-/// "Access request").
+/// K21 derivation `info`: author to requesting device (format, Access request).
 ///
 /// ```text
 /// info = "CC/v1/b-to-device" ‖ u8(kem_id) ‖ file_id(16) ‖ device_fpr(32)
 /// ```
 ///
-/// There is NO lease sequence here, deliberately: share A is issued under rules
-/// and lives between issuances; share B is issued to a person once and survives any
-/// renewal. A sequence in `info` would bind it to a single lease.
-///
-/// In the core for the same reason as [`a_to_device_info`]: TWO parties assemble
-/// these bytes, the author sealing the share and the device opening it.
+/// No lease sequence: share B survives renewals, unlike per-lease share A.
+/// Both the sealing author and opening device use this encoding.
 #[must_use]
 pub fn b_to_device_info(kem: KemAlg, file_id: &[u8; 16], device_fpr: &[u8; 32]) -> Vec<u8> {
     let mut info =
@@ -128,22 +116,14 @@ pub fn b_to_device_info(kem: KemAlg, file_id: &[u8; 16], device_fpr: &[u8; 32]) 
     info
 }
 
-/// Attestation-challenge `info`: domain label and device fingerprint.
+/// Attestation-challenge `info`, shared by server and opening device.
 ///
 /// ```text
 /// info = "CC/v1/attest-nonce" ‖ device_fpr(32)
 /// ```
 ///
-/// The fingerprint enters `info`, not only AAD, preventing a challenge issued to one
-/// device from opening with another device's key when agreement keys match.
-///
-/// Unlike shares A and B, `info` contains NO mechanism. This is not an omission but
-/// the frozen handshake form: both halves of a hybrid key open
-/// the challenge consecutively, using identical `info`. Adding
-/// `kem_id` here would change wire bytes.
-///
-/// In the core for the same reason: TWO parties assemble it, the server sealing the challenge
-/// and the device opening it. This string previously had three manual constructions.
+/// The fingerprint binds the challenge to the device even if agreement keys match.
+/// The frozen handshake omits `kem_id`: hybrid halves use identical `info`.
 #[must_use]
 pub fn challenge_info(device_fpr: &[u8; 32]) -> Vec<u8> {
     let mut info = Vec::with_capacity(crate::label::ATTEST_NONCE.len().saturating_add(32));
@@ -171,22 +151,11 @@ pub struct SealedBlob {
     /// inexpressible. [`open`] checks length exactly before any
     /// cryptography: variable length in the type does not mean unchecked length.
     pub enc: Vec<u8>,
-    /// AEAD nonce.
+    /// Stored 24-byte AEAD nonce.
     ///
-    /// **Stored, not derived**: the same rule as for payload
-    /// chunks (§6.1 of the specification), for the same reason, with worse
-    /// consequences here.
-    ///
-    /// A nonce derived from the shared PRK would be entirely determined by the ephemeral pair
-    /// and would repeat with it. Repeated RNG state after virtual-machine
-    /// snapshot rollback, disk-image cloning, or backup
-    /// restoration would produce two blobs with the same key and nonce,
-    /// hence one keystream. Then `ct₁ ⊕ ct₂ = pt₁ ⊕ pt₂`, and the plaintexts
-    /// here are secret shares: `secret_A` and `secret_A‖secret_B`
-    /// reveal `secret_B`, together they reveal KEK, and KEK reveals the content key.
-    /// A full bypass without any private key. Twenty-four bytes
-    /// alongside the already stored thirty-two close this completely: the key may
-    /// repeat, but the keystream will not.
+    /// Sealing derives it from a random seed and plaintext rather than solely from
+    /// agreement. If RNG state repeats, different plaintext must still get a different
+    /// nonce; otherwise `ct₁ ⊕ ct₂ = pt₁ ⊕ pt₂` would expose the secret shares.
     pub nonce: [u8; NONCE_LEN],
     /// Ciphertext with appended tag.
     pub ct: Vec<u8>,
@@ -224,19 +193,9 @@ pub fn seal<R: CryptoRng + ?Sized>(
     let eph_sk = StaticSecret::from(*eph_bytes);
     let eph_pk = PublicKey::from(&eph_sk).to_bytes();
 
-    // Nonce хранится в блобе и **не выводится из общего секрета** — выведенный,
-    // он определялся бы эфемерной парой и совпадал бы всегда, когда совпала она.
-    //
-    // Но и просто взять его из генератора недостаточно, и это стоило отдельного
-    // решения (С-13). Эфемерная пара и nonce приходят из ОДНОГО генератора
-    // подряд, поэтому полный повтор его состояния — откат снапшота виртуальной
-    // машины, клон образа диска, восстановление из резервной копии — повторял бы
-    // оба значения разом, а с ними и поток ключей. Здесь это дороже всего:
-    // открытые тексты — доли секрета схемы 2-из-2.
-    //
-    // Поэтому случайные байты идут не в nonce, а в засев производной, куда
-    // входит ещё и открытый текст: при повторе генератора и разных секретах
-    // nonce расходятся. Подробности и границы гарантии — у `hedged_nonce`.
+    // Store a hedged nonce: random seed plus plaintext. Deriving only from agreement,
+    // or copying RNG bytes directly, would repeat the keystream after full RNG rollback.
+    // See `hedged_nonce` for the construction and its limits.
     let mut nonce_seed = Zeroizing::new([0u8; NONCE_LEN]);
     rng.fill_bytes(nonce_seed.as_mut_slice());
     let nonce = crate::kdf::hedged_nonce::<NONCE_LEN>(
@@ -350,21 +309,14 @@ fn validate_dh_public(public: &[u8], expected_len: usize) -> Result<(), CryptoEr
     Ok(())
 }
 
-/// Seal a slot using the X-Wing HYBRID, `kem_id = 4`.
+/// Seal a slot with X-Wing, `kem_id = 4`.
 ///
-/// A separate function beside [`seal`] and [`seal_p256`] for the same reason
-/// those are separate: each mechanism has its own RNG consumption order,
-/// while X25519's is frozen by golden artifacts. Here consumption is sixty-four bytes in one
-/// call for encapsulation, then twenty-four for the nonce seed.
-///
-/// The X-Wing shared secret enters the same key schedule as a DH shared secret,
-/// not as an adaptation: `derive_key` binds BOTH public values to it,
-/// the ciphertext and recipient key. X-Wing binds its own half itself (§5.3
-/// of the draft), but a second binding is free, while distinct schedules for different
-/// mechanisms would mean two key schedules instead of one.
+/// Consumes 64 bytes for encapsulation, then 24 for the nonce seed.
+/// The common key schedule binds the shared secret, KEM ciphertext and recipient
+/// public key. Rejects a noncanonical classical recipient coordinate before RNG use.
 ///
 /// # Errors
-/// Incorrect public-half length or unparseable ML-KEM key.
+/// Incorrect key length, invalid ML-KEM encoding or noncanonical classical key.
 pub fn seal_xwing<R: CryptoRng + ?Sized>(
     recipient_public: &[u8],
     info: &[u8],
@@ -558,20 +510,12 @@ fn open_core(
     Ok(Zeroizing::new(plaintext))
 }
 
-/// Shared seal/open key schedule: derive the AEAD key from the DH shared secret
-/// and both public keys.
+/// Derive the slot AEAD key from the shared secret and both public values.
 ///
-/// The nonce is **not** derived here: stored in the blob, see [`SealedBlob::nonce`].
-///
-/// `ikm` contains **both** public keys. Omitting either the ephemeral key or
-/// the recipient key individually allows binding the same
-/// ciphertext to another identity: an adversary who knows their own private key
-/// chooses a public key yielding the same shared secret, then presents someone else's blob as
-/// addressed to them. All three fields have fixed 32-byte lengths, making
-/// concatenation unambiguous without delimiters.
-///
-/// HKDF salt is deliberately empty: the parties have no shared random value at this
-/// step, and domain separation relies entirely on `info`.
+/// Binding encapsulation and recipient bytes prevents identity substitution.
+/// Their sizes are fixed by the selected KEM profile, making concatenation
+/// unambiguous. HKDF salt is empty; `info` provides domain separation.
+/// The nonce is derived separately and stored in [`SealedBlob::nonce`].
 fn derive_key(
     shared: &crate::agreement::SharedSecret,
     eph_public: &[u8],
@@ -763,19 +707,9 @@ mod kem_binding_tests {
         );
     }
 
-    /// Whether this build can execute the declared mechanism is a different question from
-    /// whether it can parse the mechanism's shape.
-    ///
-    /// The P-256 assertion changed here **by decision**,
-    /// recorded in `docs/format.md` ("VERSION 2 OPENED"), not simply following the code.
-    /// Before version 2, the registry declared the mechanism without implementing it,
-    /// and slots using it had to be skipped. It is now implemented because there is no other way
-    /// to address a TPM key: Platform Crypto Provider lacks X25519.
-    ///
-    /// RSA-OAEP remains unimplemented, a tested property rather than unfinished work:
-    /// the format must retain a numbered but unimplemented mechanism,
-    /// or the "skip the slot rather than reject the file" branch ceases
-    /// to be tested at all.
+    /// Support is separate from recognizing a KEM identifier or its wire shape.
+    /// P-256 is executable; RSA-OAEP slots remain unsupported and must be skipped.
+    /// Standalone RSA-OAEP credential encryption is a different API.
     #[test]
     fn the_build_executes_exactly_the_mechanisms_it_claims() {
         assert!(supports_kem(DEFAULT_SEALING_KEM));

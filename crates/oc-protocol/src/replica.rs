@@ -1,25 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Server state replication: push and acknowledgment (E2, B4;
-//! `docs/protocol.md` §9.17).
+//! Server snapshot replication and acknowledgment (protocol §9.17, E2/B4).
 //!
-//! # What it is and what it does not provide
+//! `witnessed` waits for a signature acknowledging the exact snapshot before
+//! success; `mirrored` sends the copy afterward and can lose the recent tail.
+//! Durability against disk, machine or administrator loss depends on deployment.
 //!
-//! The replica is a separate process that accepts server state snapshots and
-//! acknowledges SPECIFIC bytes with its signature. The `witnessed` profile means
-//! that the server does not return success until acknowledgment arrives; `mirrored` means
-//! the copy is sent after success, with a nonzero RPO for the tail.
-//!
-//! What it does not provide: another machine. A replica in an adjacent process or container
-//! survives server failure, but not loss of the disk or machine, nor an administrator.
-//! The profile promises exactly that "acknowledged operations survive loss
-//! of the SERVER"; both server and replica state this boundary.
-//!
-//! # Continuity
-//!
-//! A push carries the commit number and the PREVIOUS snapshot's fingerprint. The replica
-//! accepts only a continuation of its own history: a gap yields `SnapshotRequired`,
-//! the same number with a different fingerprint yields `HistoryConflict`. The former calls for
-//! resending a snapshot; the latter is evidence of two histories for one server.
+//! A push includes its commit number and previous snapshot fingerprint.
+//! Gaps yield `SnapshotRequired`; a conflicting fingerprint at the same
+//! number yields `HistoryConflict`.
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
@@ -443,12 +431,9 @@ mod tests {
         }
     }
 
-    /// THE BOOTSTRAP SNAPSHOT FLAG IS EXACTLY 0 OR 1.
-    ///
-    /// Before 2026-09-20 it was read as "nonzero byte": 255 different bytes identically
-    /// disabled the history continuity check, and re-encoding reduced them
-    /// all to one (I-7). The forgery here IS SIGNED with the server key; otherwise
-    /// the test would pass on signature rejection and say nothing about parsing.
+    /// Accept snapshot flags only as 0 or 1.
+    /// Sign malformed bodies with the test server key to reach flag parsing
+    /// rather than fail authentication first.
     #[test]
     fn the_snapshot_flag_is_exactly_zero_or_one() {
         let server = Ed25519Signer::from_seed(&[0x24; 32]);

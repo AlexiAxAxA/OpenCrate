@@ -1,26 +1,16 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Authority control documents (E2, B2; `docs/protocol.md` §9.16).
+//! Authority control documents (protocol §9.16, E2/B2).
 //!
-//! Three documents, one codec:
+//! * [`Binding`] describes server identity, epoch/revision, keys, addresses,
+//!   durability, recovery, service state and control roster. Its embedded key
+//!   must match the externally trusted anchor used by [`Binding::open`].
+//! * [`ControlRequest`] carries scope, operation ID, expected revision,
+//!   lifetime and content. Multiple signatures cover the same intent body.
+//! * [`Receipt`] records the outcome, revision and committed content, including
+//!   whether execution awaits replica acknowledgment.
 //!
-//! * [`Binding`]: server binding: organization, stable identity,
-//!   epoch and revision, keys, addresses and TLS fingerprints, durability profile,
-//!   recovery mode, service state and control-key roster.
-//!   Signed with the lease-signing key pinned by the author in the header.
-//!   **The document itself creates no trust**: it is verified with a key known
-//!   to the verifier beforehand ([`Binding::open`]); the embedded key field must
-//!   match it.
-//! * [`ControlRequest`]: controller intent: scope (organization,
-//!   identity, epoch), operation identity, expected revision, lifetime and exact
-//!   content. Multiple signatures are allowed, all over ONE body: a
-//!   quorum signs one intent, and signatures over different intents cannot
-//!   be combined.
-//! * [`Receipt`]: server receipt: operation outcome, resulting
-//!   revision and precisely what was committed. Distinguishes acceptance from execution
-//!   and from deferral pending replica acknowledgment.
-//!
-//! Layouts are TLV with ascending tags (I-7), all fields critical.
-//! Signature transcripts are `CC/v1/authority-binding`, `CC/v1/control-request`,
+//! Layouts are TLV with ascending critical tags. Transcript labels are
+//! `CC/v1/authority-binding`, `CC/v1/control-request`, and
 //! `CC/v1/operation-receipt` over the body.
 
 use oc_format::FormatError;
@@ -388,24 +378,15 @@ impl Binding {
         Ok(out)
     }
 
-    /// Parse and verify using a key the verifier trusts BEFOREHAND.
+    /// Verify with an externally trusted key, then parse the binding.
     ///
-    /// The binding's embedded key must match the anchor; otherwise the binding
-    /// would declare its own signing key trusted.
-    ///
-    /// # Why signature verification PRECEDES parsing
-    ///
-    /// The same I-5 rationale as [`open_request`]: parsing unauthenticated bytes
-    /// returns distinguishable rejection codes for data nobody signed. The key
-    /// comes from OUTSIDE (`anchor`), so the body need not be parsed before verification;
-    /// [`Self::peek`] separates the signature itself and is called over already
-    /// authenticated bytes. Where no anchor exists, `peek` extracts the key,
-    /// with a known tradeoff: in [`verify_chain`], the new epoch binding is first
-    /// read with `peek` to obtain its own key, but trust comes not from that
-    /// signature; it comes from the roster's signature over the certificate carrying those bytes.
+    /// The embedded key must match `anchor`; a binding cannot establish its own
+    /// trust. Verification precedes TLV parsing so malformed unauthenticated
+    /// bodies do not produce parsing errors. In [`verify_chain`], `peek` finds a
+    /// new epoch's key; trust comes from the roster-signed transfer certificate.
     ///
     /// # Errors
-    /// [`FormatError`]: layout, signature or anchor mismatch.
+    /// [`FormatError`] for invalid layout, signature or anchor mismatch.
     pub fn open(bytes: &[u8], anchor: &[u8; KEY]) -> Result<Self, FormatError> {
         let (sig, body) = split_signed(bytes)?;
         oc_crypto::sign::verify(anchor, &transcript(label::AUTHORITY_BINDING, body), &sig)
@@ -829,38 +810,15 @@ fn split_request(bytes: &[u8]) -> Result<(Vec<Signature>, &[u8]), FormatError> {
     Ok((signatures, rest))
 }
 
-/// Parse an intent and verify EVERY signature.
+/// Verify every intent signature, then parse the body.
 ///
-/// The server determines who may sign from the binding roster; this only checks
-/// that "the signature verifies with the named key".
-///
-/// # Why signature verification PRECEDES parsing
-///
-/// The same I-5 rationale as [`crate::revocation::verify_signed`] and its neighbors:
-/// parsing unauthenticated bytes is itself an oracle; distinguishable rejection codes
-/// (`MissingField`, `UnknownCriticalField`, `BadFieldLength` with a tag number)
-/// report on data nobody signed, distinguishing forgery
-/// from truncation. Nothing here REQUIRES parsing before verification: verification keys
-/// are in the ENVELOPE, which `split_request` separates before any TLV,
-/// unlike the container header, whose signing key resides within the
-/// signed material and cannot be obtained from outside.
-///
-/// # Empty envelope
-///
-/// Zero signatures would trivially pass the loop, allowing unauthenticated body parsing;
-/// reordering lines within this function would not prevent that.
-/// An EARLIER boundary must prevent it. It exists: `split_request` rejects
-/// `count == 0` before reading signatures (test
-/// `documents_beyond_the_size_limits_are_refused_before_parsing`), so an unsigned
-/// document never reaches the loop, leaving nothing to improve here.
-///
-/// The caller counts the quorum, how many signatures and WHOSE; both sites are known:
-/// `quorum_met` in `cc-authority/src/control.rs` (using the current revision's roster), and
-/// comparison with the previous epoch's `roster`/`threshold` in [`verify_chain`], reached by
-/// `cc_cli::chain::check`.
+/// Envelope keys authenticate bytes; the caller checks signer authorization
+/// and quorum against the binding roster. `split_request` rejects empty
+/// signature lists before this verification loop. Authentication precedes TLV
+/// parsing to avoid detailed errors for unauthenticated bodies.
 ///
 /// # Errors
-/// [`FormatError`]: layout or any failed signature.
+/// [`FormatError`] for invalid layout or any failed signature.
 pub fn open_request(bytes: &[u8]) -> Result<SignedRequest, FormatError> {
     let (signatures, body) = split_request(bytes)?;
     let t = transcript(label::CONTROL_REQUEST, body);
@@ -1186,21 +1144,13 @@ impl Transfer {
     }
 }
 
-/// Parse a transfer certificate and verify EVERY signature.
+/// Verify every transfer signature, then parse the certificate.
 ///
-/// The verifier determines who may sign from the previous binding's roster;
-/// this only checks that "the signature verifies with the named key".
-///
-/// # Why signature verification PRECEDES parsing
-///
-/// The rationale and empty-envelope caveat are the same as [`open_request`], documented
-/// there: both use the same envelope (`split_request`), yet these two
-/// combinators already diverged once, precisely the "one path fixed, its neighbor
-/// forgotten" problem captured by the test
-/// `a_transfer_opens_only_while_every_signature_holds`.
+/// The caller checks signer authorization against the previous binding's
+/// roster. Authentication and empty-envelope handling follow [`open_request`].
 ///
 /// # Errors
-/// [`FormatError`]: layout or any failed signature.
+/// [`FormatError`] for invalid layout or any failed signature.
 pub fn open_transfer(bytes: &[u8]) -> Result<(Transfer, Vec<[u8; KEY]>), FormatError> {
     let (signatures, body) = split_request(bytes)?;
     let t = transcript(label::AUTHORITY_TRANSFER, body);
@@ -1510,21 +1460,9 @@ mod tests {
         assert!(Receipt::open(&bytes, &other.public_key()).is_err());
     }
 
-    /// A TRANSFER CERTIFICATE OPENS ONLY WHILE EVERY SIGNATURE VERIFIES.
-    ///
-    /// # Why a separate test from the intent
-    ///
-    /// Because `open_transfer` and `open_request` are two DIFFERENT combinators,
-    /// and only the second was guarded. Removing `oc_crypto::sign::verify` from
-    /// `open_transfer` broke no tests: the certificate was parsed,
-    /// compared with itself (`transfer.body()? != body`) and declared open,
-    /// so a transfer of authority to a new epoch would be accepted without a signature
-    /// from the previous roster. CLAUDE.md describes precisely this problem as "one path
-    /// fixed, its neighbor forgotten".
-    ///
-    /// EVERY byte is tested, not three selected positions: the body does not authenticate
-    /// signature bytes or named-key bytes itself; their only guard
-    /// is that signature check.
+    /// Mutate every byte of the transfer's keys, signatures and body.
+    /// Each must be rejected; this guards `open_transfer` independently of
+    /// `open_request`, since they use separate verification combinators.
     #[test]
     fn a_transfer_opens_only_while_every_signature_holds() {
         let s = server();
@@ -1559,23 +1497,10 @@ mod tests {
         }
     }
 
-    /// AN UNPARSEABLE BODY IS REJECTED BY SIGNATURE VERIFICATION, NOT PARSING.
-    ///
-    /// The rationale is I-5 for signed documents: a distinguishable parsing rejection
-    /// for a body nobody signed is an oracle. The body here is deliberately
-    /// unparseable (unknown CRITICAL tag `0x7ABC`), so both
-    /// boundaries want to reject it, revealing which responds first.
-    ///
-    /// # Why the test would be blind without a positive control
-    ///
-    /// Because an invalid signature returns `BadHeaderSignature` even with
-    /// reversed ordering, for ANY parseable body. Only a pair distinguishes
-    /// the order: that same body with a VALID signature must yield
-    /// exactly [`FormatError::UnknownCriticalField`]. If both halves passed under
-    /// reversed ordering, the test would not be testing order.
-    ///
-    /// Both entry points intentionally share one test: their envelope is shared, yet they
-    /// have already diverged once.
+    /// Use the same malformed body (critical tag `0x7ABC`) with invalid and
+    /// valid signatures. The first must fail authentication; the second must
+    /// reach parsing and return `UnknownCriticalField`. This pair detects
+    /// reversed verification/parsing order at both entry points.
     #[test]
     fn an_unparsable_body_is_refused_by_the_signature_first() {
         let a = Ed25519Signer::from_seed(&[0x71; 32]);

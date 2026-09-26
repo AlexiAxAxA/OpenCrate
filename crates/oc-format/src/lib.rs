@@ -61,19 +61,10 @@ pub const MIN_CHUNK_SIZE: u32 = 4 * 1024;
 /// Upper bound on chunk size.
 pub const MAX_CHUNK_SIZE: u32 = 1024 * 1024;
 
-/// The single definition of which chunk sizes are valid.
+/// Shared chunk-size validation for parsers, assemblers and host input handling.
 ///
-/// Deliberately public: the header assembler, the parser, and the code
-/// accepting the user's command-line value must all check the size.
-/// A condition written in three places diverges at the first boundary change,
-/// and does so silently: a file accepted by one check ends up
-/// rejected by another.
-///
-/// Input validation is protection, not convenience: the value reaches
-/// `SecretBuf::with_capacity`, allocating and zeroing a buffer, even before
-/// the header is assembled. Without this check, `--chunk-size 4000000000`
-/// would attempt a four-gigabyte allocation, and allocation failure in Rust means
-/// process `abort`, not an error that can be shown to the user.
+/// Validate before buffer allocation: an arbitrary u32 size can request gigabytes,
+/// and allocation failure may abort rather than return an ordinary input error.
 pub fn check_chunk_size(size: u32) -> Result<u32, FormatError> {
     if (MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&size) && size.is_power_of_two() {
         Ok(size)
@@ -175,24 +166,10 @@ pub enum FormatError {
     /// Distinct from the format version: a class can be added without changing the version,
     /// and accepting an unknown class would mean reading under class-zero rules.
     UnsupportedClass { class: u8 },
-    /// The FORMAT version itself is outside the range this code can read.
+    /// Container format version outside this reader's supported range.
     ///
-    /// Distinct from [`FormatError::ReaderTooOld`], not cosmetically. There the number
-    /// means client version; here it means format version. Previously both values
-    /// entered one structure, reporting "this file requires client version 999"
-    /// for a file declaring `container_version = 999` and `min_reader_version = 1`.
-    /// A format version in a field meaning client version is precisely the substitution
-    /// of meanings this repository forbids in bytes and must also forbid
-    /// in diagnostics.
-    ///
-    /// `first` and `max` bound the READABLE range, not the format's history.
-    /// The name `first` dates from when the lower bound matched the first
-    /// version ever created; decision R-1 (2026-09-19) separated them: versions 1–4
-    /// are no longer readable, and the field carries
-    /// `header::MIN_READABLE_CONTAINER_VERSION`, rather than
-    /// `header::FIRST_CONTAINER_VERSION`.
-    /// Renaming the field here would require edits unrelated to that decision;
-    /// a false doc comment would cost more.
+    /// Distinct from [`FormatError::ReaderTooOld`], which concerns min_reader_version.
+    /// The `first` and `max` fields bound readable format versions, not historical ones.
     UnsupportedContainerVersion { version: u16, first: u16, max: u16 },
     /// A lease document version this build does not recognize.
     ///
@@ -341,19 +318,11 @@ impl<'a> Prologue<'a> {
         Ok(Self { header, signature, after_signature: sig_end as u64, declared_len })
     }
 
-    /// Independent construction of the signing string, **only for the comparison test**.
+    /// Independent signing-transcript construction for comparison tests only.
     ///
-    /// There is one production implementation: [`crate::verify::header_signing_transcript`].
-    /// This one assembles the same bytes by hand with a hardcoded label literal instead of
-    /// `label::HEADER_SIG`, which is the point: the test
-    /// `both_ways_of_building_the_signing_string_agree` compares them and fails
-    /// if someone changes the label or field order in one place and forgets
-    /// the other.
-    ///
-    /// Gated by `cfg(test)`. When public, it was a second source of truth for
-    /// signed bytes in the crate's production surface. If someone called it
-    /// instead of the real implementation, divergence would become invisible because both
-    /// sides would compute using the same copy.
+    /// Uses a literal label and manual field assembly to catch drift in the production
+    /// [`crate::verify::header_signing_transcript`]. Gated by cfg(test) so callers cannot
+    /// accidentally choose a second production definition of signed bytes.
     #[cfg(test)]
     pub(crate) fn signing_transcript(&self, suite_id: u8, out: &mut Vec<u8>) {
         out.clear();

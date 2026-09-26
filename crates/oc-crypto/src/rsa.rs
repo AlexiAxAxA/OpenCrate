@@ -148,22 +148,10 @@ pub fn verify_pss_sha256(
     }
 }
 
-// ---------------------------------------------------------------------------
-// ОТКРЫТЫЕ ОПЕРАЦИИ ДЛЯ ПРОВЕРКИ АТТЕСТАЦИИ (B6a, `docs/protocol.md` §9.11).
-//
-// Подпись редактировавшего устройства выше прибита к RSA-2048 и PSS с солью 32:
-// её производит наш подписывающий, и больше проверяющему уметь незачем. У
-// аттестации подписывающие чужие — вендоры TPM и сам TPM, — и им нужно
-// другое: PKCS#1 v1.5 (`sha256WithRSAEncryption` в сертификатах, RSASSA у
-// ключа удостоверителя) и модули 3072 и 4096 бит у корней вендоров. Плюс одна
-// операция в обратную сторону — OAEP-шифрование семени учётных данных на ключ
-// подтверждения (TPM2_MakeCredential).
-//
-// Секрета у проверяющего здесь по-прежнему нет, кроме семени OAEP, а оно —
-// ОСНОВАНИЕ, возводимое в открытую степень: время операции зависит от модуля и
-// показателя, не от него. Засев OAEP приходит параметром, как всякая
-// случайность в этом крейте.
-// ---------------------------------------------------------------------------
+// Attestation RSA operations (protocol §9.11): PKCS#1 v1.5 verification and
+// OAEP encryption for TPM2_MakeCredential, with 2048/3072/4096-bit public keys.
+// OAEP input is secret even though the exponent is public. Randomness arrives
+// as a parameter; heap cleanup and compiler-copy limits are documented below.
 
 /// Modulus lengths accepted by attestation verification: 2048, 3072, and 4096 bits.
 ///

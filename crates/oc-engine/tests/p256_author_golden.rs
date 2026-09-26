@@ -12,20 +12,9 @@
 //! Changing fixtures requires a format decision; a version-6 witness has not been
 //! created for these artifacts.
 
-// Литы отключены только здесь и только те, без которых тест нечитаем:
-// `unwrap`/`expect`/`panic` — потому что провал пробы и есть паника, а
-// `indexing_slicing`/`arithmetic_side_effects` — потому что срезы эталона
-// режутся по заведомо известным границам, проверенным соседними `assert`.
-//
-// `disallowed_methods` — отдельный случай, и довод тот же, что у соседа
-// (`hardware_hybrid_golden.rs`): `clippy.toml` запрещает движку `std::fs` и
-// `std::env` под лозунгом «ввод-вывод живёт в cc-cli», и запрет этот про КРЕЙТ —
-// пустым от машины обязан быть код, который поедет в анклав, то есть `src`.
-// Эталон же по определению лежит файлом, и проба, которая его не читает, не
-// проба. `include_bytes!` было бы хуже: отсутствующий эталон стал бы ошибкой
-// СБОРКИ, и инструмент, которым его заводят, перестал бы собираться вместе с
-// ним. Гейт чистоты это не задевает: под `wasm32-unknown-unknown` собирается
-// библиотека, а не её пробы.
+// Test-only lint allowances cover assertions and fixed fixture slicing.
+// Runtime fixture reads let the generator build before artifacts exist.
+// The pure-core gate applies to library source.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

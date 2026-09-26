@@ -1,25 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
-// Файл-проба состязательной проверки безопасности. Линтерные запреты рабочего
-// кода к пробам не применяются — проба вправе делать то, чего продукт делать не
-// должен.
-//
-// ИСТОРИЯ. Проба была выведена из сборки переименованием в `.rs.txt` и лежала в
-// docs/security-review, то есть не компилировалась и не исполнялась. Возвращена
-// пунктом Д-13 и переписана: три её находки из пяти с тех пор ИСПРАВЛЕНЫ, и
-// прежний текст описывал конструкции, которых больше нет.
-//
-// Что стало с каждой находкой:
-//   1. Повтор nonce обёртки CEK — исправлено: nonce стал храниться, а не
-//      выводиться из KEK; номер K2 в таблице производных сожжён. Тест переписан
-//      как регрессионный.
-//   2. «K2 разворачивает не тот PRK» — исчезло вместе с самим K2.
-//   3. Расхождение §3.1 и §3.5 по обязательству слота — исправлено в спеке: обе
-//      секции теперь говорят `‖ core_hash`. Тест сторожит это и проверяет, что
-//      прежняя формула (`‖ file_id`) НЕ совпадает.
-//   4. MIN_CLAIM_BITS не проверяется — ЖИВО. Оставлено как зафиксированное
-//      ограничение, см. комментарий у теста.
-//   5. K3 и K5 — один тип — исправлено введением `MetaKey`. Перепутать их
-//      теперь ошибка компиляции, и тест это фиксирует.
+// Key-schedule regression and misuse probes.
+// Test-local lint allowances permit adversarial inputs. Checks cover stored
+// wrapper nonces, slot commitments and distinct key types. The low-entropy
+// claim-code probe records a caller-side requirement the primitive cannot enforce.
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -192,31 +175,12 @@ fn claim_from_pin(pin: u32) -> ClaimSecret {
     ClaimSecret::from_bytes(bytes)
 }
 
-/// KNOWN LIMITATION, captured by a test rather than concealed.
+/// Demonstrate offline guessing of a low-entropy claim code.
 ///
-/// `MIN_CLAIM_BITS = 128` is declared the claim code's sole defense against a
-/// partitioning oracle, yet no type enforces it: `ClaimSecret::from_bytes`
-/// accepts any 32 bytes. The slot commitment is plaintext in the container
-/// and acts as an offline oracle: an attacker knowing the server share
-/// (a compromised license server holding a container copy) can enumerate
-/// a four-digit code in ten thousand attempts of a few HMACs each, without
-/// network access. Under §3.4's intended design, the server share should not suffice.
-///
-/// The product avoids this hole today, but not because it has been closed.
-/// Claim codes are issued (`cc protect --claim`), `RecipientClaim` slots
-/// are created and opened, and `cc_cli::container` calls `secret_b_from_claim`:
-/// F-3 is closed. The boundary rests in ONE place:
-/// `cc_cli::claim` generates exactly 30 characters from a five-bit alphabet, giving
-/// 150 bits, enforced by `const _: () = assert!(...)`: a short code there will
-/// not fail a test; it will not compile.
-///
-/// The lower-level boundary is still absent: `ClaimSecret::from_bytes` accepts
-/// any 32 bytes and must, because by that point a hash has compressed the code and the result
-/// cannot reveal entropy. The test remains to show the cost of
-/// a second way to create `ClaimSecret` bypassing `cc_cli::claim`: a
-/// human-invented code, one from an external field, or a future API. This test
-/// must fail when such a path appears and `MIN_CLAIM_BITS` ceases
-/// to be checked at build time.
+/// A known server share plus the public slot commitment lets a caller test guesses
+/// without networking. `ClaimSecret::from_bytes` cannot infer the original code's
+/// entropy after hashing; generators must enforce at least `MIN_CLAIM_BITS`.
+/// The product generator supplies 150 random bits; this probe deliberately uses a PIN.
 #[test]
 fn a_low_entropy_claim_code_is_still_brute_forcible_known_limitation() {
     assert_eq!(MIN_CLAIM_BITS, 128);
@@ -258,15 +222,8 @@ fn a_low_entropy_claim_code_is_still_brute_forcible_known_limitation() {
 // 4. Разделение назначений ключей типами
 // ---------------------------------------------------------------------------
 
-/// BUG (fixed): K3 and K5 returned the same `PayloadKey` type, silently accepting a
-/// private-metadata key where a payload key belonged,
-/// contrary to `secret.rs`'s promise that swapping them "becomes a compile
-/// error".
-///
-/// Fixed by introducing `MetaKey`. An ordinary test cannot check this:
-/// the code formerly caught by the probe simply no longer compiles. The test
-/// therefore records the observable part, differing derived values,
-/// while types prevent confusion, documented here:
+/// K3 and K5 derive different values and return different key types.
+/// `MetaKey` cannot be passed where a payload key is required:
 ///
 /// ```compile_fail
 /// let meta = derive_private_meta_key(&cek, &SALT, &FILE_ID);

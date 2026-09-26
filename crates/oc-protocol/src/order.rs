@@ -1,31 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
-//! An author's order to the server: what to do with a file.
+//! Author-signed orders to the server (protocol §9.3).
 //!
-//! Before 2026-09-03, registration and revocation were operator `cca` commands on
-//! the server machine, so who counted as the author depended on who had access to
-//! that machine. This cannot work over the wire: `file_id` is public in the header,
-//! and without a signature anyone receiving the file could register it under their own
-//! terms or revoke it for everyone (`docs/protocol.md` §9.3).
+//! Registration carries the container header: its verified signature supplies
+//! the author key used to verify the order. Later file orders use the key
+//! remembered at registration. The layout is `signature(64) ‖ TLV body`.
 //!
-//! An order is a TLV document signed by the AUTHOR KEY, the same key that
-//! signed the container header. Registration carries the entire header alongside it:
-//! the server verifies the header signature, extracts the author key and uses it
-//! to verify the order. The server learns the author key not from the requester's claims but
-//! from a document the recipient cannot modify. Revocation is verified using
-//! the key remembered during registration.
-//!
-//! The layout matches revocations and leases: `signature(64) ‖ body`. The signature
-//! comes first so that a truncated document cannot parse "almost successfully".
-//!
-//! Issuance time is part of the body and signature: the server accepts only
-//! fresh orders (allowing clock skew), so a document resurfacing
-//! after lying somewhere is not executed.
-//!
-//! Freshness is insufficient, although this documentation formerly claimed otherwise: "both operations are idempotent,
-//! replay does nothing". That described two kinds, registration and
-//! revocation; there are now eight, and replaying a vote, roster or thaw changes
-//! state. Order BETWEEN commands is maintained by the server using a per-kind barrier
-//! (`docs/protocol.md` §11.11), not by this check.
+//! Issuance time is signed; the server checks freshness with clock-skew
+//! allowance. Freshness alone does not prevent replay or reordering: the
+//! server also maintains per-kind barriers (protocol §11.11).
 
 //! There are more than two order kinds: author proof of life and heir appointment
 //! joined registration and revocation (`docs/protocol.md` §11). Layout,
@@ -96,38 +78,15 @@ pub mod tag {
     pub const SILENCE_SECONDS: u16 = 11;
     /// `SetHeir` only: what to do after silence.
     pub const HEIR_MODE: u16 = 12;
-    /// `SetHeir{Open}` only: completed author decisions for heirs, as a stream.
+    /// Completed heir decisions for `SetHeir{Open}`.
     ///
-    /// # Why a stream, and why the number was not retired
-    ///
-    /// The tag was created for ONE decision. Multiple heirs were needed (customer decision
-    /// of 2026-09-05), so the contents became a stream of
-    /// `u32le length ‖ Decision`, repeated up to `MAX_HEIRS` times.
-    ///
-    /// The number was not repurposed for a different meaning; the same meaning was expressed
-    /// more precisely: "who gets what after silence". I-7 forbids the former, not
-    /// the latter. Retiring the number would be superstition rather than caution: no
-    /// server with an appointed heir has shipped, and protocol documents other than
-    /// leases are not frozen (`docs/protocol.md` §0). A single heir remains
-    /// a valid case: a one-entry stream.
+    /// A stream of `u32le length ‖ Decision` entries, up to `MAX_HEIRS`.
+    /// A single heir uses the same layout with one entry.
     pub const BEQUEST: u16 = 13;
-    /// Whose key verifies the signature when it cannot be obtained from the file.
+    /// Verification key when it cannot be obtained from the file.
     ///
-    /// # Why the name changed but the number did not
-    ///
-    /// The tag began as `AUTHOR_KEY`, "whose presence is recorded" in proof of life
-    /// for all files. Approver voting revealed the field's broader
-    /// meaning: a roster member signs, not the author, and that key also cannot be
-    /// found from the file: the server remembers the AUTHOR's key. The name `author_key`
-    /// would then be a lie presented as truth, containing someone else's key.
-    ///
-    /// The number deliberately remained unchanged. I-7 prohibits reusing numbers
-    /// with a DIFFERENT meaning; this meaning is and always was "the key
-    /// used to verify this document". Changing the number would retire it merely
-    /// to refine the wording.
-    ///
-    /// Required for `Alive` with zero `file_id` and for `ApproveDevice`; forbidden
-    /// everywhere else.
+    /// Required for `Alive` with zero `file_id` and for `ApproveDevice`;
+    /// forbidden for other orders.
     pub const SIGNER_KEY: u16 = 14;
     /// `SetCoauthors` only: lifetime of a proposal lacking enough signatures.
     ///
@@ -777,24 +736,11 @@ pub fn peek(bytes: &[u8]) -> Result<Order, FormatError> {
     decode(body)
 }
 
-/// INTENT digest: what was ordered, without "when issued" or "who signed".
+/// Hash the order's intent, excluding issuance time and signer key.
 ///
-/// # Why it exists
-///
-/// Coauthor quorum collects signatures from DIFFERENT people on DIFFERENT machines,
-/// each signing their own document: they type the same command, their client inserts its own
-/// issuance time and key. If the server identified proposals by body hash, two
-/// coauthors typing the same command in different seconds would create
-/// two different proposals, and quorum would NEVER be reached.
-///
-/// Hence the rule: a proposal is identified by WHAT is ordered, not when it
-/// was said. File, kind and every parameter must match; issuance time and
-/// signer key are excluded from the digest, because they belong to the signature,
-/// not the intent.
-///
-/// It is computed using exactly the body encoder: a second serializer for
-/// hashing would create a second definition of "the same order" and
-/// would diverge on the first newly added line.
+/// Coauthors may sign the same command at different times with different
+/// keys. File, kind and parameters identify the shared quorum proposal.
+/// The digest uses the body encoder to keep these fields in one encoding.
 ///
 /// # Errors
 /// [`FormatError`] if the order cannot be encoded.
@@ -803,18 +749,9 @@ pub fn intent_digest(order: &Order) -> Result<[u8; 32], FormatError> {
     Ok(oc_crypto::sha256(&encode(&canonical)?))
 }
 
-/// Order kind from the BARE BODY, without a preceding signature.
+/// Read the order kind from a body without its signature prefix.
 ///
-/// Parsing is strict, as everywhere: unknown kinds are not guessed.
-///
-/// # Who calls this
-///
-/// Nobody today; saying so is more honest than omitting it. The function was
-/// written for the coauthor proposal list, where kind came from the STORED
-/// body; since F-20 item 15 (2026-09-04), the server stores no bodies at all:
-/// a proposal is identified by intent (`intent_digest`), and kind is a record
-/// field. The previous doc comment outlived that architectural change and
-/// continued promising stored bodies.
+/// This does not authenticate the body; unknown kinds are rejected.
 ///
 /// # Errors
 /// [`FormatError`] if the body cannot be parsed.

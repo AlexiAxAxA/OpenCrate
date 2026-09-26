@@ -165,19 +165,11 @@ pub struct Policy {
     pub max_opens: Option<u32>,
     pub network: Network,
     pub min_binding: Binding,
-    /// Binding requirement PER ACTION: policy tag 7, format version 4.
+    /// Per-action binding requirement (policy tag 7, format version 4).
     ///
-    /// Viewing may use software binding, editing may not: an edit signature
-    /// cannot be stronger than the machine's binding level. Hence this field:
-    /// a policy-wide `min_binding` alone is insufficient.
-    ///
-    /// The effective requirement for an action is `max(min_binding, the entry here)`,
-    /// so this field can only TIGHTEN it. This is a condition of
-    /// I-10 monotonicity, not a convenience: per-action relaxation would turn `intersect` into
-    /// a function capable of changing `Deny` into `Allow`.
-    ///
-    /// An absent entry means "no separate requirement", not "weaker binding
-    /// allowed": default denial remains enforced through `min_binding`.
+    /// The effective requirement is max(min_binding, this action's entry), so an
+    /// entry can only tighten policy. Absence adds no requirement and cannot relax
+    /// the policy-wide minimum.
     pub action_binding: BTreeMap<Action, Binding>,
     pub watermark: bool,
     /// Action tags unknown to this client version. Their presence by itself
@@ -350,54 +342,19 @@ pub struct LeaseFacts {
     /// declare itself attested; the server saw the verified chain,
     /// and it arrives under the server's signature. See [`effective_binding`].
     pub attested: Option<Attestation>,
-    // Поля `max_offline_seconds` здесь намеренно НЕТ, хотя план Ф-7 перечисляет
-    // его среди полей защиты от отката.
-    //
-    // Оно уже существует и стоит в правильном месте: `Network::Lease` в политике
-    // АВТОРА, и `OfflineTooLong` по нему проверяется — с тех пор как у `protect`
-    // появился флаг `--offline-window`. До него окно всегда равнялось длине
-    // лизинга, и проверка была недостижима.
-    //
-    // Сервер, желающий ужесточить окно, сделает это через `intersect(автор,
-    // сервер)`. В будущем времени намеренно: функция написана и монотонна, но вне
-    // тестов её никто не зовёт, и серверной политики не существует. Второе поле с
-    // тем же смыслом в лизинге завело бы вопрос «какое из двух главнее», а вопрос
-    // этот решается пересечением, а не приоритетом, — это и остаётся в силе.
     /// Device hardware clock reading at issuance.
     ///
-    /// Protects against what neither the system clock nor the monotonic floor can prevent:
-    /// VM snapshot rollback restores both the state file and clock.
-    /// A TPM counter does not move backward or revert with a snapshot, provided the TPM
-    /// is real.
-    ///
-    /// `None` means the lease was issued to a device without hardware time. This is valid
-    /// (unavailable at software level), but provides no such protection.
+    /// An independent reading can detect restored software state only if the hardware
+    /// clock did not roll back with it. None is valid for devices without hardware
+    /// time and provides no independent hardware-clock protection.
     pub tpm_clock: Option<TpmClock>,
 }
 
-/// TPM hardware clock reading: reset counter and time within it.
+/// TPM reset counter and persistent clock reading.
 ///
-/// A pair, not one number, with **both components compared independently**:
-/// a decrease in EITHER means rollback.
-///
-/// # Why this type has NO ordering
-///
-/// This once derived `PartialOrd, Ord`, with docs explaining lexicographic order through the model
-/// "the clock resets when the platform resets, while the counter increases". **That model
-/// is wrong**: under TPM 2.0, `clock` is nonvolatile and survives power
-/// loss; only `TPM2_Clear` resets it, also resetting the counter.
-/// A different value, `time`, resets on power-up; the product does not use it:
-/// see `cc_keystore::clock`.
-///
-/// This was more than a wording error. Lexicographic order accepted "higher counter,
-/// lower clock" as a legitimate reboot, obtainable in precisely one way:
-/// roll back a snapshot and reboot. The snapshot rollback check
-/// allowed snapshot rollback. The hole was fixed but the `derive` remained, and `a.max(b)`
-/// would silently restore it.
-///
-/// Ordering was therefore REMOVED, not redefined. A redefined order would need
-/// explanation to every reader; removing it makes the invalid comparison inexpressible.
-/// Raise the floor componentwise; see the example in `cc_authority`.
+/// Compare both components independently: a decrease in either is rollback.
+/// There is no Ord/PartialOrd because lexicographic comparison would accept a
+/// higher counter with a lower clock. Raise a stored floor componentwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TpmClock {
     /// Number of platform resets. Increases, never decreases.
@@ -421,22 +378,10 @@ pub struct TpmClock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Context {
     pub now: Timestamp,
-    /// Source of `now`. **The evaluator does NOT read this field.**
+    /// Source of now, currently informational: evaluate does not read this field.
     ///
-    /// Stated explicitly because silence here is unusually costly. The client
-    /// populates it honestly, and reviewers read it as an effective self-imposed limit:
-    /// "time is declared unreliable, so it is trusted less". No such
-    /// rule exists: `evaluate` never accesses the field, and decisions
-    /// for `Wall` and `ServerAsserted` coincide.
-    ///
-    /// There is no exploitable hole: the source is always `Wall` anyway,
-    /// the worst possible source, and rollback protection comes from the monotonic
-    /// floor plus TPM time, not this field. The danger is a reviewer spending less attention
-    /// because of a nonexistent guarantee.
-    ///
-    /// The field will gain a consumer with a rule that requires it,
-    /// such as "`HardwareAttested` requires time independent of the system clock". That
-    /// is a new policy rule, a separate decision rather than incidental work.
+    /// Wall and ServerAsserted therefore receive the same evaluation. Rollback checks
+    /// use the monotonic floor and hardware readings, not a trust rule based on this tag.
     pub time_source: TimeSource,
     /// Greatest time the client has ever seen. Time cannot move
     /// backward: `now` below this value means a rollback attempt.
@@ -524,21 +469,10 @@ pub enum DenyReason {
     /// is a machine property, suggesting "lease without hardware time"; a read failure
     /// is a transient event, suggesting "retry".
     TpmClockUnreadable,
-    /// Hardware time advanced faster than system time, indicating system clock rollback.
+    /// Hardware elapsed time exceeds the allowed wall-clock elapsed time.
     ///
-    /// TPM time advances only while the machine is powered on, so it cannot outpace wall
-    /// time under legitimate conditions. Exceeding it means precisely one thing:
-    /// elapsed system time was shortened.
-    ///
-    /// Distinct from [`Self::Expired`], substantively. "Expired" is
-    /// an ordinary event; "hardware time outpaced system time" reports clock manipulation,
-    /// which the operator needs to know. Users may read both alike;
-    /// diagnosticians do not.
-    ///
-    /// The former name `ExpiredByHardwareClock` described the former check: comparing
-    /// hardware elapsed time with lease length. It rejected legitimate
-    /// users whenever readings were taken long before issuance and was
-    /// replaced; the name changed with it so the fields would not lie.
+    /// This reports a clock-consistency failure separately from ordinary lease expiry.
+    /// The check compares elapsed readings, not hardware time against lease duration.
     HardwareClockOutranWallClock { hardware_ms: u64, wall_ms: u64 },
     NotYetValid,
     Expired,
@@ -730,24 +664,9 @@ pub fn evaluate(
             DeviceClock::Absent => return Verdict::Deny(DenyReason::TpmClockMissing),
             DeviceClock::Unreadable => return Verdict::Deny(DenyReason::TpmClockUnreadable),
         };
-        // Откатом считается уменьшение ЛЮБОЙ из двух величин, а не проигрыш в
-        // лексикографическом сравнении пары.
-        //
-        // Лексикографика стояла здесь под моделью «часы обнуляются при сбросе
-        // платформы, а счётчик при этом растёт», и модель была неверна. По TPM 2.0
-        // `clock` энергонезависим и переживает выключение питания; обнуляет его
-        // только `TPM2_Clear`, который обнуляет и счётчик сбросов. Собственный
-        // производитель в этом репозитории говорит то же самое: `time` обнуляется
-        // при включении, `clock` — нет, и берётся именно `clock`, чтобы не
-        // объявлять откатом перезагрузку.
-        //
-        // Цена ошибки была не в словах. При лексикографике пара «счётчик больше,
-        // часы меньше» проходила как законная перезагрузка — а получить её можно
-        // ровно одним способом: откатить снапшот и перезагрузиться. Проверка,
-        // заведённая против отката снапшота, пропускала откат снапшота.
-        //
-        // Перезагрузка по-прежнему проходит: счётчик растёт, `clock` продолжает
-        // расти вместе с ним, и ни одна из величин не уменьшается.
+        // A decrease in either reset counter or persistent clock means rollback.
+        // Lexicographic comparison would hide a lower clock behind a higher counter.
+        // A reboot with both components nondecreasing remains valid.
         if presented.clock_ms < issued.clock_ms || presented.reset_count < issued.reset_count {
             return Verdict::Deny(DenyReason::TpmClockRollback { issued, presented });
         }
@@ -791,54 +710,14 @@ pub fn evaluate(
         Network::StrictOnline => {}
     }
 
-    // Срок, измеренный АППАРАТНЫМИ часами, а не системными.
-    //
-    // # Зачем вторая мера, когда есть первая
-    //
-    // Первая мера — `presented < issued` выше — ловит только случай, когда сами
-    // часы TPM пошли НАЗАД, то есть откат снапшота вместе с виртуальным TPM. На
-    // живой машине с настоящим TPM они идут вперёд всегда, и эта проверка молчит.
-    //
-    // А класс атаки, ради которого всё затевалось, выглядит иначе: противник
-    // копирует профиль, исчерпывает открытия, восстанавливает копию и отводит
-    // системные часы назад. Профиль возвращает пол монотонности, счётчики и
-    // планку номера — все три меры откатываются вместе с файлом. Часы TPM при
-    // этом идут вперёд, поэтому и первая мера молчит.
-    //
-    // Измерено: контекст «профиль восстановлен, системные часы отведены» давал
-    // `Allow` там, где живое состояние давало `Deny(LeaseRollback)`.
-    //
-    // # Что делает эта проверка
-    //
-    // Меряет прошедшее время величиной, которую восстановление профиля не
-    // трогает. `clock_ms` идёт нарастающим итогом и не обнуляется при
-    // перезагрузке — в отличие от `time`, — поэтому разность годится как мера
-    // элапса через выключения питания.
-    //
-    // # Почему это ДОБАВЛЯЕТСЯ к системной проверке, а не заменяет её
-    //
-    // Часы TPM идут только пока машина включена. Пролежав неделю выключенной, она
-    // покажет элапс в несколько минут — то есть аппаратная мера одна пропустила бы
-    // просроченный лизинг. Системная мера этот случай ловит. Отказ по ЛЮБОЙ из
-    // двух строго сильнее каждой по отдельности, и обе односторонние, так что
-    // сложение их монотонно.
+    // Compare hardware and wall elapsed time to detect a restored software clock.
+    // The hardware reading can remain ahead even when profile state is restored.
+    // Keep wall-clock expiry too: hardware time need not advance while powered off,
+    // so it cannot replace the lease's wall-clock deadline.
     if let (Some(issued), Some(presented)) = (lease.tpm_clock, ctx.device.tpm_clock.reading()) {
-        // Сравниваются ДВА ЭЛАПСА, а не элапс с длиной лизинга.
-        //
-        // Первая редакция сравнивала аппаратный элапс с разрешённым сроком — и это
-        // было неверно по существу. Такая проверка отказывает всякий раз, когда
-        // показания сняты задолго до выдачи, то есть законному пользователю,
-        // запустившему `cc keygen` вчера. Сервер теперь приводит показания к
-        // моменту выдачи, но сравнение всё равно должно быть другим, и вот почему.
-        //
-        // Настоящий инвариант: часы TPM идут НЕ БЫСТРЕЕ настенных, потому что идут
-        // только пока машина включена. Значит аппаратный элапс, превысивший
-        // системный, означает ровно одно — системные часы отвели назад. Это и есть
-        // признак, а длина лизинга здесь ни при чём: срок по системным часам
-        // проверяется отдельной строкой ниже.
-        //
-        // Заодно исчезает целый класс ложных отказов: спящая или выключенная
-        // машина даёт аппаратный элапс МЕНЬШЕ системного, то есть проходит.
+        // Compare hardware elapsed time with wall elapsed time, not lease duration.
+        // Excess hardware elapsed indicates inconsistent wall time; shorter hardware
+        // elapsed after sleep or power-off is permitted. Wall expiry is checked separately.
         let hardware_ms = presented.clock_ms.saturating_sub(issued.clock_ms);
         let wall_seconds = ctx.now.0.saturating_sub(lease.issued_at.0);
         // Отрицательный системный элапс означает, что часы отвели за момент
@@ -1005,24 +884,12 @@ pub fn intersect(author: &Policy, server: &Policy) -> Policy {
 const IMPOSSIBLE: Validity =
     Validity::Window { not_before: Timestamp(i64::MAX), not_after: Timestamp(i64::MIN) };
 
-/// Intersect two validity periods without ever expanding access.
+/// Intersect validity periods without widening either operand.
 ///
-/// `Always` means no restriction, so intersecting it returns the other
-/// operand. Homogeneous pairs narrow naturally: windows use the later start
-/// and earlier end; first-open durations use the shorter duration.
-///
-/// A heterogeneous pair (window and first-open duration) cannot express its conjunction
-/// in one variant: the restrictions are independent, and `Validity` cannot carry
-/// both simultaneously. Choosing either **expands** access relative to the other,
-/// and `intersect` may never expand access: this underpins
-/// the promise that even a compromised server cannot weaken
-/// the author's policy. Hence denial here.
-///
-/// This currently imposes no practical restriction: leases are not issued yet,
-/// and a server with nothing to tighten sends `Always`. When leases
-/// arrive (phase 1) and a heterogeneous pair is needed, the correct solution is
-/// a variant carrying both restrictions. That changes policy format and thus
-/// requires a separate decision and `docs/format.md` update, not a silent choice here.
+/// Always adds no restriction. Two windows use the later start and earlier end;
+/// first-open durations use the shorter duration. A window/duration conjunction
+/// cannot fit the current single variant, so deny instead of dropping a constraint.
+/// Representing both would require a policy-format decision.
 fn tighten_validity(author: Validity, server: Validity) -> Validity {
     match (author, server) {
         (Validity::Always, other) | (other, Validity::Always) => other,
@@ -1286,19 +1153,9 @@ mod tests {
         assert!(evaluate(&policy, Some(&lease()), Action::View, &c).is_allowed());
     }
 
-    /// A clock lower than at issuance means rollback.
-    ///
-    /// Both components are checked, EACH separately: decreasing either
-    /// means rollback.
-    ///
-    /// This used to say "lower time with a HIGHER counter is not rollback:
-    /// the platform rebooted and the clock restarted". The caption outlived
-    /// its own refutation: the test body below requires DENIAL for that pair and
-    /// explains why: honest hardware cannot produce it, and there is exactly
-    /// one way to obtain it: roll back a snapshot and reboot.
-    ///
-    /// Reboot passes not because the clock "restarted", but because
-    /// BOTH values increase: `clock` is nonvolatile.
+    /// Decreasing either hardware-clock component must reject as rollback.
+    /// A higher reset counter cannot excuse a lower persistent clock; both components
+    /// nondecreasing is the valid reboot control.
     #[test]
     fn hardware_clock_going_backwards_is_a_rollback_but_a_reboot_is_not() {
         let policy = viewable();

@@ -21,19 +21,12 @@ pub mod tag {
     pub const CHUNK_COUNT: u16 = 2;
     pub const TREE_ROOT: u16 = 3;
     pub const VERSION_COUNTER: u16 = 4;
-    /// Footer offset. **The authoritative source of this value**: a decision moved to version 4.
+    /// Current footer offset, authenticated by the mutable-region MAC.
     ///
-    /// Tag 16 in the signed header declares the same value and is permanently retired: the footer
-    /// follows the payload, whose length changes with edits, so the offset must live where
-    /// it can change without the author, alongside `total_len` and `chunk_count`,
-    /// which likewise describe "what the file looks like now".
-    ///
-    /// The offset is under a MAC rather than a signature, so a `CEK` holder can
-    /// replace it. The decision therefore requires this condition: **the footer
-    /// may carry only self-authenticating content**, such as a timestamp authority token
-    /// or a countersignature. A tag table does not authenticate itself and cannot go here
-    /// without revisiting the decision. Discussion: `docs/format.md`, section
-    /// "VERSION 3 IS OPEN", item 6.
+    /// Header tag 16 is retired because edits can move the footer without the author.
+    /// A CEK holder can update this offset, so the footer may contain only data with
+    /// its own authentication, such as TSA tokens or countersignatures. An unsigned
+    /// tag table would need a different trust rule (format, version 3 item 6).
     pub const FOOTER_OFFSET: u16 = 5;
     /// Signature of the editing device. **Since version 4.**
     ///
@@ -478,26 +471,11 @@ impl ContentDesc {
         Ok(Self { total_len, chunk_count, tree_root, version_counter, footer_offset, editor })
     }
 
-    /// Bytes covered by the MAC.
+    /// MAC input: file_id followed by the raw body bytes.
     ///
-    /// `file_id` is mandatory and comes first: without it, a description cut out of one
-    /// container would be accepted in another, so substituting a length and tree root
-    /// would require only copying a hundred bytes between files.
-    ///
-    /// Next come the **raw body bytes**, not parsed values. This is the same
-    /// decision as for the header signature and for the same reason: recomputing over
-    /// a re-encoding of a parsed structure causes the entire family
-    /// of canonicalization bugs known from JWS and XML-DSig.
-    ///
-    /// Despite first impressions, this does not hinder version compatibility. A MAC over
-    /// raw bytes **always** agrees across versions: the reader has exactly the bytes
-    /// authenticated by the writer, without any reconstruction between them.
-    /// It also removes the need to bind the body length separately: it is already included.
-    ///
-    /// The main practical consequence: the MAC can be verified **before** parsing
-    /// the body. Otherwise distinct parse errors (missing required field, wrong length,
-    /// unknown tag) would be reported for unauthenticated bytes, and corruption
-    /// of the mutable region would look like truncation rather than forgery.
+    /// The file ID prevents cross-container substitution. Authenticating the original
+    /// bytes avoids re-encoding ambiguity and permits MAC verification before parsing,
+    /// so malformed unauthenticated data cannot produce distinguishable parse errors.
     fn mac_transcript(file_id: &[u8; 16], body: &[u8]) -> Transcript {
         let mut t = Transcript::new(label::CONTENT_MAC);
         // `fixed` для `file_id` — его длина задана типом; `field` для тела —
@@ -532,24 +510,11 @@ mod tests {
         }
     }
 
-    /// Assemble a region from an arbitrary body with a correct MAC, producing input
-    /// that our writer cannot generate but an attacker holding the CEK could.
-    /// MAC verification occurs BEFORE body parsing: a guard on the order of two lines.
+    /// An invalid MAC must reject an unparseable body before parsing.
     ///
-    /// Before this test, the order relied on a comment and attentiveness:
-    /// swapping `mac::verify` and `decode_body` did not fail any check.
-    /// Tests for parse error codes supplied a correct MAC, tests for a bad MAC
-    /// supplied a valid body, and nobody tested the case combining both faults.
-    ///
-    /// The cost of regression is not theoretical. Distinguishable parse errors for
-    /// UNAUTHENTICATED bytes give an attacker an oracle: a forged mutable region
-    /// would report "missing required field" or "unknown tag" instead of "MAC
-    /// mismatch", thus appearing as file truncation rather than forgery
-    /// (I-5).
-    ///
-    /// The body here is deliberately unparseable, the key deliberately wrong. There is
-    /// exactly one correct response: `BadContentMac`; any parse error means the body
-    /// was read before authentication.
+    /// The body cannot be produced by the ordinary writer; a CEK holder can construct
+    /// it. Combining a wrong key and malformed body distinguishes MAC-first ordering:
+    /// the expected error is BadContentMac, never a body parsing error.
     #[test]
     fn the_mac_is_checked_before_the_body_is_parsed() {
         let file_id = [0x11u8; 16];

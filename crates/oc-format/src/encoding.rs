@@ -63,20 +63,12 @@ pub const ALL: [Encoding; 3] = [Encoding::Cp1251, Encoding::Koi8R, Encoding::Cp8
 /// under any of the three tables, so there would always be a "winner".
 const CONFIDENT: u32 = 3;
 
-/// Guess the encoding from the bytes.
+/// Guess text encoding; return None when confidence is insufficient.
 ///
-/// `None` means "no confident candidate": a binary file, text in a language without
-/// Cyrillic, or a fragment that is too short. The caller must then NOT display
-/// the text as text, or it will show plausible nonsense.
-///
-/// # Distinguishing CP1251 from KOI8-R
-///
-/// Both place Cyrillic in `0xC0..=0xFF`, so "did these become letters" cannot
-/// distinguish them. CASE does: KOI8-R puts lowercase letters in `0xC0..=0xDF`,
-/// while CP1251 uses `0xE0..=0xFF`. Russian text is mostly lowercase, so the correct
-/// table yields many lowercase letters and the wrong one many uppercase letters.
-///
-/// Hence the metric: count LOWERCASE Cyrillic letters rather than all letters.
+/// Short, binary or non-Cyrillic input may have no candidate and should not be
+/// silently displayed as guessed text. CP1251/KOI8-R scoring counts lowercase
+/// Cyrillic: KOI8-R uses `0xC0..=0xDF`, CP1251 `0xE0..=0xFF`, so letter count
+/// alone would not distinguish the two tables.
 #[must_use]
 pub fn guess(bytes: &[u8]) -> Option<Encoding> {
     let high = bytes.iter().filter(|byte| **byte >= 0x80).count();

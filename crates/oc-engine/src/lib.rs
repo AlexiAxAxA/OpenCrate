@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Packing keys, recipient slots, and the container header.
+//! Packing keys, recipient slots and the container header.
 //!
 //! The host supplies randomness and processes document bytes. The engine has no
-//! I/O or clocks, and retains the CEK while releasing only the derived payload key.
+//! I/O or clocks and retains CEK while returning the derived payload key.
 //!
 //! ```text
 //! plan()      -> session and payload key
 //! seal_chunks -> ciphertext, length, and tree root (host)
-//! assemble()  -> header and signing transcript
+//! assemble()  -> header and mutable region
 //! sign+write  -> author signature and container (host)
 //! ```
 //!
-//! Assembly follows streaming because private metadata includes the final length.
-//! The host signs the entire header with the author's key; the engine does not sign.
+//! Assembly follows streaming because private metadata includes final length.
+//! The host derives the signing transcript from the completed header and signs it.
 
 use rand_core::CryptoRng;
 use oc_crypto::secret::{Cek, ClaimSecret, PayloadKey, SecretA, SecretB};
@@ -124,8 +124,7 @@ pub enum Recipient {
     Identity { public_key: [u8; 32] },
     /// Recipient hybrid key: `kem_id = 4`, X-Wing (format version 4).
     ///
-    /// Boxed because 1216 bytes in an enum would inflate EVERY
-    /// variant to that size, including `None`.
+    /// Boxed so the 1216-byte public key does not enlarge every enum variant.
     Hybrid { public_key: Box<[u8; oc_crypto::xwing::PUBLIC_KEY_LEN]> },
     /// Recipient HARDWARE hybrid: `kem_id = 5`, MLKEM768-P256 (version 5).
     ///
@@ -252,19 +251,11 @@ impl core::fmt::Debug for PackRequest<'_> {
     }
 }
 
-/// What the engine returns after assembly.
+/// Completed header and mutable region.
 ///
-/// # NO signing transcript here, deliberately
-///
-/// It existed and was removed when the engine began moving into a separate process. The reason
-/// is not protocol convenience: the device must sign what ITSELF
-/// derived from the header it intends to write, not what the engine
-/// sent. Otherwise a hostile engine could pair one header's transcript
-/// with another header's bytes, making the author's signature authenticate the wrong file.
-///
-/// Transcript derivation is a pure function of the header and suite
-/// (`oc_format::verify::header_signing_transcript`), available to the device and
-/// essentially free. Omitting it would exchange verifiable data for supplied data.
+/// The host derives the signing transcript from the header it will write, using
+/// `oc_format::verify::header_signing_transcript`. Accepting a transcript supplied
+/// by an untrusted engine could authenticate a different header.
 #[derive(Debug)]
 pub struct Assembled {
     /// Entire header, ready to write.
@@ -479,23 +470,10 @@ impl Session {
             RecipientPlan::Claim(claim_commit) => slots.push(claim_slot(claim_commit, commitment)),
         }
 
-        // АВТОРСКИЙ СЛОТ НЕ ВПРАВЕ БЫТЬ СЛАБЕЕ СЛОТА ПОЛУЧАТЕЛЯ.
-        //
-        // Здесь безусловно стоял классический слот — на ключ в TPM либо на
-        // программный, — и он несёт ОБЕ доли разом (`both_shares`). Значит
-        // гибридный слот получателя не давал контейнеру ничего: противник,
-        // умеющий решать дискретный логарифм, брал авторский слот, получал A‖B,
-        // выводил KEK и открывал файл, не притрагиваясь к ML-KEM. Стойкость
-        // контейнера равна стойкости СЛАБЕЙШЕГО достаточного пути к CEK, а
-        // авторский путь достаточен всегда.
-        //
-        // Поэтому при гибридном получателе авторский слот тоже гибридный.
-        //
-        // Цена названа вслух: X-Wing определён на X25519, а ключ в TPM — P-256,
-        // поэтому на таком файле автор ТЕРЯЕТ аппаратную привязку. Это та же
-        // взаимоисключимость, что записана для получателя (`docs/threat-model.md`
-        // §2), только теперь и на стороне автора. Выбор между «постквантово» и
-        // «ключ не покидает TPM» делает автор, называя получателя.
+        // The author slot contains both shares and can recover CEK by itself, so it must
+        // be at least as strong as the recipient slot. Hybrid recipients require a
+        // matching hybrid author slot. X-Wing uses software X25519; the hardware hybrid
+        // uses the P-256 provider rather than claiming the same hardware properties.
         let author_slot = match (hardware_recipient, keys.device_hardware_hybrid) {
             // Получатель на аппаратном гибриде — авторский слот тот же механизм.
             // Слабее нельзя: авторский слот несёт ОБЕ доли, и классический
@@ -783,24 +761,11 @@ fn seal_private_meta<G: CryptoRng + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    //! RNG consumption order is NAMED rather than implied.
+    //! Check RNG byte destinations as well as draw lengths.
     //!
-    //! [`plan`]'s documentation freezes the order: `file_id`,
-    //! `header_salt`, `CEK`, share A, share B. Until now only golden
-    //! artifacts guarded it: those in `cc-cli` and adjacent `hardware_hybrid_golden.rs`. An artifact
-    //! responds to swapped adjacent calls with "bytes differ at
-    //! position N", insufficient to reconstruct order: all file bytes
-    //! change together because everything else derives from these five
-    //! values.
-    //!
-    //! Four of five requests are 32 bytes, so lengths alone CANNOT reveal
-    //! neighbor swaps. Therefore we also check WHERE the bytes went: stream
-    //! piece K must land in field X, and on a shift
-    //! the probe names what took its place.
-    //!
-    //! This probe is inside the crate rather than `tests/`: [`Session`] fields are private;
-    //! exposing them for comparison would widen the engine API for a test,
-    //! releasing file secrets to anyone importing the crate.
+    //! The frozen order is file_id, header_salt, CEK, share A, share B. Four draws
+    //! have the same size; checking only lengths would miss their permutation.
+    //! Tests live here to inspect private Session fields without exposing file secrets.
 
     // Литы сняты для теста: `unwrap`/`panic` — словарь проверки, индексирование
     // и арифметика — нарезка потока заведомо известной длины.

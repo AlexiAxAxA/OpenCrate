@@ -1,16 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Key agreement behind a trait: X25519 in software, P-256 in software or in a TPM.
+//! Software and hardware key agreement behind one trait.
 //!
-//! This module exists for one property: the private key may never leave
-//! hardware. `NCryptSecretAgreement` returns a shared secret, not the key, so
-//! deriving an AEAD key by "taking the private key and computing DH" is fundamentally impossible:
-//! key agreement must be an extension point rather than an implementation detail
-//! of sealing. That is why the sealing construction is implemented manually following
-//! RFC 9180 rather than using an off-the-shelf HPKE crate: that crate requires the key.
-//!
-//! The crate remains pure. This contains only the abstraction and software
-//! implementations; TPM support lives in `cc-keystore`, which depends on this trait,
-//! not the reverse.
+//! A provider can perform agreement without releasing its private key to Seal.
+//! Software X25519/P-256 live here; platform TPM adapters implement the trait
+//! outside this pure crate.
 
 use zeroize::Zeroizing;
 
@@ -24,23 +17,11 @@ use crate::CryptoError;
 /// turning this constant into a function of the mechanism.
 pub const SHARED_SECRET_LEN: usize = 32;
 
-/// The key-agreement shared secret, in **big-endian** order.
+/// Shared secret bytes, with an explicit big-endian constructor.
 ///
-/// ## Why there is one constructor and why it names the byte order
-///
-/// The `spikes/tpm-ecdh` spike discovered something easily overlooked:
-/// `NCryptSecretAgreement` with Microsoft Platform Crypto Provider returns the shared
-/// secret in **little-endian** order, whereas all pure P-256 implementations, including
-/// `p256`, use the big-endian X-coordinate representation, as prescribed by RFC 5903 (ECDH
-/// for IKE).
-///
-/// Byte order left to a comment is a bug waiting to happen:
-/// a reversed secret yields a different AEAD key; the slot will not open, appearing
-/// as "file corrupted". The error would be found, but not at its actual source.
-///
-/// There is therefore **exactly one** constructor, and its name states the byte order.
-/// An implementation receiving NCrypt bytes must reverse them to invoke it
-/// truthfully; this cannot be silently forgotten, since the type has no other entry point.
+/// P-256 providers supply the big-endian X coordinate. Microsoft Platform
+/// Crypto Provider returns NCrypt agreement bytes in little-endian order;
+/// its adapter must reverse them before calling the constructor.
 #[derive(Clone)]
 pub struct SharedSecret(Zeroizing<[u8; SHARED_SECRET_LEN]>);
 
@@ -302,24 +283,9 @@ mod tests {
         assert!(x.agree(&[0x00; 65]).is_err(), "X25519 принял 65 байт");
     }
 
-    /// `agree` ACCEPTS compressed points; the compressed-form prohibition belongs elsewhere.
-    ///
-    /// The neighboring probe previously claimed the opposite, "P-256 accepted compressed
-    /// form", while feeding `agree` thirty-three bytes of `0x04`. That is not a compressed
-    /// point: compressed points start with `0x02` or `0x03`; `0x04` denotes uncompressed form.
-    /// Rejection came from SEC1 parsing, so the probe passed for an unrelated
-    /// reason, while `agree` does not have the property it claimed at all:
-    /// `from_sec1_bytes` parses both forms, and both yield the same secret.
-    ///
-    /// The specification's requirement (§3.3: `enc` for `kem_id = 2` is exactly 65
-    /// bytes, an uncompressed point) is enforced by the EXACT LENGTH table in `oc-format`.
-    /// This separation is deliberate and documented on
-    /// [`KeyAgreement::agree`]: wire form is checked by the format, not the key-agreement
-    /// trait. Otherwise the hardware implementation would have to duplicate
-    /// the length table, and two copies of one table would diverge.
-    ///
-    /// The probe records this layer's actual behavior rather than a desired one; the verifiable
-    /// claim about compressed form lives in `oc-format`.
+    /// Low-level P-256 agreement accepts compressed and uncompressed SEC1 points.
+    /// Both represent the same point and yield the same secret. Seal separately
+    /// requires the canonical 65-byte uncompressed form for its wire/KDF context.
     #[test]
     fn a_compressed_p256_point_is_accepted_here_and_yields_the_same_secret() {
         use p256::elliptic_curve::sec1::ToSec1Point as _;

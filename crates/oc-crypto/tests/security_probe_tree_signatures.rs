@@ -12,20 +12,11 @@
     clippy::disallowed_methods,
     clippy::disallowed_types
 )]
-//! Track 7: primitives, integrity tree, and signatures.
+//! Tree and signature probes.
 //!
-//! This file deliberately has two parts.
-//!
-//! Part I: attempts to BREAK the tree, comparing shape with the RFC 6962
-//! reference implementation, agreement between the four sites encoding promotion,
-//! searching for two leaf sets with one root (CVE-2012-2459 class), and moving
-//! a proof to another index or length.
-//!
-//! Part II: tests prefixed `probe_bug_`, introduced to reproduce
-//! found defects and failing against the code at that time. After fixes, each
-//! serves as a regression. The suite description was updated alongside the code:
-//! a header outliving a fix misrepresents the build's state
-//! just as a comment outliving a construction change does.
+//! Compare tree shapes with an RFC 6962 reference, check promotion consistency,
+//! search for duplicate-root leaf sets, and try moving proofs to other indices or
+//! counts. Tests prefixed `probe_bug_` retain regressions for corrected defects.
 
 use std::collections::BTreeMap;
 
@@ -355,24 +346,8 @@ fn every_secret_type_is_zeroize_on_drop() {
 // Часть II. Заведены как воспроизведение дефектов; ПОЧИНЕНО, теперь регрессия.
 // ---------------------------------------------------------------------------
 
-/// BUG (fixed): the tree-hash identifier parsed and entered the author-signed
-/// header, but was never applied.
-///
-/// `merkle::leaf_of` and `merkle::node_of` hardcode BLAKE3 and accept
-/// no `TreeHashAlg` argument or other input (see signatures), while
-/// `TreeHashAlg::from_u8(2)` returned `Ok(Sha256)`. The build thus CLAIMED
-/// SHA-256 tree support while silently computing BLAKE3, the same defect class
-/// that produced `alg: none` in JWS.
-///
-/// Fixed by a second boundary, `merkle::ensure_supported`, called
-/// directly from `from_u8`. The former AEAD comparison here ("AEAD has a second
-/// boundary, the tree does not") no longer describes the code: AEAD's boundary then
-/// lived in `seal_with`/`open_with`, firing only at the first chunk;
-/// item D-9 moved it into `AeadAlg::from_u8`. Both identifiers are now
-/// checked identically, at the same point: parsing.
-///
-/// The test asserts what must hold: a build unable to compute a SHA-256
-/// tree must reject this identifier rather than accept it.
+/// Reject SHA-256 tree identifiers when this build computes only BLAKE3.
+/// The parser must not advertise an algorithm that the hashing path ignores.
 #[test]
 fn probe_bug_a_tree_hash_identifier_this_build_cannot_honour_is_accepted() {
     // Лист считается ровно как BLAKE3, независимо ни от чего. Прообраз собран

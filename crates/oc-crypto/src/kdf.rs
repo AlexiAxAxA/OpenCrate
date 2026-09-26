@@ -23,20 +23,11 @@ use zeroize::{Zeroize, Zeroizing};
 /// implementation detail.
 const KEK_IKM_LEN: usize = 64;
 
-/// Expand HKDF-SHA256 into a buffer whose length is specified by its type.
+/// Expand HKDF-SHA256 into a self-wiping fixed-size array.
 ///
-/// `expand` fails in only one case: requesting more than 255×32
-/// bytes; here the array type specifies output length, at most 32 bytes,
-/// so the error branch is unreachable. K1…K8 therefore return a key rather than `Result`:
-/// threading an impossible variant through every key-schedule call would
-/// train callers to use `?` where nothing can fail.
-/// Returns a wiping wrapper rather than a bare array.
-///
-/// This function outputs key material. A bare `[u8; N]` remains on the stack until
-/// the calling function ends and can enter the pagefile with it, without an owner
-/// to wipe it on destruction. The wrapper makes wiping
-/// a property of the type: previously every caller had to remember it individually,
-/// and not all did.
+/// Current callers request at most 32 bytes, below HKDF's 255×32-byte limit,
+/// so expansion cannot fail for those sizes. The wrapper wipes the owned
+/// key material when dropped.
 fn hkdf_sha256<const N: usize>(salt: &[u8], ikm: &[u8], info: &[&[u8]]) -> Zeroizing<[u8; N]> {
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
     let mut okm = Zeroizing::new([0u8; N]);
@@ -397,12 +388,9 @@ pub fn derive_witness_key(device: &crate::secret::X25519Secret) -> MacKey {
 /// "CC/v1/mark-choice" ‖ layout ‖ u64be(copy mark) ‖ u32be(point))`,
 /// the first eight bytes interpreted as `u64be`, modulo the variant count.
 ///
-/// The key is a SEPARATE organization marking key, not a device or
-/// author key: selection must be unpredictable for the recipient and reproducible for
-/// whoever investigates a leak; this key serves no other purpose. The layout is
-/// MAC-covered: one copy mark in two documents yields independent choices.
-/// For up to sixteen variants, modulo bias is on the order of 2^-60 and
-/// requires no correction.
+/// Use a separate organization marking key. The MAC-covered layout binds
+/// selection to the document. For up to sixteen variants, modulo bias is
+/// on the order of 2^-60.
 ///
 /// # Errors
 /// [`CryptoError::BadLength`]: zero variants.

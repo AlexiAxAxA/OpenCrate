@@ -1,22 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Edit writer: frames, tree, mutable region (`docs/format.md`,
-//! "EDITING IS EXECUTABLE", item G).
+//! Pure edit writer for frames, tree and mutable region (format, Editing).
 //!
-//! Pure like the entire engine: no I/O, clocks, or RNG; nonce seeds
-//! are parameters. It does not sign: the editing key resides in a TPM,
-//! and only a signing transcript and the completed return signature are exchanged with the engine.
-//!
-//! # What the writer must do and must not do
-//!
-//! * A frame whose plaintext is unchanged **is copied unchanged**. Repeating
-//!   (nonce, ciphertext, tag) at the same index does not reuse a nonce for
-//!   DIFFERENT plaintext; it is the same record, not a new one.
-//! * A changed frame is sealed only through `seal_chunk_hedged`, which accepts no
-//!   nonce, while the derived nonce depends on plaintext (I-1).
-//! * A copied frame must retain ITS OWN index: AAD binds the index, so a
-//!   frame moved elsewhere will not open for the reader. The writer
-//!   does not check indices; that is the caller's promise, with violations detected
-//!   rather than accepted by the reader.
+//! Nonce seeds come from the caller; signing happens outside the engine.
+//! Unchanged frames can be copied byte for byte only at their original index:
+//! AAD binds that index. Changed frames use `seal_chunk_hedged`, so changed
+//! plaintext gets a different nonce even with a repeated seed.
+//! The caller must preserve copied indices; the reader rejects a misplaced frame.
 
 use oc_crypto::aead::{NONCE_LEN, TAG_LEN, seal_chunk_hedged};
 use oc_crypto::merkle::{Leaf, MerkleTree, leaf_of};

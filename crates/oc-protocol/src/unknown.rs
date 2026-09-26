@@ -10,14 +10,10 @@ use core::ops::Range;
 use oc_format::FormatError;
 use oc_format::tlv::{FIELD_PREFIX_LEN, Field, UnknownTag, unknown_tag_action};
 
-/// Decision for an unknown tag: reject critical, skip optional.
-///
-/// The error variant is the one the crate returned for EVERY unknown tag before
-/// the decision of 2026-09-21: behavior for the critical range is entirely unchanged,
-/// including the rejection text.
+/// Reject an unknown critical tag; skip an optional one.
 ///
 /// # Errors
-/// [`FormatError::UnknownCriticalField`]: a tag from the critical range.
+/// [`FormatError::UnknownCriticalField`] for a critical tag.
 pub(crate) fn refuse_if_critical(tag: u16) -> Result<(), FormatError> {
     match unknown_tag_action(tag) {
         UnknownTag::Refuse => Err(FormatError::UnknownCriticalField { tag }),

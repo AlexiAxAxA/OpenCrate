@@ -12,26 +12,10 @@
     clippy::arithmetic_side_effects
 )]
 
-//! The specification's domain-label list must match `label::ALL` byte for byte.
+//! Check specification labels against `label::ALL` byte for byte.
 //!
-//! # Why this test was missing and why it is needed
-//!
-//! I-12 has two halves. The first, uniqueness and prefix-freeness,
-//! is guarded by tests inside `oc-crypto`, but all obtain their list **from code**. The second,
-//! "the list in `docs/format.md` §3.6 must match `label::ALL`", was checked by
-//! NOTHING: the repository had no tests reading `.md` files.
-//!
-//! While lists agree, the missing check is invisible. The next person adding
-//! a label may miss: code without specification means an unseparated domain for the second
-//! implementation; specification without code means a dead line the document itself
-//! calls a defect. The specification wins conflicts, but a conflict would
-//! be discovered only through an attack or manual byte comparison.
-//!
-//! # Why `include_str!` instead of reading a file
-//!
-//! The compiler embeds the string, avoiding runtime filesystem access:
-//! this crate's ban on clocks, files, and networking remains intact. A side
-//! benefit: the test cannot "pass" because the file was not found.
+//! Other tests check uniqueness and prefix-freeness; this catches code/spec drift.
+//! `include_str!` embeds the specification without runtime filesystem access.
 
 const SPEC: &str = include_str!("../../../docs/format.md");
 
@@ -156,29 +140,10 @@ fn declared_constants(body: &str) -> Vec<&str> {
     names
 }
 
-/// EVERY DECLARED LABEL APPEARS IN `ALL`.
+/// Check that every declared label appears in `ALL`.
 ///
-/// # The gap this test closes
-///
-/// Three tests guard I-12: uniqueness, prefix-freeness, and specification
-/// agreement. All obtain their list FROM `label::ALL`, so a label declared
-/// beside the others but omitted from `ALL` bypasses all of them. None
-/// notices either the label or its absence from §3.6.
-///
-/// This is precisely the class that occurred eleven times in this repository:
-/// a check is written and tested, but the inspected value
-/// is produced by something other than what it appears. Here the value is a list, manually
-/// produced by a person appending a name to an array.
-///
-/// There are no discrepancies today; the test is for tomorrow, when someone adds a label
-/// and forgets the second line.
-///
-/// # Why parse source rather than values
-///
-/// Because the question concerns source: an omitted constant's value never enters
-/// the program, and by definition cannot be queried through `ALL`.
-/// `include_str!` embeds text through the compiler, without runtime filesystem
-/// access, preserving crate purity.
+/// Uniqueness, prefix and spec checks all consume `ALL`, so they cannot detect a
+/// constant omitted from it. Inspect the embedded source to catch that omission.
 #[test]
 fn every_declared_label_is_listed_in_all() {
     let body = label_module_body();

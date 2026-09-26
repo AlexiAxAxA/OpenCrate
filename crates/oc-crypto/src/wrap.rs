@@ -236,26 +236,9 @@ mod tests {
 
     #[test]
     fn a_tampered_commitment_is_refused_even_though_the_aead_would_open() {
-        // ЧТО ЭТА ПРОБА ДОКАЗЫВАЕТ: испорченное обязательство отвергается, хотя
-        // всё остальное во входе честно и AEAD открылся бы. То есть проверка
-        // обязательства ЕСТЬ и она несущая, а не украшение.
-        //
-        // ЧЕГО ОНА НЕ ДОКАЗЫВАЕТ — и здесь стояло обратное. Комментарий называл
-        // её «ключевым тестом порядка проверок» и утверждал, что перестановка
-        // проверки после открытия AEAD её уронит. Это неправда, и проверено
-        // мутацией: при переставленных строках проба остаётся зелёной. Причина
-        // в том, что коды ошибок у обеих проверок УРАВНЕНЫ НАМЕРЕННО (см.
-        // соседнюю `a_wrong_commitment_and_a_wrong_tag_are_indistinguishable`),
-        // а при верном KEK оба порядка дают одно и то же значение. Порядок
-        // поведением НЕ РАЗЛИЧИМ — ни этой пробой, ни какой-либо другой.
-        //
-        // КТО СТЕРЕЖЁТ ПОРЯДОК: сторож по тексту
-        // `the_order_of_checks_is_the_one_the_invariants_require` в
-        // `crates/cc-cli/tests/repository_hygiene.rs`. Он читает тело
-        // `unwrap_cek` и требует, чтобы вызов `verify_commitment` стоял РАНЬШЕ
-        // вызова `.decrypt(`. Текстовый сторож здесь не лень, а предел метода:
-        // доказать порядок поведением нечем, пока коды ошибок одинаковы, а
-        // делать их разными нельзя — это и был бы оракул.
+        // A bad commitment is rejected even when KEK and AEAD input are otherwise valid.
+        // This proves commitment enforcement, not whether it runs before AEAD: both
+        // failures intentionally share one error. Check ordering separately in source.
         let (wrapped, commitment) = wrap_cek(&kek(), &cek(), &CORE_HASH, &mut TestRng(7)).unwrap();
         let mut tampered = commitment;
         if let Some(byte) = tampered.get_mut(0) {
@@ -295,21 +278,9 @@ mod tests {
 
     #[test]
     fn the_core_hash_is_bound_by_the_aead_itself_and_not_only_by_the_commitment() {
-        // Случай, которого не хватало: обязательство СХОДИТСЯ, а `core_hash` у
-        // AEAD другой. Тогда первая проверка пропускает, и отказать может
-        // только связывание по AAD (И-2) — больше нечему.
-        //
-        // Собирается это без всяких приватных уловок: `slot_commitment` — часть
-        // публичной поверхности крейта (`oc_crypto::kdf::slot_commitment`), и
-        // ровно так же обязательство считает `oc-engine`, собирая слот. Проба
-        // живёт рядом с остальными пробами обёртки только потому, что это её
-        // место по смыслу.
-        //
-        // ЧТО ДОКАЗАНО: байты обёртки, снятые под одним заголовком, не
-        // открываются под другим, даже если противник пересчитал обязательство
-        // под новый заголовок — а пересчитать его он может, KEK у него есть, он
-        // законный получатель этого слота. Именно поэтому одного обязательства
-        // мало и AAD несёт `core_hash`.
+        // A valid commitment with a different core_hash must still fail AEAD.
+        // The recipient can recompute the commitment using KEK, so the AAD binding
+        // must independently prevent moving a wrapped CEK to another header.
         let (wrapped, _) = wrap_cek(&kek(), &cek(), &CORE_HASH, &mut TestRng(7)).unwrap();
 
         // Обязательство ПОД ДРУГОЙ заголовок, тем же KEK.

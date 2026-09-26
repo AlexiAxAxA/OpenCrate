@@ -129,22 +129,11 @@ secret_type! {
     X25519Secret
 }
 
-/// Self-wiping plaintext buffer that never grows.
+/// Self-wiping plaintext buffer with fixed capacity.
 ///
-/// Not `Zeroizing<Vec<u8>>`; the distinction is fundamental. `Zeroizing` wipes
-/// contents **on destruction**, but cannot intervene on growth: when
-/// `Vec` reallocates, it returns its old buffer to the allocator unchanged, including
-/// all accumulated plaintext. A file decrypted into a growing vector
-/// leaves heap copies at every capacity doubling.
-///
-/// Capacity is therefore set once and never changes, while the array always
-/// has its full length: even the "tail" beyond meaningful data must be wiped,
-/// or remnants of a previous longer chunk would survive a subsequent
-/// shorter write.
-///
-/// This type is deliberately required by [`crate::aead::open_chunk`]'s signature. Previously
-/// it accepted an ordinary `Vec<u8>`, so wiping relied on caller
-/// discipline, meaning it relied on nothing.
+/// Growing a Vec can release an unwiped old allocation before its owner drops.
+/// This buffer never reallocates and wipes its full capacity, including the tail
+/// left by a shorter subsequent write. [`crate::aead::open_chunk`] requires it.
 pub struct SecretBuf {
     /// Length always equals capacity, so wiping covers the unused tail too.
     bytes: Vec<u8>,
@@ -201,19 +190,10 @@ impl SecretBuf {
         Ok(())
     }
 
-    /// Writable meaningful bytes for transforming contents IN PLACE.
+    /// Return the declared bytes for in-place transformation, without wiping them.
     ///
-    /// Differs from [`SecretBuf::as_capacity_mut`] in two essential
-    /// ways: only the declared portion is returned, and the buffer is **not**
-    /// wiped before access. In-place decryption needs exactly this: the buffer
-    /// already contains ciphertext, so wiping before decryption would erase
-    /// the input.
-    ///
-    /// Not added for convenience. Without it, decryption would have to allocate
-    /// a plaintext vector and copy it here, routing every
-    /// decrypted chunk through the ordinary heap, whose pages
-    /// can enter the pagefile. The viewer locks its memory
-    /// (`VirtualLock`); an intermediate copy would defeat that.
+    /// Unlike [`SecretBuf::as_capacity_mut`], this preserves ciphertext already in
+    /// the buffer and exposes only its meaningful length, avoiding a plaintext copy.
     pub fn as_declared_mut(&mut self) -> &mut [u8] {
         let len = self.len;
         self.bytes.get_mut(..len).unwrap_or_default()
@@ -259,19 +239,11 @@ impl fmt::Debug for SecretBuf {
 /// An order-of-magnitude margin, no more: a system thread-pool thread reserves 1 MiB of stack.
 pub const STACK_WIPE_BYTES: usize = 64 * 1024;
 
-/// Wipe stack BELOW the current frame, where frames of already returned
-/// calls resided.
+/// Best-effort wipe of stack space below the current frame.
 ///
-/// Why: `SecretBuf` wipes its memory, but decryption and copying
-/// pass through frames placing plaintext fragments on the stack
-/// (temporary cipher blocks, syscall copies), and return does not clear
-/// the stack. Measurement C2: after view cooldown, broker memory retained
-/// 26 document lines, all on the thread stack that had supplied data to the driver.
-///
-/// How: a local array of the same depth is wiped with writes the
-/// compiler cannot remove (`zeroize`), while the function is not inlined,
-/// or the array would occupy the caller's frame rather than space below it. Call AFTER plaintext
-/// processing, from the same depth that invoked that processing.
+/// A non-inlined local array is zeroized after plaintext processing, at the same
+/// call depth. This may overwrite returned callees' frames; it is not proof that
+/// all compiler copies, registers or other stack regions have been erased.
 #[inline(never)]
 pub fn wipe_stack_below() {
     let mut pad = [0u8; STACK_WIPE_BYTES];

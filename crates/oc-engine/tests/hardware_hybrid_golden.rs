@@ -10,21 +10,9 @@
 //! the private metadata. Changing the artifact requires a format decision;
 //! its version-6 witness has not been created.
 
-// Литы отключены только здесь и только те, без которых тест нечитаем:
-// `unwrap`/`expect`/`panic` — потому что провал пробы и есть паника, а
-// `indexing_slicing`/`arithmetic_side_effects` — потому что срезы эталона
-// режутся по заведомо известным границам, проверенным соседними `assert`.
-//
-// `disallowed_methods` — отдельный случай, и он требует не отговорки, а довода.
-// `clippy.toml` запрещает движку `std::fs` и `std::env` под лозунгом «ввод-вывод
-// живёт в cc-cli», и запрет этот про КРЕЙТ: пустой от машины обязан быть тот
-// код, который поедет в анклав, то есть `src`. Эталон же по определению лежит
-// файлом, и проба, которая его не читает, не проба. Читать через `include_bytes!`
-// было бы соблазнительно и хуже: отсутствующий эталон стал бы ошибкой СБОРКИ, и
-// инструмент, которым его заводят, перестал бы собираться вместе с ним. То же
-// послабление и по той же причине стоит у контейнерных эталонов
-// (`cc-cli/tests/golden.rs`). Гейт чистоты это не задевает: под
-// `wasm32-unknown-unknown` собирается библиотека, а не её пробы.
+// Test-only lint allowances cover assertions and fixed fixture slicing.
+// Filesystem reads load frozen artifacts at runtime so their generator can
+// build before they exist. The pure-core gate applies to library source.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -246,23 +234,11 @@ fn the_hardware_hybrid_header_is_byte_identical_to_the_frozen_golden() {
     }
 }
 
-/// BOTH GOLDEN HYBRID SLOTS OPEN WITH THEIR OWNERS' HALVES.
+/// Open both frozen hybrid slots and recover private metadata.
 ///
-/// A positive control without which byte comparison is blind: it proves
-/// byte stability while saying nothing about usability. This checks the converse:
-/// the frozen artifact is usable by BOTH paths, author and recipient.
-///
-/// The recipient path is exactly the device path: `open_mlkem_p256` using both
-/// halves, share A from the server slot, `derive_kek`, `unwrap_cek`, also checking
-/// the slot commitment (I-4: `unwrap_cek` compares it in constant
-/// time BEFORE opening AEAD). The author path differs because its slot carries
-/// BOTH shares together and needs no server.
-///
-/// Continues through private-metadata PLAINTEXT rather than stopping at `CEK`:
-/// stopping at the key would prove shares agree, but not that the data encrypted
-/// with that key agrees. No file contents here, since the engine does not see
-/// the stream, so the path ends at private metadata; this limit is stated
-/// explicitly rather than hidden behind "fully".
+/// The recipient uses its two halves, the server share, KEK derivation and CEK
+/// unwrapping; the author slot supplies both shares. Check the commitment as well.
+/// This validates the metadata path; the engine does not process payload streams.
 #[test]
 fn both_hardware_hybrid_slots_open_for_their_owners() {
     let bytes = std::fs::read(golden_path()).expect("эталон движка обязан лежать в репозитории");

@@ -172,44 +172,11 @@ pub fn decision_transcript(body: &[u8]) -> oc_crypto::Transcript {
     t
 }
 
-/// Whether a character is suitable for a note.
+/// Check whether a character is safe for a displayed note.
 ///
-/// # Why NOT printable ASCII, although server addresses use it
-///
-/// The first revision restricted notes to printable ASCII using the same rule that
-/// prevents display spoofing in server addresses. The rule was correct, its transfer
-/// was not; a live run between two machines caught this, not a test:
-/// the Russian note "test from the HUAWEI laptop" was rejected by the server.
-///
-/// These are different things. A server address has a WIRE representation that is ASCII by
-/// construction: non-Latin names travel over the network as punycode, so the restriction
-/// excludes nothing legitimate. A note has no separate wire representation: it is a phrase from
-/// one person to another, and people write in their own language. The example in
-/// [`AskAccess::note`] ("this is Peter from accounting", in Russian) would itself fail validation:
-/// the code prohibited precisely what the documentation used as an example.
-///
-/// # What is excluded
-///
-/// The same categories as for filenames (finding V-8), for the same reason: the danger lies in
-/// CATEGORIES, not letters. The set and rationale for each category are in
-/// [`oc_format::text`]; only the REACTION is local: reject.
-///
-/// The first revision carried its own copy of the list, the repository's fourth, and it was
-/// incomplete in precisely the same place as the other three: nine Trojan Source code points
-/// without the direction marks themselves (ALM, LRM, RLM). The copy is gone; the list is shared.
-///
-/// # Why newlines are NO LONGER allowed
-///
-/// The first revision allowed them: "a phrase may span two lines, and a newline cannot shift
-/// output; it adds a line rather than rewriting its neighbor". That reasoning is valid
-/// for OVERWRITING but misses LIST SPOOFING. A note is printed as a request-list
-/// item, and a newline moves text outside that item: a note
-/// containing "No. 2" and "device:" adds a nonexistent request to the displayed
-/// queue.
-///
-/// Additionally, the only note consumer already replaced `\n` with a dot,
-/// so a two-line note was NEVER displayed on two lines. The format
-/// allowed something the display could not render.
+/// Unicode letters are allowed. The excluded categories come from
+/// [`oc_format::text`]; control and direction characters can spoof display order.
+/// Newlines are rejected because they could make one queue entry look like several.
 fn note_char_is_safe(c: char) -> bool {
     !oc_format::text::is_display_unsafe(c)
 }
@@ -217,22 +184,13 @@ fn note_char_is_safe(c: char) -> bool {
 /// Maximum note length. A phrase, not a letter.
 pub const MAX_NOTE: usize = 256;
 
-/// The note rule shared across the crate.
+/// Validate a note using the shared character rules.
 ///
-/// # Why the tag number is a parameter rather than an internal constant
-///
-/// Because notes occur elsewhere: an action EXECUTION request
-/// ([`crate::action::ActionRequest`], stage 2) also carries one, with its own field number
-/// in its own registry. Copying these ten lines elsewhere would recreate the repository's
-/// familiar problem: one path fixed, its neighbor forgotten. The excluded-category
-/// sets would diverge at the first change to
-/// [`oc_format::text`]. A parameter costs less than a copy, and the rejection identifies
-/// THE tag containing the note; otherwise the user would read a field number from
-/// another document.
+/// `tag` identifies the field in errors; access and action requests use different tags.
 ///
 /// # Errors
-/// [`FormatError::BadFieldLength`]: the note exceeds [`MAX_NOTE`];
-/// [`FormatError::BadNoteChar`]: it contains a character from an excluded category.
+/// [`FormatError::BadFieldLength`] if the note exceeds [`MAX_NOTE`];
+/// [`FormatError::BadNoteChar`] for an excluded character.
 pub(crate) fn check_note(note: &str, tag: u16) -> Result<(), FormatError> {
     if note.len() > MAX_NOTE {
         return Err(FormatError::BadFieldLength { tag, len: note.len() });
@@ -375,20 +333,13 @@ impl core::fmt::Display for QueueError {
     }
 }
 
-/// Parse a queue: consecutive entries, each with its own length.
+/// Parse a queue of length-prefixed entries.
 ///
-/// Each entry has a length rather than one for the whole body because entries vary:
-/// the note and public key are variable-length. There is deliberately no total entry counter:
-/// it would be a second source of truth for their number and could diverge from the body.
-///
-/// Lives here rather than in the caller because parsing has two hosts, `cc-cli` and
-/// `cc-wasm`, and a second implementation of one layout would silently diverge. Before
-/// the move there was one implementation in `cc_cli::decide`, inaccessible to a
-/// `wasm32` module.
+/// Notes and public keys vary in size. The body determines the entry count;
+/// there is no separate counter to reconcile.
 ///
 /// # Errors
-/// [`QueueError`] if the body is truncated, an entry cannot be parsed, or the entry count exceeds
-/// the window.
+/// [`QueueError`] for truncation, malformed entries or a count beyond the window.
 pub fn split_queue(mut rest: &[u8]) -> Result<Vec<Pending>, QueueError> {
     let mut out: Vec<Pending> = Vec::new();
     while !rest.is_empty() {
@@ -468,26 +419,9 @@ pub fn decode_decision(bytes: &[u8]) -> Result<Decision, FormatError> {
             tag::CT => ct = Some(f.value.to_vec()),
             tag::AUTHOR_KEY => author_key = Some(f.array::<32>()?),
             tag::SIGNATURE => signature = Some(f.array::<64>()?),
-            // ЕДИНСТВЕННЫЙ РАЗБОРЩИК КРЕЙТА, ОСТАВШИЙСЯ СТРОГИМ (решение
-            // 2026-09-21). Необязательного диапазона у решения автора нет, и
-            // это не недосмотр.
-            //
-            // Подпись решения проверяется НЕ по сырым байтам, а по телу,
-            // собранному заново из разобранной структуры ([`decision_body`],
-            // зовётся в `cc_authority::Authority::decide_access` и в
-            // `cc_cli::granted::verified_decision`). Пропущенный тег из такой
-            // сборки выпадает — значит посторонний дописал бы его к уже
-            // подписанному решению, и подпись СОШЛАСЬ БЫ. У всех остальных
-            // документов крейта подпись покрывает сырые байты, и потому там
-            // дописать нельзя; здесь можно, и цена этому — самое дорогое поле
-            // разговора, доля B.
-            //
-            // Расширения необязательный диапазон здесь не даёт и в обмен: поле,
-            // которое новая сборка внесёт в `decision_body`, старая всё равно
-            // отвергнет по подписи. То есть выбор стоял между «ничего не
-            // приобрели» и «ничего не приобрели, но подписанный документ стал
-            // ковким», а И-6 держит ровно обратное — одна подпись, один
-            // документ.
+            // Reject every unknown tag here: signature verification reconstructs the
+            // body with `decision_body`. Skipping a field would remove it from the
+            // transcript and allow changes that leave the signature valid.
             other => return Err(FormatError::UnknownCriticalField { tag: other }),
         }
     }
@@ -695,13 +629,8 @@ mod tests {
         assert!(decode_decision(&encode_decision(&d).unwrap()).is_err(), "отказ с долей");
     }
 
-    /// THE APPROVAL FLAG IS EXACTLY 0 OR 1, NOTHING IN BETWEEN.
-    ///
-    /// Before 2026-09-20 it was read as "nonzero byte": a decision with byte 5
-    /// parsed as approval and re-encoded as one, so two different
-    /// byte sequences meant the same thing (I-7). This test specifically catches
-    /// returning to that interpretation; `is_err()` is insufficient here, so
-    /// the rejection CODE is checked too.
+    /// Accept approval flags only as 0 or 1.
+    /// Check the error variant to distinguish this boundary from another rejection.
     #[test]
     fn the_approval_flag_is_exactly_zero_or_one() {
         // Смещение байта одобрения ищется по заголовку поля: тег 8, длина 1.

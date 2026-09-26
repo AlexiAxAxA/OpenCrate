@@ -1,19 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Editing: edit key certificate, editor signature, session head, and
-//! revision verification (`docs/format.md`, "EDITING IS EXECUTABLE", decision 2026-09-17).
+//! Edit certificates, editor signatures, session heads and revision verification.
 //!
-//! # What is here and what is not
-//!
-//! This module contains bytes and the decision "this revision is signed by someone
-//! the author authorized". The counter reference (accepted-revision journal, server registry) lives above:
-//! it needs state, which this crate does not hold. Time is also supplied as a parameter.
-//!
-//! # Ordering
-//!
-//! Called AFTER verifying the mutable region MAC and parsing its body
-//! (`ContentDesc::decode_verified_with_body`): the editor signature is verified
-//! over authenticated bytes rather than attacker-supplied input (item 4 of the
-//! version 3 decision).
+//! Checks author authorization for a revision. Accepted-revision counters require
+//! host state; time is a parameter. Call after verifying the mutable-region MAC
+//! and parsing its body through `ContentDesc::decode_verified_with_body`.
 
 use crate::content::{ContentDesc, EditorSignature, FIRST_EDITING_VERSION, editor_tag, tag};
 use crate::header::Header;

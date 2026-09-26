@@ -134,21 +134,11 @@ pub fn keypair_from_seed(seed: &[u8; KEYPAIR_SEED_LEN]) -> Result<Keypair, Crypt
     Ok(Keypair { ml_kem_seed: pq_seed, classical, public_key })
 }
 
-/// ML-KEM seed from thirty-two stored bytes.
+/// Expand an independently stored 32-byte PQ seed into ML-KEM's 64-byte `d‖z`.
 ///
-/// ML-KEM requires sixty-four (`d‖z`), while this repository's key files use
-/// thirty-two: creation locking, DPAPI wrapping, and
-/// `cc keygen --wrap` rewrapping depend on that length. SHAKE256 expansion reconciles
-/// them using the same technique as X-Wing itself (§5.2 of its draft), where `d‖z` also
-/// grows from thirty-two bytes.
-///
-/// There is NO domain label here, by decision rather than omission. Labels separate TWO
-/// uses of one secret; here there is one use: the file is created for
-/// the post-quantum half and used nowhere else. An empty label in the §3.6
-/// registry would record a separation that does not exist.
-///
-/// Stored bytes must be INDEPENDENT: deriving them from the classical seed
-/// is forbidden; see the `HYBRID_KEY_FILE` documentation in `cc-cli`.
+/// SHAKE256 expansion follows the technique used by X-Wing (§5.2).
+/// The stored seed has this single purpose, so no extra domain label is used.
+/// Do not derive it from the classical seed: the hybrid halves must be independent.
 #[must_use]
 pub fn ml_kem_seed_from_stored(stored: &[u8; 32]) -> Zeroizing<[u8; ML_KEM_SEED_LEN]> {
     let mut xof = Shake256::default();
@@ -243,25 +233,15 @@ pub fn encapsulate<R: rand_core::CryptoRng + ?Sized>(
     encapsulate_derand(public_key, &seed)
 }
 
-/// Decapsulation with BOTH halves, the classical half behind a trait.
+/// Decapsulate with both halves, using the classical key-agreement provider.
 ///
-/// The trait is the entire point of this mechanism: the P-256 private key may reside in
-/// the TPM without leaving it, replacing the software key here without changing
-/// a single byte of secret derivation.
-///
-/// The public point comes FROM THE PARTY ITSELF, not an argument: it enters
-/// the combiner, so accepting it externally would make the shared secret externally controllable.
-///
-/// There is and can be no "invalid ciphertext" rejection here: ML-KEM responds
-/// to corrupted ciphertext with implicit rejection, deriving a secret from `z` and
-/// returning it normally. The caller detects the false secret
-/// through the slot commitment (I-4) and AEAD tag, both in constant
-/// time. Only structurally invalid input is rejected: an incorrect
-/// length or an off-curve point.
+/// The provider supplies its own public point for the combiner. This permits a
+/// TPM-held P-256 private key without changing the derivation.
+/// ML-KEM uses implicit rejection: corrupted ciphertext can return a different
+/// secret normally. The caller checks the slot commitment and AEAD tag.
 ///
 /// # Errors
-/// Incorrect ciphertext length, unparseable ML-KEM seed, or an ephemeral point not
-/// on the curve.
+/// Incorrect ciphertext length, unparseable seed or an off-curve ephemeral point.
 pub fn decapsulate_with(
     ml_kem_seed: &[u8; ML_KEM_SEED_LEN],
     classical: &dyn KeyAgreement,

@@ -272,23 +272,11 @@ fn aead_from_wire(value: u8) -> Result<AeadAlg, WireError> {
     }
 }
 
-/// One wire message's bytes in a fixed-capacity buffer.
+/// Wire message bytes in a self-wiping fixed-capacity buffer.
 ///
-/// Not introduced for taste. The payload key and claim code travel over this
-/// wire, while an appended-to `Vec` returns its old block to the allocator
-/// on every reallocation, with secrets inside and before any `Drop` (I-11).
-/// Here capacity is set once and contents wiped on destruction:
-/// this is [`SecretBuf`], whose guarantees cover the entire message,
-/// not one "secret" field; the wire layout does not divide bytes into important
-/// and unimportant ones.
-///
-/// One type for both sides, deliberately. Pipe reception is the same problem: frame
-/// length is known in advance, and reading it into an ordinary vector would create
-/// a second, unwiped copy of the same message.
-///
-/// [`Deref`] to `[u8]` deliberately exposes bytes: they are meant to enter
-/// a pipe. The type promises not unreadability but a buffer that
-/// never reallocates or outlives itself.
+/// Messages can contain payload keys or claim codes. [`SecretBuf`] avoids copies
+/// left behind by Vec growth and wipes the full buffer on drop. Both sending and
+/// receiving use this type; [`Deref`] exposes bytes for the host's I/O.
 pub struct Message(SecretBuf);
 
 impl Message {

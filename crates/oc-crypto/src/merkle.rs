@@ -307,22 +307,15 @@ impl MerkleTree {
         crate::digest_eq(&candidate, root)
     }
 
-    /// Consistency proof (RFC 9162, §2.1.4.1): the tree over the first
-    /// `old_count` leaves is a prefix of this tree.
+    /// Prove that the first `old_count` leaves are a prefix of this tree
+    /// (RFC 9162, §2.1.4.1).
     ///
-    /// Needed by the log witness (D3): it stores only an old head, not entries;
-    /// without such a proof, only someone holding the full log could verify
-    /// "the new head extends the old one".
-    ///
-    /// One difference from the RFC follows from [`root_of`]: the verifier knows
-    /// ROOTS rather than apexes. The RFC omits the old tree's apex when
-    /// `old_count` is a power of two, since the verifier can supply it. Here
-    /// there is nothing to supply, so it is placed at the path's start and is not
-    /// taken on trust: verification maps it through `root_of` to the
-    /// old head's root.
+    /// This format authenticates roots through [`root_of`], not raw apexes. For a
+    /// power-of-two old tree, include its apex at the path's start; verification
+    /// maps it through `root_of` before comparing the old root.
     ///
     /// # Errors
-    /// [`CryptoError::IndexOutOfRange`]: `old_count` is zero or exceeds the tree size.
+    /// [`CryptoError::IndexOutOfRange`] if `old_count` is zero or exceeds the tree size.
     pub fn consistency(&self, old_count: u32) -> Result<Vec<[u8; 32]>, CryptoError> {
         let leaves = self.levels.first().ok_or(CryptoError::TreeMismatch)?;
         let m = usize::try_from(old_count).map_err(|_| CryptoError::IndexOutOfRange)?;

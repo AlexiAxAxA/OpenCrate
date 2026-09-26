@@ -1,18 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Frozen control and replica document vectors (E2, B2/B4/B7).
+//! Frozen control and replica document bodies, transcripts and signatures.
 //!
-//! These documents arrive ENTIRELY FROM THE WIRE and must not change silently:
-//! a wire-byte change requires a decision recorded in the specification, the same
-//! rule as for the container. The vector is what makes a silent
-//! change impossible.
-//!
-//! The signature is frozen together with the body, for the same reason as leases:
-//! a body without a signature is a sheet of paper, while transcript divergence is silent
-//! (the signature simply fails to verify, making it look as though "the server broke").
-//!
-//! The generator is `print_vectors`, marked `#[ignore]`: it prints what later
-//! resides in `tests/kat/control.kat`. Rerun ONLY together with
-//! a recorded decision to change the bytes.
+//! The ignored `print_vectors` tool regenerates `tests/kat/control.kat` only for a
+//! recorded decision to change the wire bytes.
 
 #![allow(
     clippy::unwrap_used,

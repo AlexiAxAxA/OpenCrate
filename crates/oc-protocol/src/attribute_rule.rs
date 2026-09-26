@@ -1,39 +1,22 @@
 // SPDX-License-Identifier: MPL-2.0
-//! File rule based on holder attributes: bytes (F-27, B4b).
+//! File rules based on holder attributes (F-27, B4b).
 //!
-//! # Why the rule lives here rather than only on the server
-//!
-//! Before B4b, the rule was a type in `cc-authority` and a codec in its
-//! store: only the operator set it, using a command on the server machine, and
-//! its bytes never left the state file. With a signed author order
-//! (`order::Kind::SetRule`), those same bytes travel over the wire under a signature;
-//! a document signed and verified by different parties must have a single
-//! definition, located alongside the other documents.
-//!
-//! The layout matches the store's pre-move output byte for byte:
-//! old server state files remain readable unchanged, and the state
-//! fingerprint does not change on upgrade. The store calls this same codec.
+//! The server store and signed `order::Kind::SetRule` use this shared codec.
 //!
 //! # Layout
-//!
-//! TLV, tags in ascending order, all critical:
+//! TLV with ascending critical tags:
 //!
 //! | Tag | Field | Value |
 //! |---|---|---|
-//! | 1 | lease lifetime cap | `i64le` seconds, positive; optional |
-//! | 2 | issuance conditions | condition stream; always written, even when empty |
+//! | 1 | lease lifetime cap | positive `i64le` seconds; optional |
+//! | 2 | issuance conditions | condition stream; written even when empty |
 //! | 3 | restrictions | stream of `[condition, profile]` pairs; only when present |
 //!
-//! A stream is consecutive `u32le length ‖ bytes`. A condition is `u8 mode ‖ stream [attribute,
-//! value…]`. A profile uses the policy codec (`policy_codec`, container version).
-//!
-//! # What parsing rejects itself
-//!
-//! A name or value that is not an identifier; a condition without values; "at least" with
-//! other than one value; an unknown mode; limits on conditions, values and
-//! restrictions; a nonpositive lifetime cap; an empty restrictions stream:
-//! the writer never produces one, so it cannot have come from the writer. The meaning of names
-//! (whether an attribute exists in the dictionary) is checked by the server, which owns the dictionary.
+//! Streams contain `u32le length ‖ bytes` entries. A condition is
+//! `u8 mode ‖ stream [attribute, value…]`; profiles use `policy_codec`.
+//! Parsing checks identifiers, modes, counts, a positive cap and nonempty
+//! restrictions. Conditions require values; "at least" requires one value.
+//! The server separately checks names against its attribute dictionary.
 
 use oc_policy::Policy;
 

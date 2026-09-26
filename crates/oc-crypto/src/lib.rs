@@ -132,23 +132,13 @@ impl AeadAlg {
 pub enum SigAlg {
     /// Author signature. The only one this build executes.
     Ed25519 = 1,
-    /// Editing-device signature, format version 3: RSA-PSS-SHA256,
-    /// MGF1-SHA256, 32-byte salt, exponent 65537.
+    /// Editing-device signature: RSA-PSS-SHA256, MGF1-SHA256,
+    /// 32-byte salt and exponent 65537 (format version 3).
     ///
-    /// Chosen for its failure mode, not taste: ECDSA consumes an ephemeral `k` for
-    /// every signature, and signing two different messages with the same `k` reveals
-    /// the private key by arithmetic, exactly what virtual-machine snapshot
-    /// rollback causes. With PSS, repeated salt yields one extra valid signature and
-    /// nothing more. See `docs/format.md`, "VERSION 3 OPENED", item 7.
-    ///
-    /// Verifier: [`rsa::verify_pss_sha256`], in pure Rust: `oc-format`
-    /// verifies the signature and must build for
-    /// `wasm32-unknown-unknown`.
-    ///
-    /// Used **only by mutable-region tag 6**. This number is invalid in `suite.sig_alg`:
-    /// that field specifies the AUTHOR signature, frozen in version 1 as
-    /// Ed25519. Header parsing checks placement: `ensure_supported`
-    /// answers "can we execute it", not "does it belong here".
+    /// PSS salt repetition does not disclose the signing key, unlike ECDSA
+    /// nonce reuse. Verification is [`rsa::verify_pss_sha256`] and builds for WASM.
+    /// This identifier is valid only for mutable-region tag 6; the author's
+    /// `suite.sig_alg` remains Ed25519.
     RsaPssSha256 = 2,
 }
 
@@ -219,44 +209,22 @@ pub enum KemAlg {
 }
 
 impl KemAlg {
-    /// Whether the build can execute the declared mechanism: ONE name for this question.
+    /// Reject a KEM this build cannot execute.
     ///
-    /// The name was not introduced for neatness. "Is this mechanism executable?"
-    /// was answered separately by the fingerprint table ([`kdf::device_fpr`]), header length
-    /// tables, and the client's share-B issuance branch; the answers agreed
-    /// only through the editor's memory. Such a set can diverge exactly once:
-    /// in the direction of "somewhere a mechanism this build cannot execute was considered
-    /// executable".
-    ///
-    /// The answer comes from [`seal::supports_kem`] rather than being duplicated here: the `match`
-    /// without `_` must sit BESIDE THE IMPLEMENTATION, so adding a [`KemAlg`]
-    /// member breaks the build at the code responsible for executing it. This is
-    /// the `Result` form of the same answer, for callers needing rejection rather than `bool`,
-    /// following [`SigAlg::ensure_supported`].
+    /// Delegates to [`seal::supports_kem`], keeping the support table beside
+    /// the implementations. This is its `Result` form for callers needing an error.
     ///
     /// # Errors
-    /// [`CryptoError::UnsupportedAlgorithm`]: the registry has the number but the build
-    /// lacks the mechanism.
+    /// [`CryptoError::UnsupportedAlgorithm`] for a registered but unsupported KEM.
     pub fn ensure_supported(self) -> Result<(), CryptoError> {
         if seal::supports_kem(self) { Ok(()) } else { Err(CryptoError::UnsupportedAlgorithm) }
     }
 
-    /// Parse an identifier from a file.
+    /// Parse a registered KEM identifier.
     ///
-    /// # Why this has NO second boundary, unlike its neighbors
-    ///
-    /// [`AeadAlg::from_u8`], [`SigAlg::from_u8`], and [`TreeHashAlg::from_u8`]
-    /// call `ensure_supported` during parsing: an unimplemented header algorithm
-    /// must reject the FILE, the earlier the better. For `kem_id`, the consequence
-    /// differs normatively: `docs/format.md` §3.3 and §3.5 require
-    /// SKIPPING a slot with an unimplemented or unknown mechanism rather than rejecting
-    /// the file; a usable slot for this recipient may be adjacent.
-    /// Rejection built in here would move "skip or reject" from
-    /// the caller's level into number parsing, which knows nothing
-    /// about slots.
-    ///
-    /// The boundary therefore remains a separate [`Self::ensure_supported`] call,
-    /// while parsing answers only "is this number in the registry?".
+    /// An unsupported or unknown slot is skipped rather than rejecting the file
+    /// (format §3.3/§3.5), because another slot may be usable. Check
+    /// [`Self::ensure_supported`] separately before executing the mechanism.
     pub fn from_u8(v: u8) -> Result<Self, CryptoError> {
         match v {
             1 => Ok(Self::X25519HkdfSha256),
@@ -307,30 +275,11 @@ impl TreeHashAlg {
 /// None is used twice across the system. The only route into
 /// a signature is through [`Transcript`], whose constructor requires a label.
 pub mod label {
-    /// A domain label: a value that CANNOT be invented.
+    /// Domain label from the protocol registry.
     ///
-    /// # Why a type where `&'static [u8]` used to suffice
-    ///
-    /// I-12 requires unique, prefix-free labels, guarded by
-    /// four probes: uniqueness, prefix-freeness, versioning, and agreement with
-    /// specification §3.6. All four inspect [`ALL`], the REGISTRY. They never saw
-    /// call sites: `Transcript::new` and `seal::slot_info`
-    /// accepted arbitrary bytes, and a caller could pass
-    /// `b"CC/v1/lease-cache"`, a string absent from the registry and extending
-    /// [`LEASE`]. No probe would detect that, because it would
-    /// check the list rather than the call.
-    ///
-    /// The new type closes exactly this gap: `Label` values come ONLY
-    /// from this module's constants because the constructor is private and the field
-    /// is not public. The registry's guarantee becomes a guarantee of every call,
-    /// checked by the compiler rather than a probe.
-    ///
-    /// # Why `Debug` prints the string itself
-    ///
-    /// A label is not secret: it is plaintext in every file and in the specification.
-    /// I-11 forbids secrets in `Debug`, not domain names; hiding
-    /// the label would blind signature-failure debugging without the slightest
-    /// benefit.
+    /// The private constructor restricts values to this module's constants.
+    /// [`ALL`] is checked for uniqueness, prefix-freeness and agreement with §3.6.
+    /// Labels are public, so Debug shows their text for diagnosing domain mismatches.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Label(&'static [u8]);
 
@@ -397,26 +346,12 @@ pub mod label {
     pub const HEADER_SIG: Label = Label::new(b"CC/v1/header-sig");
     pub const REVOCATION: Label = Label::new(b"CC/v1/revocation");
     pub const GRANT: Label = Label::new(b"CC/v1/grant");
-    /// Author signature on an AGENT GRANT: door, expiry, depth, and shares B
-    /// for the subtree (`oc_protocol::agent::AgentGrant`, Agent Protocol, stage 1).
+    /// Author signature on an agent grant: door, expiry, depth and subtree shares B
+    /// (`oc_protocol::agent::AgentGrant`, Agent Protocol stage 1).
     ///
-    /// Its own label, not [`GRANT`], for good reason: `"CC/v1/grant"` marks
-    /// author approval of ONE request for one file
-    /// (`oc_protocol::access::decision_transcript`), whereas an agent grant distributes shares
-    /// for an entire tree and names the key with which the door signs delegations.
-    /// If the domains coincided, approval of one file would also serve as a signature
-    /// for distributing the entire subtree.
-    ///
-    /// Prefix-free: `"CC/v1/grant"` is not its prefix (seventh byte `a`
-    /// versus `g`); its nearest `a` neighbors, `"CC/v1/activate-req"`,
-    /// `"CC/v1/audit-entry"`, `"CC/v1/audit-head"`, `"CC/v1/attest-nonce"`,
-    /// `"CC/v1/attest-qualify"`, `"CC/v1/author-order"`,
-    /// `"CC/v1/authority-binding"`, and `"CC/v1/authority-transfer"`, differ
-    /// at byte eight (`g` versus `c`, `u`, `t`).
-    ///
-    /// Does not affect the container: it changes no format version and enters no
-    /// header. It is registered because prefix-freeness can be proved
-    /// only here (I-12).
+    /// Separate from [`GRANT`], which approves access to one file. Sharing a signing
+    /// key does not make the two statements interchangeable; their labels remain
+    /// prefix-free and do not change the container layout.
     pub const AGENT_GRANT: Label = Label::new(b"CC/v1/agent-grant");
     /// Parent-door signature on a DELEGATION to a child
     /// (`oc_protocol::agent::Delegation`, same source).
@@ -431,57 +366,23 @@ pub mod label {
     /// at byte eight (`e` versus `e`/`i`; for `device-fpr`, at byte nine,
     /// `l` versus `v`).
     pub const DELEGATION: Label = Label::new(b"CC/v1/delegation");
-    /// Author signature on an ACTION GRANT: which actions, subject to which
-    /// constraints, the door may request from the server
-    /// (`oc_protocol::action::ActionGrant`, Agent Protocol, stage 2,
-    /// `docs/agent-protocol/stage-2-actions.md` §4.1).
+    /// Author signature on an action grant: permitted actions and constraints
+    /// (`oc_protocol::action::ActionGrant`, Agent Protocol stage 2, §4.1).
     ///
-    /// Distinct from [`AGENT_GRANT`], for the same reason separating an agent grant from
-    /// [`GRANT`]: an agent grant distributes shares B for READING a subtree; an action
-    /// grant distributes permission to ACT outside the sandbox: push a branch,
-    /// delete a file, contact the outside. If domains matched, a signature granting
-    /// read access would grant actions too: an author opening a directory
-    /// to an agent would silently grant it `git push` as well.
-    ///
-    /// Prefix-free: among `a` labels, the closest prefix is `"CC/v1/activate-req"`,
-    /// which differs at the fifth byte of the name (`o` versus `v`:
-    /// `action` versus `activate`); its neighbor [`ACTION_LEASE`] shares only
-    /// `"CC/v1/action-"`, followed by `g` versus `l`. Neither extends the other.
-    ///
-    /// Does not affect the container: it changes no format version, enters no header,
-    /// and none of its bytes occur in `.cc`. It is registered
-    /// because prefix-freeness can be proved only here (I-12).
+    /// Separate from [`AGENT_GRANT`] and [`GRANT`]: permission to execute an action
+    /// must not be accepted as permission to distribute file shares, or vice versa.
     pub const ACTION_GRANT: Label = Label::new(b"CC/v1/action-grant");
-    /// SERVER signature on a single-use action lease
-    /// (`oc_protocol::action::ActionLease`, same source, §4.3).
+    /// Server signature on a single-use action lease
+    /// (`oc_protocol::action::ActionLease`, Agent Protocol stage 2, §4.3).
     ///
-    /// The key is the same one the server uses to sign file leases
-    /// (`authority.lease_verify_key` from the header), but the label is distinct for a
-    /// reason: a file lease permits OPENING a file; an action lease permits
-    /// EXECUTING an action with specified arguments. If domains matched, one
-    /// signed document could replace the other under the same key, reducing
-    /// the distinction between "read" and "push a branch" to how the recipient
-    /// interprets the bytes.
-    ///
-    /// Prefix-free with [`LEASE`] (`"CC/v1/lease"` is not its prefix) and
-    /// [`ACTION_GRANT`] (see there).
+    /// Uses the file lease-signing key with a distinct, prefix-free domain.
+    /// A file lease authorizes opening; this document authorizes a specific action.
     pub const ACTION_LEASE: Label = Label::new(b"CC/v1/action-lease");
-    /// AUTHOR signature on a decision concerning an action-execution request
-    /// (`oc_protocol::action::ActionDecision`, stage 2, §5 step 3).
+    /// Author signature on an action-execution decision
+    /// (`oc_protocol::action::ActionDecision`, Agent Protocol stage 2, §5).
     ///
-    /// Distinct from [`GRANT`], which signs decisions about ACCESS requests
-    /// (`oc_protocol::access::decision_transcript`). Both use the same key,
-    /// from the header and recorded by the server at file registration;
-    /// only the label separates the domains. If they coincided, two different author
-    /// statements would share one signature: "issue this device the file's share B"
-    /// and "let this door execute `git push` to this branch". Differing tag
-    /// numbers cannot be relied on to separate them: both bodies use
-    /// TLV, and matching numbers are a matter of time, not construction.
-    ///
-    /// Prefix-free: with [`ACTION_GRANT`] and [`ACTION_LEASE`] it shares only
-    /// `"CC/v1/action-"`, then `d` versus `g` and `l`; no registry label
-    /// starts with `"CC/v1/action-d"`. Like both neighbors, it does not affect
-    /// the container: it changes no format version and enters no header.
+    /// Separate from access decisions under [`GRANT`], although both use the author
+    /// key. The label distinguishes the statements independently of their TLV tags.
     pub const ACTION_DECISION: Label = Label::new(b"CC/v1/action-decision");
     pub const LEASE: Label = Label::new(b"CC/v1/lease");
     pub const ACTIVATE_REQ: Label = Label::new(b"CC/v1/activate-req");
@@ -567,24 +468,11 @@ pub mod label {
     pub const PAYLOAD: Label = Label::new(b"CC/v1/payload");
     pub const NONCE_BASE: Label = Label::new(b"CC/v1/nonce-base");
     pub const PRIVATE_META: Label = Label::new(b"CC/v1/private-meta");
-    /// DEVICE keypair derived from a claim code.
+    /// Device keypair derived from a claim code.
     ///
-    /// # Why a third code-related label was needed when two already existed
-    ///
-    /// `SLOT_B_CLAIM` derives share B directly from the code: that is how a
-    /// `RecipientClaim` slot works, correctly in that case: the recipient's share can be
-    /// anything, provided both parties derive the same value.
-    ///
-    /// For a code-based heir the share is FIXED: this file's share B, stored
-    /// in the author slot. It cannot be derived from an arbitrary code: derivation produces
-    /// what it produces. The code therefore derives a KEYPAIR, not a share, and the bequest
-    /// is sealed to its public key with ordinary `seal`, just as for any
-    /// device. No new primitives: the same HKDF, the same X25519, the
-    /// same `seal`.
-    ///
-    /// The label is separate and must remain so: using `SLOT_B_CLAIM` with the same
-    /// `ikm` would yield a private key equal to the slot share, so a code
-    /// opening one file would reveal the key used to sign another.
+    /// A code-based heir receives the file's existing share B sealed to this keypair.
+    /// This domain stays separate from `SLOT_B_CLAIM`, which derives a share directly;
+    /// reusing that derivation would make the private key equal to the slot share.
     pub const CLAIM_DEVICE: Label = Label::new(b"CC/v1/claim-device");
     pub const SLOT_B_CLAIM: Label = Label::new(b"CC/v1/slot-b-claim");
     pub const SLOT_B_COMMIT: Label = Label::new(b"CC/v1/slot-b-commit");
@@ -616,17 +504,9 @@ pub mod label {
     pub const WRAP_NONCE: Label = Label::new(b"CC/v1/wrap-nonce");
     /// Payload-frame nonce hedging (§6.1).
     ///
-    /// The fourth label serving this purpose; its later appearance was not about
-    /// completeness: decision C-13 was applied to slot sealing and CEK wrapping,
-    /// while two nonces, frame and private metadata, still took bytes directly
-    /// from the RNG. The same hole, simply in less conspicuous places.
-    ///
-    /// Deliberately **not** `"CC/v1/chunk-nonce"`: that string would extend the
-    /// [`CHUNK`] label, and labels also prefix HKDF `info`, where no
-    /// zero byte separates them: `"CC/v1/chunk"‖"-nonce"‖X` would equal
-    /// `"CC/v1/chunk-nonce"‖X`. Exactly the same case as [`CACHED_LEASE`], caught
-    /// by the same prefix-freeness test. Hence "frame" rather than "chunk":
-    /// the nonce belongs to the on-disk frame, not the logical chunk.
+    /// The label must not extend [`CHUNK`]: labels prefix HKDF `info` without a
+    /// separator, so `"CC/v1/chunk"‖"-nonce"‖X` would collide with
+    /// `"CC/v1/chunk-nonce"‖X`. The registry checks prefix-freeness.
     pub const FRAME_NONCE: Label = Label::new(b"CC/v1/frame-nonce");
     /// Private-metadata nonce hedging (§2.0).
     ///
@@ -678,21 +558,11 @@ pub mod label {
     pub const PROVE_ECHO: Label = Label::new(b"CC/v1/prove-echo");
     /// Request MAC key after proof (K24).
     pub const SESSION_MAC: Label = Label::new(b"CC/v1/session-mac");
-    /// Conversation-bound proof-of-possession echo (K31,
-    /// `docs/protocol.md` §9.4, decision 2026-09-21).
+    /// Conversation-bound proof-of-possession echo (K31, protocol §9.4).
     ///
-    /// One label for both steps of ONE derivation: it labels the handshake
-    /// transcript and also separates the HMAC domain whose key is the challenge
-    /// secret. There is no second domain, only "echo over transcript";
-    /// the label in the HMAC message prevents an echo colliding with K23 under
-    /// the same key.
-    ///
-    /// **The name deliberately does not extend `"CC/v1/prove-echo"`**: this set is
-    /// prefix-free, and `"CC/v1/prove-echo-bound"` would extend an already
-    /// occupied label, exactly what I-12 forbids. The nearest `e` neighbors,
-    /// `"CC/v1/editor-sig"`, `"CC/v1/editor-cert"`, `"CC/v1/edit-session"`,
-    /// and `"CC/v1/edition-claim"`, differ at byte eight (`c` versus
-    /// `d`).
+    /// Labels both the handshake transcript and its challenge-keyed HMAC.
+    /// Domain separation prevents collision with K23 under the same key; the label
+    /// also remains prefix-free with the older `"CC/v1/prove-echo"` domain.
     pub const ECHO_TRANSCRIPT: Label = Label::new(b"CC/v1/echo-transcript");
 
     /// Device fingerprint for mechanisms whose public keys exceed 32 bytes
@@ -721,25 +591,11 @@ pub mod label {
     /// is its prefix.
     pub const SERVER_FRESH: Label = Label::new(b"CC/v1/server-fresh");
 
-    /// Publisher-key signature on the DISTRIBUTION PACKAGE manifest (`manifest.txt` in a
-    /// Close Crate package, verified by `cc install`).
+    /// Publisher signature on a distribution-package `manifest.txt`.
     ///
-    /// # Why a label rather than "sign the manifest bytes"
-    ///
-    /// Because the publisher key is ordinary Ed25519, and without a domain its signature over
-    /// arbitrary bytes would work anywhere the same key verifies
-    /// something else. A distribution manifest has its own domain: it is neither a container,
-    /// protocol document, nor operator file, but an inventory of programs in an archive.
-    ///
-    /// The label does not affect the container at all: it changes no format version and enters no
-    /// header. It belongs in the registry not because the format needs it,
-    /// but because the registry is the ONLY place prefix-freeness is proved
-    /// (I-12): a label declared elsewhere is checked by nothing.
-    ///
-    /// Prefix-free: the nearest `p` labels are `"CC/v1/payload"`,
-    /// `"CC/v1/private-meta"`, `"CC/v1/policy-hash"`, and `"CC/v1/prove-echo"`;
-    /// all differ at byte eight; `"CC/v1/recovery-manifest"`
-    /// shares only a suffix, not a prefix.
+    /// A separate domain prevents reuse of an Ed25519 publisher signature as a
+    /// container or protocol signature. Registration keeps the label prefix-free;
+    /// the domain does not change the container layout.
     pub const PACKAGE_MANIFEST: Label = Label::new(b"CC/v1/package-manifest");
 
     /// K29: qualifying data for a TPM statement about the device key (B6a,
@@ -776,39 +632,15 @@ pub mod label {
     ];
 }
 
-/// Minimum claim-code entropy.
+/// Minimum claim-code entropy, checked by the code generator.
 ///
-/// Not a cosmetic number. XChaCha20-Poly1305 is not key-committing, and without
-/// slot-commitment verification a low-entropy code can be recovered through
-/// a partitioning oracle substantially faster than exhaustive search. A six-digit code
-/// is unacceptable.
-///
-/// The boundary is checked **at build time**, not runtime, and could not be otherwise.
-/// `ClaimSecret::from_bytes` accepts any 32 bytes and must: by then
-/// the code has been hash-compressed and the result does not reveal entropy. It must be measured
-/// at generation, where it is exactly measurable: code length and alphabet size
-/// are known constants. The check lives in `cc_cli::claim` (`const _: () =
-/// assert!(...)`), so a short code will not "fail a test"; it will not compile.
-///
-/// Human-invented codes are absent from the product for the same reason: the commitment
-/// is plaintext in the container, guessing is offline, and attempt counts
-/// cannot be limited, since the guesses are not made against us.
+/// A compressed 32-byte `ClaimSecret` does not reveal the original code's entropy.
+/// Enforce this bound using the generator's alphabet and length. Guessing is
+/// offline against the public commitment, so server attempt limits cannot help.
 pub const MIN_CLAIM_BITS: u32 = 128;
 
-/// SHA-256 of a byte slice.
-///
-/// # Why a shared function when format hashes are computed in `oc-format`
-///
-/// Because not everything that needs hashing is format data. A distribution manifest
-/// lists programs and checksums; it is not a container, has no format versions,
-/// and creating a tag-registry entry for it would be a mistake.
-///
-/// It lives here rather than in `cc-cli` under the crate rules: `sha2` is already a dependency
-/// of this crate, and a second edge to `cc-cli` would introduce a direct
-/// dependency where none is needed. This crate remains pure:
-/// no I/O, clocks, or RNGs here.
-///
-/// Compare results only through [`digest_eq`].
+/// SHA-256 of arbitrary bytes, including data outside the container format.
+/// Compare digests through [`digest_eq`].
 #[must_use]
 pub fn sha256(bytes: &[u8]) -> [u8; 32] {
     use sha2::Digest as _;
@@ -833,24 +665,10 @@ pub fn digest_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     bool::from(a.ct_eq(b))
 }
 
-/// Compare two PUBLIC keys of possibly different lengths in constant time.
+/// Compare public key byte strings.
 ///
-/// A separate function, not [`digest_eq`] weakened to slices; this distinction is essential.
-/// The rule "comparison accepts fixed-length arrays" prevents
-/// length from becoming a second source of errors; extending the exception to every
-/// comparison in the repository would abolish that rule. Exactly one circumstance
-/// justifies this exception: key length is a function of the mechanism (`kem_id`), differing for
-/// X25519 and P-256, and both comparison operands come from the **author-signed**
-/// header, where length is public by construction.
-///
-/// Length mismatch returns `false` immediately, before comparing contents, without leaking
-/// anything: the length is a public number in the file, already known to an attacker. This means
-/// "the slot is not for our mechanism", hence "not our slot", exactly the same as
-/// mismatching key bytes.
-///
-/// Contents are compared using `subtle` (I-13): the key is public, but response timing
-/// must not reveal how many bytes matched, or a byte-by-byte oracle for guessing
-/// the slot's recipient would emerge.
+/// Unequal public lengths return `false` immediately. Equal-length contents use
+/// `subtle`; this API makes no timing guarantee for secret lengths.
 #[must_use]
 pub fn public_key_eq(a: &[u8], b: &[u8]) -> bool {
     use subtle::ConstantTimeEq;

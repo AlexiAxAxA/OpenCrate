@@ -53,19 +53,11 @@ pub enum SignerTrust {
     Conflict,
 }
 
-/// Store of pinned author keys.
+/// Pinned author-key store, returning the trust verdict for an organization.
 ///
-/// Returns the complete verdict rather than "is this key known": only the store's owner
-/// can distinguish "first seen" from "a different key is known",
-/// and this layer has no basis for deciding on its behalf.
-///
-/// `org_id` is required in the query as a consequence of the format. The author's
-/// name is deliberately absent from the header (§2, tag 5): a name claimed in
-/// the header proves no more than the header itself. The only anchor
-/// for pinning is `org_id`, the tenant field. Hence the guarantee's
-/// boundary: this catches key substitution **for a known organization**, but not
-/// an attacker claiming to be a new organization; they simply become
-/// unknown, which is the honest state.
+/// Only the store knows whether the key is new or differs from a known key.
+/// Pinning can detect substitution for a known org_id; an unknown organization
+/// remains unknown rather than gaining trust from a name in the header.
 pub trait TrustStore {
     /// What is known about the "organization, author key" pair.
     fn lookup(&self, org_id: &[u8], author_key: &[u8; 32]) -> SignerTrust;
@@ -97,44 +89,25 @@ pub struct VerifiedHeader<'a> {
     pub trust: SignerTrust,
 }
 
-/// Algorithm suite identifier included in the header signature (§5).
+/// Signature-suite identifier included in the header transcript (§5).
 ///
-/// There is no separate scalar `suite_id` field in the header: the suite is defined by three
-/// identifiers within `SUITE`. This value is therefore derived from the
-/// parsed suite, specifically from the **signature algorithm**,
-/// the sole algorithm on which the signature being verified depends. When [`SigAlg`]
-/// gains a second value, this byte prevents presenting one scheme's signature as
-/// another's if their encodings can be made to collide.
-///
-/// The AEAD and tree hash identifiers deliberately do not enter this byte: they are
-/// within the header bytes, all covered by the signature. A second encoding
-/// of the same thing is a second place that may diverge from the first,
-/// causing silent rejection of a valid file.
+/// Derived from the signature algorithm rather than a separate header field.
+/// AEAD and tree-hash identifiers are already authenticated inside the header.
 ///
 /// [`SigAlg`]: oc_crypto::SigAlg
 pub fn suite_id(suite: &Suite) -> u8 {
     suite.sig as u8
 }
 
-/// Exact byte string covered by the author's signature (§5).
+/// Author-signature transcript (§5), shared by packers and verifiers.
 ///
 /// ```text
 /// "CC/v1/header-sig" ‖ 0x00 ‖ u8(suite_id) ‖ Magic ‖ u32le(HeaderLen) ‖ Header
 /// ```
 ///
-/// [`Transcript::new`] itself inserts the zero byte after the label, so it must not
-/// be added here: a second zero would produce a string absent from
-/// the specification, making files incompatible with any other implementation.
-///
-/// The header comes last without a length prefix: its length is already bound by
-/// the preceding field. [`Transcript`] provides
-/// [`Transcript::tail_after_declared_length`] for this case: it states that the missing
-/// prefix is deliberate, not forgotten.
-///
-/// Public because the packer must sign exactly the same string.
-/// Two independent constructions, one for writing and one for reading, could diverge and yield
-/// a file our writer signs but our reader rejects, requiring byte comparison
-/// to find the cause.
+/// [`Transcript::new`] inserts the label's zero separator; do not add another.
+/// HeaderLen already binds the trailing header, so use
+/// [`Transcript::tail_after_declared_length`] without a second length prefix.
 pub fn header_signing_transcript(
     header_bytes: &[u8],
     suite: &Suite,
@@ -157,21 +130,14 @@ pub fn header_signing_transcript(
 
 /// Parse and verify the container prologue.
 ///
-/// Sequence (see module documentation for its departure from §5.1):
-/// 1. structural boundaries: magic, length limit, sufficient bytes;
-/// 2. header decoding to obtain the author key and algorithm suite;
-/// 3. Ed25519 signature verification over the domain-labeled transcript;
-/// 4. version negotiation: `min_reader_version` and the `container_version` range;
-/// 5. signer trust determination using the store.
+/// 1. Check magic, length limit and available bytes.
+/// 2. Decode the header to obtain author key and suite.
+/// 3. Verify Ed25519 over the domain-separated transcript.
+/// 4. Check min_reader_version and readable container_version range.
+/// 5. Ask the store for signer trust.
 ///
-/// Step 4 precedes **any** substantive use of fields: a file
-/// requiring a newer client must be rejected even if everything else
-/// parsed and its signature matched. The author key and suite are read earlier,
-/// at step 2, but are not "applied": they only determine what to use and
-/// what to compute the signature over.
-///
-/// Success means "the signature matches", **not** "the signer is trustworthy":
-/// trust is returned separately in [`VerifiedHeader::trust`].
+/// Version checks precede substantive field use. A valid signature does not
+/// establish signer trust; that verdict is returned in [`VerifiedHeader::trust`].
 pub fn verify_and_parse<'a>(
     buf: &'a [u8],
     trust_store: &dyn TrustStore,
@@ -242,20 +208,10 @@ pub fn verify_and_parse<'a>(
     })
 }
 
-/// Parse the prologue **without** signature verification.
+/// Parse without checking the signature, for decoder fuzzing only.
 ///
-/// Exists for exactly one use: decoder fuzzing, which needs
-/// access to deep branches without dealing with signatures.
-///
-/// Gated by `cfg`, not merely an awkward name. A name and `#[doc(hidden)]` are
-/// requests to a reviewer; bypassing signature verification is too costly to rely
-/// on requests: a function available in a production build will eventually
-/// be called there, from a debugging branch, a diagnostic utility, or
-/// a "temporary look inside". Now the `cc-cli` build lacks this
-/// symbol entirely, making it impossible to call even deliberately.
-///
-/// The fuzzer enables `fuzzing` explicitly: `--cfg fuzzing` (cargo-fuzz sets
-/// it automatically).
+/// Available only with cfg(fuzzing), set by cargo-fuzz through `--cfg fuzzing`.
+/// Production callers cannot use this signature-bypassing entry point.
 #[doc(hidden)]
 #[cfg(any(test, fuzzing))]
 pub fn parse_without_verifying_signature_for_fuzzing_only(
@@ -725,23 +681,11 @@ mod tests {
         }
     }
 
-    /// The reader accepts exactly the readable range and rejects both adjacent values.
+    /// Accept the full readable range and reject its two adjacent values.
     ///
-    /// Both boundaries, not just the upper one (§2.1 item 3). A version below the readable range is
-    /// more dangerous than one above: it arouses no suspicion, "it is just an old file",
-    /// although it means the same thing: semantics we do not support.
-    ///
-    /// FOUR IN THE REJECTION LIST IS A POSITIVE CONTROL FOR DECISION R-1,
-    /// not just another round number. Zero and `MAX + 1` were rejected before the decision:
-    /// testing them would also pass with the old boundary. What distinguishes the new behavior
-    /// is precisely the lower neighbor: version 4, readable yesterday and permanently retired today.
-    /// One appears for the same reason, but is weaker: it verifies that the lower
-    /// bound moved away from [`FIRST_CONTAINER_VERSION`], retained as a historical record.
-    ///
-    /// Iterating the range, rather than only [`CONTAINER_VERSION`], maintains the second
-    /// property this stage exists for: the reader learns a version BEFORE
-    /// the writer starts producing it. Today the bounds coincide and the iteration
-    /// has one step; it becomes substantive again when the reader version is bumped.
+    /// The lower neighbor distinguishes retirement of an old format from the former
+    /// upper-bound-only rule. Historical FIRST_CONTAINER_VERSION is not the readable
+    /// lower bound; keep this test tied to the reader range as it grows.
     #[test]
     fn the_reader_accepts_all_released_versions_and_refuses_the_neighbours() {
         let signer = signer(7);

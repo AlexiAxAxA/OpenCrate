@@ -1,22 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Organization key directory: a record, its leaf and proof
-//! (`docs/protocol.md` §9.14, D4).
+//! Organization key-directory records and inclusion proofs (protocol §9.14, D4).
 //!
-//! # What a record asserts
+//! A record is the server's claim linking an organization/member to a key,
+//! version and origin; it does not prove that person's control of the key.
+//! Signed and witnessed journal heads let monitors detect conflicting views.
 //!
-//! "The server for organization `tenant` identifies key `public` (mechanism `kem`,
-//! K27 fingerprint `fpr`) as the key of member `name`, version `version`,
-//! origin `origin`." This is a SERVER assertion; by itself, it does not
-//! prove that this person controls the key: the name is the operator's claim, not
-//! cryptography. The directory journal serves a different purpose: it prevents the server from silently
-//! showing different records to different people. The leaf is the record's hash; the head
-//! is signed by the server and witness (`crate::witness`, kind `Directory`).
-//!
-//! # What is absent here
-//!
-//! Proof of ABSENCE: "there is no record for this name" is only the server's
-//! claim. Completeness is checked by a monitor that reads the entire journal
-//! (`DirectoryRecords`) and compares its root with the cosigned head.
+//! There is no absence proof here. Completeness requires reading the full
+//! `DirectoryRecords` journal and comparing its root with the cosigned head.
 
 use oc_format::FormatError;
 use oc_format::tlv::{TlvReader, TlvWriter};
@@ -395,20 +385,14 @@ impl Lookup {
         })
     }
 
-    /// Verify an answer to "(organization, member)": the head signature,
-    /// the record's inclusion under that head, and that the record concerns the requested member.
+    /// Verify the head signature, record inclusion and requested member.
     ///
-    /// # Order is essential here
-    ///
-    /// Head signature first, record inclusion second, record parsing
-    /// only third. Record bytes are authenticated not directly by the head signature but by
-    /// the inclusion proof, and the leaf is computed from RAW bytes
-    /// ([`Record::leaf`]); no parsing is needed to check it. Parsing them
-    /// earlier would let [`LookupError::Malformed`] report on a record not present
-    /// in the journal at all (the same I-5 rationale as for signed documents).
+    /// Authenticate the head first, then prove inclusion of the raw record bytes
+    /// ([`Record::leaf`]), then parse. This avoids detailed parsing errors for
+    /// records not authenticated by the journal.
     ///
     /// # Errors
-    /// [`LookupError`]: which check failed.
+    /// [`LookupError`] identifies the failed check.
     pub fn verify(&self, server_key: &[u8; 32], tenant: &str, name: &str) -> Result<Record, LookupError> {
         if !self.head.signed_by(Log::Directory, server_key) {
             return Err(LookupError::ServerSignature);
