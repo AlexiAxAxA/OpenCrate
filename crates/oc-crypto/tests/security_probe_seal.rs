@@ -218,7 +218,7 @@ fn no_info_can_make_two_slot_purposes_derive_the_same_key() {
 fn a_non_canonical_enc_that_yields_the_same_dh_still_fails_to_open() {
     // Старший бит `u` игнорируется реализацией X25519, поэтому `enc` и
     // `enc | 0x80` дают один и тот же общий секрет. Блоб не должен быть
-    // податлив: enc входит в ikm, и подмена обязана ломать тег.
+    // податлив: неканоническая форма отвергается до DH и вывода ключа.
     let mut rng = SeedRng::seeded(21);
     let sk = recipient(7);
     let mut blob = seal(&x25519_public(&sk), INFO, AAD, PT, &mut rng).unwrap();
@@ -227,7 +227,7 @@ fn a_non_canonical_enc_that_yields_the_same_dh_still_fails_to_open() {
     blob.enc[31] |= 0x80;
     assert_eq!(
         open(&sk, &blob, INFO, AAD).err(),
-        Some(CryptoError::Authentication),
+        Some(CryptoError::BadKey),
         "неканоническая перекодировка enc открыла блоб: конструкция податлива"
     );
 }

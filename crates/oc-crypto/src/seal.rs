@@ -268,9 +268,7 @@ pub fn seal_p256<R: CryptoRng + ?Sized>(
     rng: &mut R,
 ) -> Result<SealedBlob, CryptoError> {
     // K10 связывает байты; public_key() получателя возвращает несжатую точку.
-    if recipient_public.len() != 65 || recipient_public.first() != Some(&0x04) {
-        return Err(CryptoError::BadLength);
-    }
+    validate_dh_public(recipient_public, 65)?;
     use crate::agreement::KeyAgreement as _;
 
     let eph = crate::agreement::P256Agreement::generate(rng);
@@ -330,6 +328,26 @@ fn canonical_x25519_public(public: &[u8; PUBLIC_KEY_LEN]) -> bool {
         *last = 0x7f;
     }
     public.iter().rev().cmp(modulus.iter().rev()).is_lt()
+}
+
+// Проверяем представление до DH/KDF: K10 связывает именно байты ключа.
+fn validate_dh_public(public: &[u8], expected_len: usize) -> Result<(), CryptoError> {
+    match expected_len {
+        PUBLIC_KEY_LEN => {
+            let public = public.try_into().map_err(|_| CryptoError::BadLength)?;
+            if !canonical_x25519_public(public) {
+                return Err(CryptoError::BadKey);
+            }
+        }
+        65 => {
+            if public.len() != 65 || public.first() != Some(&0x04) {
+                return Err(CryptoError::BadLength);
+            }
+            p256::PublicKey::from_sec1_bytes(public).map_err(|_| CryptoError::BadKey)?;
+        }
+        _ => return Err(CryptoError::BadLength),
+    }
+    Ok(())
 }
 
 /// Seal a slot using the X-Wing HYBRID, `kem_id = 4`.
@@ -479,6 +497,7 @@ pub fn open(
     // который знает версию контейнера; здесь ответ один — не наш вход.
     let enc: [u8; PUBLIC_KEY_LEN] =
         blob.enc.as_slice().try_into().map_err(|_| CryptoError::BadLength)?;
+    validate_dh_public(&enc, PUBLIC_KEY_LEN)?;
 
     let sk = StaticSecret::from(*recipient_secret.expose());
     // Свой публичный ключ пересчитывается, а не принимается снаружи: он входит в
@@ -491,15 +510,9 @@ pub fn open(
     open_core(&key, blob, aad)
 }
 
-/// Open a blob using an AGREEMENT PARTY, whatever its implementation.
-///
-/// This is the extension point for which the trait exists: the private key may reside
-/// in a TPM without leaving it. A hardware implementation replaces
-/// the software implementation here without changing one byte of key derivation,
-/// which uses the shared secret rather than the key.
-///
-/// Our public key comes from the party itself, not an argument: it enters
-/// `ikm`, so accepting it externally would make key derivation externally controllable.
+/// Open a DH seal through a software or hardware agreement provider.
+/// Both public keys must use canonical X25519 or uncompressed P-256 encoding.
+/// The provider supplies its own public key for K10; callers cannot override it.
 pub fn open_with(
     agreement: &dyn crate::agreement::KeyAgreement,
     blob: &SealedBlob,
@@ -510,10 +523,11 @@ pub fn open_with(
         return Err(CryptoError::BadLength);
     }
 
-    // Согласование первым: оно же проверяет чужую точку. Длину `enc` проверяет
-    // реализация трейта — своей мерой для своего механизма.
-    let shared = agreement.agree(&blob.enc)?;
+    // Проверяем обе записи до согласования, включая аппаратного провайдера.
     let own_pk = agreement.public_key();
+    validate_dh_public(&own_pk, own_pk.len())?;
+    validate_dh_public(&blob.enc, own_pk.len())?;
+    let shared = agreement.agree(&blob.enc)?;
     let key = derive_key(&shared, &blob.enc, &own_pk, info)?;
     open_core(&key, blob, aad)
 }
@@ -817,6 +831,21 @@ mod kem_binding_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
+    #[test]
+    fn canonical_x25519_coordinates_are_strictly_below_the_modulus() {
+        let mut modulus = [0xff; PUBLIC_KEY_LEN];
+        *modulus.first_mut().unwrap() = 0xed;
+        *modulus.last_mut().unwrap() = 0x7f;
+        let mut below = modulus;
+        *below.first_mut().unwrap() = 0xec;
+        assert!(canonical_x25519_public(&below));
+        assert!(canonical_x25519_public(&[0; PUBLIC_KEY_LEN]));
+        assert!(!canonical_x25519_public(&modulus));
+        assert!(!canonical_x25519_public(&[0xff; PUBLIC_KEY_LEN]));
+        let mut high_bit = [0; PUBLIC_KEY_LEN];
+        *high_bit.last_mut().unwrap() = 0x80;
+        assert!(!canonical_x25519_public(&high_bit));
+    }
     /// HARDWARE HYBRID: SEALED IN SOFTWARE, OPENED WITH BOTH HALVES.
     ///
     /// The classical half is substituted BEHIND THE TRAIT; this probe uses

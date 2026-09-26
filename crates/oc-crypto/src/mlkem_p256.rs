@@ -105,7 +105,7 @@ impl core::fmt::Debug for Keypair {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Keypair")
             .field("ml_kem_seed", &"<redacted>")
-            .field("classical", &self.classical)
+            .field("classical", &"<redacted>")
             .field("public_key", &self.public_key)
             .finish()
     }
