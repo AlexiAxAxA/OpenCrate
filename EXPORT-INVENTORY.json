@@ -140,7 +140,7 @@
     ".github/workflows/ci.yml": "37f74c0187b1130489f60dc325d10f3d5c1f47e58df507e470cc5edb53542a33",
     ".gitignore": "ac05572173ab2ab7437511f230c35c4d767ebb9611496581f7bc9e54c57bc24a",
     "CONTRIBUTING.md": "ffa723ec1487243ea5fdde2ffdd36d00c59ea2c076de5baf08a1bf1b67c1a098",
-    "Cargo.lock": "e7485c98fde71f0ff04bb3b29c2b0b3e3cb223a604f278de16144a8ca4aa1cd3",
+    "Cargo.lock": "8254f0756886f2092a8ad7e71fb4f3f2c9c8c04a27f3439d592e9a03f40e1cd4",
     "Cargo.toml": "04d40e283aae2e3dc6facffcb4b0cf84f3d5caac3f483acde09f9e92bd954ff0",
     "LICENSE": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5",
     "README.md": "7628c9b38b4910d357569535374f1f9520e4822dfb18f8f0d32b1537e3d2ae73",
