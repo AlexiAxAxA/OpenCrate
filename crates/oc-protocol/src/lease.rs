@@ -45,6 +45,9 @@ pub const LEASE_VERSION_WITH_SERVER_POLICY: u16 = 2;
 /// understands it.
 pub const LEASE_VERSION_WITH_ATTESTATION: u16 = 3;
 
+/// Version carrying the authenticated first issuance time for a file.
+pub const LEASE_VERSION_WITH_FIRST_OPEN: u16 = 4;
+
 /// Lease tag registry. Strictly ascending, criticality by range, as in §2.
 ///
 /// Numbers are normative: raw body bytes are signed, so an implementation
@@ -86,11 +89,13 @@ pub mod tag {
     ///
     /// Optional: devices without a hardware clock receive a lease without it.
     pub const TPM_CLOCK: u16 = 11;
-    /// Server policy, `policy_codec` encoding. Only in version 2 and required there.
+    /// Server policy encoding. Required in version 2; optional in versions 3 and 4.
     pub const SERVER_POLICY: u16 = 12;
     /// Server-accepted device key attestation: `u8`, a basis from the
-    /// `crate::attestation::basis` registry. Only in lease version 3.
+    /// `crate::attestation::basis` registry. Required in version 3; optional in version 4.
     pub const ATTESTED: u16 = 13;
+    /// Server time of first issuance for the file. Required in version 4.
+    pub const FIRST_OPEN_AT: u16 = 14;
 }
 
 /// Lease state on the wire.
@@ -126,7 +131,9 @@ pub fn signing_transcript(body: &[u8]) -> oc_crypto::Transcript {
 /// this crate holds no keys and cannot hold them.
 pub fn encode(lease: &Lease) -> Result<Vec<u8>, FormatError> {
     let mut w = TlvWriter::new();
-    let version = if lease.facts.attested.is_some() {
+    let version = if lease.facts.first_open_at.is_some() {
+        LEASE_VERSION_WITH_FIRST_OPEN
+    } else if lease.facts.attested.is_some() {
         LEASE_VERSION_WITH_ATTESTATION
     } else if lease.facts.server_policy.is_some() {
         LEASE_VERSION_WITH_SERVER_POLICY
@@ -177,6 +184,12 @@ pub fn encode(lease: &Lease) -> Result<Vec<u8>, FormatError> {
         w.put(tag::ATTESTED, &[basis])?;
     }
 
+    if let Some(first_open_at) = lease.facts.first_open_at {
+        if first_open_at > lease.facts.issued_at {
+            return Err(FormatError::BadFieldLength { tag: tag::FIRST_OPEN_AT, len: 8 });
+        }
+        w.put(tag::FIRST_OPEN_AT, &first_open_at.0.to_le_bytes())?;
+    }
     Ok(w.finish().to_vec())
 }
 
@@ -201,6 +214,7 @@ pub fn decode(body: &[u8]) -> Result<Lease, FormatError> {
     let mut tpm_clock = None;
     let mut server_policy = None;
     let mut attested = None;
+    let mut first_open_at = None;
 
     while let Some(field) = reader.next_field()? {
         match field.tag {
@@ -259,6 +273,7 @@ pub fn decode(body: &[u8]) -> Result<Lease, FormatError> {
             // разборщиком, своя строка стоила недорого; с 2026-09-21 правило
             // общее, и вторая копия границы означала бы два места, где её
             // можно сдвинуть по отдельности.
+            tag::FIRST_OPEN_AT => first_open_at = Some(Timestamp(i64_le(field.value)?)),
             unknown => crate::unknown::refuse_if_critical(unknown)?,
         }
     }
@@ -273,10 +288,23 @@ pub fn decode(body: &[u8]) -> Result<Lease, FormatError> {
     // версиях 1 и 2 признака быть не может: клиент прежней сборки ступень по нему
     // не поднимет, а новый не должен поднимать по документу, который его не
     // объявлял.
+    match (version, first_open_at) {
+        (LEASE_VERSION_WITH_FIRST_OPEN, None) => {
+            return Err(FormatError::MissingField { tag: tag::FIRST_OPEN_AT });
+        }
+        (LEASE_VERSION_WITH_FIRST_OPEN, Some(first)) => {
+            if issued_at.is_some_and(|issued| first.0 > issued) {
+                return Err(FormatError::BadFieldLength { tag: tag::FIRST_OPEN_AT, len: 8 });
+            }
+        }
+        (_, Some(_)) => return Err(FormatError::UnknownCriticalField { tag: tag::FIRST_OPEN_AT }),
+        (_, None) => {}
+    }
     match (version, server_policy.is_some(), attested.is_some()) {
         (LEASE_VERSION, false, false)
         | (LEASE_VERSION_WITH_SERVER_POLICY, true, false)
-        | (LEASE_VERSION_WITH_ATTESTATION, _, true) => {}
+        | (LEASE_VERSION_WITH_ATTESTATION, _, true)
+        | (LEASE_VERSION_WITH_FIRST_OPEN, _, _) => {}
         (LEASE_VERSION | LEASE_VERSION_WITH_SERVER_POLICY, _, true) => {
             return Err(FormatError::UnknownCriticalField { tag: tag::ATTESTED });
         }
@@ -312,6 +340,7 @@ pub fn decode(body: &[u8]) -> Result<Lease, FormatError> {
             tpm_clock,
             server_policy,
             attested,
+            first_open_at,
         },
     })
 }
@@ -347,14 +376,8 @@ pub fn verify_signed(bytes: &[u8], lease_verify_key: &[u8; 32]) -> Result<Lease,
 }
 
 fn decode_clock(value: &[u8]) -> Result<TpmClock, FormatError> {
-    let reset = value.get(0..4).ok_or(FormatError::BadFieldLength {
-        tag: tag::TPM_CLOCK,
-        len: value.len(),
-    })?;
-    let ms = value.get(4..12).ok_or(FormatError::BadFieldLength {
-        tag: tag::TPM_CLOCK,
-        len: value.len(),
-    })?;
+    let reset = value.get(0..4).ok_or(FormatError::BadFieldLength { tag: tag::TPM_CLOCK, len: value.len() })?;
+    let ms = value.get(4..12).ok_or(FormatError::BadFieldLength { tag: tag::TPM_CLOCK, len: value.len() })?;
     if value.len() != 12 {
         return Err(FormatError::BadFieldLength { tag: tag::TPM_CLOCK, len: value.len() });
     }
@@ -404,6 +427,8 @@ mod tests {
                 tpm_clock: Some(TpmClock { reset_count: 3, clock_ms: 123_456 }),
                 server_policy: None,
                 attested: None,
+
+                first_open_at: None,
             },
         }
     }
@@ -412,6 +437,31 @@ mod tests {
     fn a_lease_round_trips_through_encode_and_decode() {
         let body = encode(&sample()).unwrap();
         assert_eq!(decode(&body).unwrap(), sample());
+    }
+
+    #[test]
+    fn the_first_open_field_is_critical_and_bound_to_its_version() {
+        let mut lease = sample();
+        lease.facts.first_open_at = Some(Timestamp(lease.facts.issued_at.0 - 30));
+        lease.facts.attested = Some(Attestation::EnrolledEk);
+        let body = encode(&lease).unwrap();
+        assert_eq!(decode(&body).unwrap(), lease);
+        let mut without_anchor = TlvWriter::new();
+        for (tag, value) in fields_of(&body) {
+            if tag != tag::FIRST_OPEN_AT {
+                without_anchor.put(tag, &value).unwrap();
+            }
+        }
+        assert!(matches!(
+            decode(&without_anchor.finish()),
+            Err(FormatError::MissingField { tag: tag::FIRST_OPEN_AT })
+        ));
+        let downgraded =
+            rebuild_with(&body, tag::VERSION, &LEASE_VERSION_WITH_ATTESTATION.to_le_bytes());
+        assert!(matches!(
+            decode(&downgraded),
+            Err(FormatError::UnknownCriticalField { tag: tag::FIRST_OPEN_AT })
+        ));
     }
 
     /// An empty remaining-opens value is distinguishable from a missing field.

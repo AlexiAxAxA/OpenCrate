@@ -630,10 +630,7 @@ fn check_delegation_shape(link: &Delegation) -> Result<(), FormatError> {
     )?;
     check_entries(&link.entries, link_tag::ENTRIES)?;
     if link.depth > MAX_GRANT_DEPTH {
-        return Err(FormatError::BadFieldLength {
-            tag: link_tag::DEPTH,
-            len: link.depth as usize,
-        });
+        return Err(FormatError::BadFieldLength { tag: link_tag::DEPTH, len: link.depth as usize });
     }
     if link.actions.len() > crate::action::MAX_ACTION_RULES {
         return Err(FormatError::BadFieldLength {
@@ -670,6 +667,8 @@ pub struct ChainFacts {
     /// [`verify_grant_chain`] call returns an empty list even when chain links
     /// carry action tags; this is the default denial, not data loss.
     pub actions: Vec<crate::action::ActionRule>,
+
+    pub action_expires_at: Option<i64>,
 }
 
 /// Why the chain was rejected.
@@ -711,7 +710,9 @@ pub enum ChainRefusal {
 impl core::fmt::Display for ChainRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::BadGrant => f.write_str("грант не принят: подпись автора не сошлась или документ не той формы"),
+            Self::BadGrant => {
+                f.write_str("грант не принят: подпись автора не сошлась или документ не той формы")
+            }
             Self::BadLink { index } => {
                 write!(f, "звено {index} не принято: подпись родителя не сошлась или документ не той формы")
             }
@@ -793,8 +794,8 @@ pub fn verify_grant_chain_with_actions(
 
     // Грант действий разбирается ЗДЕСЬ, до обхода звеньев: его правила — корень
     // сужения, и звено, проверенное против пустого корня, прошло бы всё.
-    let root_actions = match actions {
-        None => Vec::new(),
+    let (root_actions, action_expires_at) = match actions {
+        None => (Vec::new(), None),
         Some(bytes) => {
             let signed = crate::action::decode_grant(bytes, author_key)
                 .map_err(|_| ChainRefusal::BadActionGrant)?;
@@ -817,7 +818,8 @@ pub fn verify_grant_chain_with_actions(
             if now > signed.expires_at {
                 return Err(ChainRefusal::Expired);
             }
-            signed.rules
+
+            (signed.rules, Some(signed.expires_at))
         }
     };
 
@@ -830,6 +832,7 @@ pub fn verify_grant_chain_with_actions(
         tightening: grant.tightening.into_iter().collect(),
         depth_left: grant.max_depth,
         actions: root_actions,
+        action_expires_at,
     };
 
     for (index, raw) in links.iter().enumerate() {
@@ -1190,10 +1193,7 @@ mod tests {
     fn more_than_max_files_is_refused() {
         let ordered = grant();
         let many: Vec<Entry> = (0..=MAX_GRANT_FILES)
-            .map(|n| Entry {
-                file_id: file_id(u16::try_from(n).unwrap()),
-                share_b: blob(0x33),
-            })
+            .map(|n| Entry { file_id: file_id(u16::try_from(n).unwrap()), share_b: blob(0x33) })
             .collect();
         assert_eq!(many.len(), MAX_GRANT_FILES + 1);
 
@@ -1220,11 +1220,7 @@ mod tests {
         g.max_depth = MAX_GRANT_DEPTH + 1;
         assert!(grant_body(&g).is_err(), "писатель выпустил грант с глубиной выше потолка");
 
-        let body = rebuild_with(
-            &grant_body(&ordered).unwrap(),
-            tag::MAX_DEPTH,
-            &[MAX_GRANT_DEPTH + 1],
-        );
+        let body = rebuild_with(&grant_body(&ordered).unwrap(), tag::MAX_DEPTH, &[MAX_GRANT_DEPTH + 1]);
         let outcome = decode_grant(&signed(&body, &author()), &author().public_key());
         assert!(
             matches!(outcome, Err(FormatError::BadFieldLength { tag: tag::MAX_DEPTH, .. })),
@@ -1399,7 +1395,11 @@ mod tests {
         d
     }
 
-    fn chain(grant: &AgentGrant, links: &[Delegation], now: i64) -> Result<ChainFacts, ChainRefusal> {
+    fn chain(
+        grant: &AgentGrant,
+        links: &[Delegation],
+        now: i64,
+    ) -> Result<ChainFacts, ChainRefusal> {
         let grant_bytes = encode_grant(grant).unwrap();
         let raw: Vec<Vec<u8>> = links.iter().map(|l| encode_delegation(l).unwrap()).collect();
         let refs: Vec<&[u8]> = raw.iter().map(Vec::as_slice).collect();
@@ -1724,13 +1724,7 @@ mod tests {
         let grant_bytes = encode_grant(&grant()).unwrap();
         let raw: Vec<Vec<u8>> = links.iter().map(|l| encode_delegation(l).unwrap()).collect();
         let refs: Vec<&[u8]> = raw.iter().map(Vec::as_slice).collect();
-        verify_grant_chain_with_actions(
-            &author().public_key(),
-            &grant_bytes,
-            &refs,
-            actions,
-            now,
-        )
+        verify_grant_chain_with_actions(&author().public_key(), &grant_bytes, &refs, actions, now)
     }
 
     #[test]
@@ -1822,14 +1816,8 @@ mod tests {
 
         let rules = vec![push_rule("agent/work", 10, true)];
         let raw = action_grant(rules.clone());
-        let facts = verify_grant_chain_with_actions(
-            &author().public_key(),
-            &bytes,
-            &[],
-            Some(&raw),
-            NOW,
-        )
-        .expect("цепочка без файлов не принята");
+        let facts = verify_grant_chain_with_actions(&author().public_key(), &bytes, &[], Some(&raw), NOW)
+                .expect("цепочка без файлов не принята");
         assert!(facts.files.is_empty(), "предпосылка: файлов у гранта нет");
         assert_eq!(facts.actions, rules, "действия не достались двери без файлов");
     }
@@ -1884,10 +1872,7 @@ mod tests {
         let link = link_with(vec![push_rule("agent/work", 1, false)]);
         assert_eq!(
             chain_acting(std::slice::from_ref(&link), Some(&raw), NOW),
-            Err(ChainRefusal::ActionWidens {
-                index: 0,
-                why: ActionRefusal::ConfirmNotDelegable,
-            })
+            Err(ChainRefusal::ActionWidens { index: 0, why: ActionRefusal::ConfirmNotDelegable })
         );
     }
 

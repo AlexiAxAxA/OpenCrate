@@ -72,10 +72,14 @@ pub enum EditWriteError {
     Crypto(CryptoError),
     Edit(EditError),
     /// A copied frame is shorter than nonce plus tag.
-    BadFrame { index: u32 },
+    BadFrame {
+        index: u32,
+    },
     /// Pieces do not fit the layout: a nonfinal piece shorter than a chunk,
     /// a piece too long, or no pieces.
-    BadLayout { index: u32 },
+    BadLayout {
+        index: u32,
+    },
 }
 
 impl From<FormatError> for EditWriteError {
@@ -101,7 +105,8 @@ impl From<EditError> for EditWriteError {
 /// # Errors
 /// [`EditWriteError`]: frame, layout, cryptography, or counter.
 pub fn prepare(key: &PayloadKey, plan: EditPlan<'_>) -> Result<Unsigned, EditWriteError> {
-    let chunk = usize::try_from(plan.chunk_size).map_err(|_| FormatError::OffsetOverflow)?;
+    let chunk_size = oc_format::check_chunk_size(plan.chunk_size)?;
+    let chunk = usize::try_from(chunk_size).map_err(|_| FormatError::OffsetOverflow)?;
     let count = plan.pieces.len();
     if count == 0 {
         return Err(EditWriteError::BadLayout { index: 0 });
@@ -123,8 +128,15 @@ pub fn prepare(key: &PayloadKey, plan: EditPlan<'_>) -> Result<Unsigned, EditWri
                 ct.len()
             }
             Piece::Seal { plaintext, seed } => {
-                let (nonce, leaf) =
-                    seal_chunk_hedged(key, plan.aead, &plan.file_id, index, seed, plaintext, &mut framed)?;
+                let (nonce, leaf) = seal_chunk_hedged(
+                    key,
+                    plan.aead,
+                    &plan.file_id,
+                    index,
+                    seed,
+                    plaintext,
+                    &mut framed,
+                )?;
                 leaves.push(leaf);
                 payload.extend_from_slice(&nonce);
                 payload.extend_from_slice(&framed);

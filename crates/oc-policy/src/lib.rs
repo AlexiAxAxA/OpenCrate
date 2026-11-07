@@ -342,6 +342,8 @@ pub struct LeaseFacts {
     /// declare itself attested; the server saw the verified chain,
     /// and it arrives under the server's signature. See [`effective_binding`].
     pub attested: Option<Attestation>,
+    /// Time of the first successful issuance for this file, authenticated by the server.
+    pub first_open_at: Option<Timestamp>,
     /// Device hardware clock reading at issuance.
     ///
     /// An independent reading can detect restored software state only if the hardware
@@ -386,6 +388,7 @@ pub struct Context {
     /// Greatest time the client has ever seen. Time cannot move
     /// backward: `now` below this value means a rollback attempt.
     pub monotonic_floor: Timestamp,
+    /// Legacy local-state field. Validity uses the authenticated lease field.
     pub first_open_at: Option<Timestamp>,
     pub opens_so_far: u32,
     /// Number of opens UNDER THE CURRENT lease.
@@ -448,14 +451,22 @@ pub enum DenyReason {
     /// author specified. An action added by a future version (`ai_ingest`, `ocr`,
     /// `forward`) must also be denied by old clients; the only
     /// honest way to ensure that is not to open the file at all.
-    PolicyNotFullyUnderstood { unknown: u16 },
+    PolicyNotFullyUnderstood {
+        unknown: u16,
+    },
     ClockRollback,
-    LeaseRollback { seen: u64, presented: u64 },
+    LeaseRollback {
+        seen: u64,
+        presented: u64,
+    },
     /// Device hardware time is lower than at lease issuance.
     ///
     /// A TPM counter does not move backward. A lower reading means it was not
     /// the clock but the whole machine that was restored: snapshot rollback.
-    TpmClockRollback { issued: TpmClock, presented: TpmClock },
+    TpmClockRollback {
+        issued: TpmClock,
+        presented: TpmClock,
+    },
     /// The lease requires hardware time, but the device did not present it.
     ///
     /// Denial, not a skipped check: a lease bound to hardware time cannot be verified
@@ -473,7 +484,10 @@ pub enum DenyReason {
     ///
     /// This reports a clock-consistency failure separately from ordinary lease expiry.
     /// The check compares elapsed readings, not hardware time against lease duration.
-    HardwareClockOutranWallClock { hardware_ms: u64, wall_ms: u64 },
+    HardwareClockOutranWallClock {
+        hardware_ms: u64,
+        wall_ms: u64,
+    },
     NotYetValid,
     Expired,
     Revoked,
@@ -482,22 +496,34 @@ pub enum DenyReason {
     NoLease,
     WrongDevice,
     PolicyHashMismatch,
-    BindingTooWeak { required: Binding, actual: Binding },
+    BindingTooWeak {
+        required: Binding,
+        actual: Binding,
+    },
     /// The lease was presented before the server supposedly issued it.
     ///
     /// Such a lease cannot be evaluated: `issued_at` is the only record
     /// of the last server exchange. If it lies in the future, both the offline
     /// window and lease lifetime count from a nonexistent moment.
-    LeaseIssuedInTheFuture { issued_at: Timestamp, now: Timestamp },
+    LeaseIssuedInTheFuture {
+        issued_at: Timestamp,
+        now: Timestamp,
+    },
     /// The server issued a lease longer than the author allowed in `Network::Lease`.
     ///
     /// Precisely why policy and lease must be bound:
     /// otherwise a compromised or simply generous server grants a month
     /// where the author allowed eight hours, and the client accepts it.
-    LeaseOutlivesPolicy { allowed_seconds: i64, granted_seconds: i64 },
+    LeaseOutlivesPolicy {
+        allowed_seconds: i64,
+        granted_seconds: i64,
+    },
     /// The device has gone without contacting the server longer than the author allowed
     /// offline (`max_offline_seconds`).
-    OfflineTooLong { allowed_seconds: i64, elapsed_seconds: i64 },
+    OfflineTooLong {
+        allowed_seconds: i64,
+        elapsed_seconds: i64,
+    },
     /// The author counts validity from first open, but no record of it exists.
     FirstOpenNotRecorded,
 }
@@ -530,7 +556,9 @@ impl fmt::Display for DenyReason {
             Self::OfflineNotPermitted => write!(f, "файл требует подключения к сети"),
             Self::NoLease => write!(f, "нет действующей лицензии на это устройство"),
             Self::WrongDevice => write!(f, "лицензия выдана другому устройству"),
-            Self::PolicyHashMismatch => write!(f, "правила из лицензии не совпали с подписью автора"),
+            Self::PolicyHashMismatch => {
+                write!(f, "правила из лицензии не совпали с подписью автора")
+            }
             Self::BindingTooWeak { .. } => {
                 write!(f, "автор требует аппаратной привязки, на этом устройстве её нет")
             }
@@ -768,32 +796,14 @@ pub fn evaluate(
                 return Verdict::Deny(DenyReason::Expired);
             }
         }
-        Validity::FromFirstOpen { seconds } => match ctx.first_open_at {
-            Some(first) => {
-                // saturating_add: переполнение означает срок, до которого никто
-                // не доживёт, и превращать его в отказ незачем.
-                if ctx.now.0 > first.0.saturating_add(seconds) {
-                    return Verdict::Deny(DenyReason::Expired);
-                }
+        Validity::FromFirstOpen { seconds } => {
+            let Some(first) = lease.first_open_at else {
+                return Verdict::Deny(DenyReason::FirstOpenNotRecorded);
+            };
+            if ctx.now.0 > first.0.saturating_add(seconds) {
+                return Verdict::Deny(DenyReason::Expired);
             }
-            // Записи о первом открытии нет — и ветка не делала ничего, то есть
-            // клиенту достаточно было стереть своё состояние, чтобы срок автора
-            // перестал существовать вовсе. Локально этот отсчёт восстановить
-            // нечем: любое «считать первым открытием текущий момент» и есть то
-            // самое бесконечное продление, только записанное явно.
-            //
-            // Единственный, кто помнит первое открытие, — сервер: он его и
-            // обязан зафиксировать при выдаче лизинга. Поэтому файл с таким
-            // сроком открывается ТОЛЬКО онлайн, пока запись не появится. Это не
-            // ослабление: онлайн-открытие получает свежий лизинг, чьё окно уже
-            // ограничено политикой автора проверками выше, так что худший исход
-            // — доступ длиной в один разрешённый автором лизинг, а не вечный.
-            None => {
-                if !ctx.online {
-                    return Verdict::Deny(DenyReason::FirstOpenNotRecorded);
-                }
-            }
-        },
+        }
     }
 
     if let Some(max) = policy.max_opens
@@ -896,10 +906,7 @@ fn tighten_validity(author: Validity, server: Validity) -> Validity {
         (
             Validity::Window { not_before: a_from, not_after: a_to },
             Validity::Window { not_before: b_from, not_after: b_to },
-        ) => Validity::Window {
-            not_before: a_from.max(b_from),
-            not_after: a_to.min(b_to),
-        },
+        ) => Validity::Window { not_before: a_from.max(b_from), not_after: a_to.min(b_to) },
         (Validity::FromFirstOpen { seconds: a }, Validity::FromFirstOpen { seconds: b }) => {
             Validity::FromFirstOpen { seconds: a.min(b) }
         }
@@ -998,7 +1005,11 @@ mod tests {
     }
 
     fn device() -> DeviceFacts {
-        DeviceFacts { fingerprint: [1; 32], binding: Binding::Hardware, tpm_clock: DeviceClock::Absent }
+        DeviceFacts {
+            fingerprint: [1; 32],
+            binding: Binding::Hardware,
+            tpm_clock: DeviceClock::Absent,
+        }
     }
 
     fn ctx(now: i64) -> Context {
@@ -1107,6 +1118,8 @@ mod tests {
             tpm_clock: None,
             server_policy: None,
             attested: None,
+
+            first_open_at: None,
         }
     }
 
@@ -1240,10 +1253,7 @@ mod tests {
             Validity::FromFirstOpen { seconds: 30 },
             Validity::FromFirstOpen { seconds: 500 },
         ];
-        let networks = [
-            Network::StrictOnline,
-            Network::Lease { seconds: 3600, max_offline_seconds: 3600 },
-        ];
+        let networks = [Network::StrictOnline, Network::Lease { seconds: 3600, max_offline_seconds: 3600 }];
         let bindings = [Binding::Software, Binding::Hardware];
         let opens = [None, Some(3u32)];
         let action_sets: [&[Action]; 3] = [&[], &[Action::View], &[Action::View, Action::Print]];
@@ -1311,7 +1321,11 @@ mod tests {
         // `StrictOnline`, отменяет оффлайн целиком, то есть строже, а не слабее.
         // Взяв несовместимый лизинг, тест объявил бы дырой ровно ту ситуацию,
         // где ужесточение сработало.
-        let lease = LeaseFacts { expires_at: Timestamp(3600), ..lease() };
+        let lease = LeaseFacts {
+            expires_at: Timestamp(3600),
+            first_open_at: Some(Timestamp(0)),
+            ..lease()
+        };
         let moments = [Timestamp(0), Timestamp(60), Timestamp(150), Timestamp(1_000)];
 
         for author in &policies {
@@ -1319,8 +1333,7 @@ mod tests {
                 let merged = intersect(author, server);
                 for action in ALL_ACTIONS {
                     for now in moments {
-                        let mut context = ctx(now.0);
-                        context.first_open_at = Some(Timestamp(0));
+                        let context = ctx(now.0);
                         if !evaluate(&merged, Some(&lease), action, &context).is_allowed() {
                             continue;
                         }
@@ -1352,7 +1365,11 @@ mod tests {
         // Проверяется на всей сетке, а не на паре случаев: расхождение здесь
         // возникает в одном поле из восьми, и именно то поле забудут.
         let policies = grid();
-        let base = LeaseFacts { expires_at: Timestamp(3600), ..lease() };
+        let base = LeaseFacts {
+            expires_at: Timestamp(3600),
+            first_open_at: Some(Timestamp(0)),
+            ..lease()
+        };
         let moments = [Timestamp(0), Timestamp(60), Timestamp(150), Timestamp(1_000)];
 
         for author in &policies {
@@ -1361,8 +1378,7 @@ mod tests {
                 let carried = LeaseFacts { server_policy: Some(server.clone()), ..base.clone() };
                 for action in ALL_ACTIONS {
                     for now in moments {
-                        let mut context = ctx(now.0);
-                        context.first_open_at = Some(Timestamp(0));
+                        let context = ctx(now.0);
                         let by_transport = evaluate(author, Some(&carried), action, &context);
                         let by_composition = evaluate(&composed, Some(&base), action, &context);
                         // Решение обязано совпасть целиком — кроме ИМЕНИ
@@ -1400,7 +1416,11 @@ mod tests {
         // Предыдущий property-тест мерит `intersect`; этот — `evaluate` с полем
         // лизинга, то есть ровно то, что исполняет клиент получателя.
         let policies = grid();
-        let base = LeaseFacts { expires_at: Timestamp(3600), ..lease() };
+        let base = LeaseFacts {
+            expires_at: Timestamp(3600),
+            first_open_at: Some(Timestamp(0)),
+            ..lease()
+        };
 
         for author in &policies {
             for server in &policies {
@@ -1779,51 +1799,35 @@ mod tests {
     }
 
     #[test]
-    fn without_a_record_of_the_first_open_the_file_opens_only_online() {
+    fn without_a_signed_first_open_the_file_is_refused_even_online() {
         // Запись о первом открытии обязан сделать сервер: локально её взять
         // неоткуда, а «считать первым открытием сейчас» — это и есть бесконечное
         // продление. Поэтому без записи открытие возможно только с сетью.
         let policy = from_first_open();
 
-        let mut forgetful = ctx(60);
-        forgetful.first_open_at = None;
-        assert!(evaluate(&policy, Some(&lease()), Action::View, &forgetful).is_allowed());
-
-        let mut forgetful_offline = forgetful.clone();
-        forgetful_offline.online = false;
-        assert_eq!(
-            evaluate(&policy, Some(&lease()), Action::View, &forgetful_offline),
-            Verdict::Deny(DenyReason::FirstOpenNotRecorded)
-        );
+        let mut context = ctx(60);
+        for online in [true, false] {
+            context.online = online;
+            assert_eq!(
+                evaluate(&policy, Some(&lease()), Action::View, &context),
+                Verdict::Deny(DenyReason::FirstOpenNotRecorded)
+            );
+        }
     }
 
     #[test]
-    fn wiping_the_first_open_record_buys_no_more_than_one_lease() {
+    fn the_signed_first_open_deadline_is_inclusive() {
         // Худший исход выбранного решения, названный явно: стерев состояние,
         // клиент получает не вечный доступ, а ровно один лизинг, длина которого
         // уже ограничена политикой автора. Через десять лет он давно истёк.
         let policy = from_first_open();
-        let mut forgetful = ctx(10 * 365 * 24 * 3600);
-        forgetful.first_open_at = None;
+        let lease = LeaseFacts { first_open_at: Some(Timestamp(0)), ..lease() };
         assert_eq!(
-            evaluate(&policy, Some(&lease()), Action::View, &forgetful),
-            Verdict::Deny(DenyReason::Expired)
-        );
-    }
-
-    #[test]
-    fn the_deadline_from_the_first_open_still_applies_when_the_record_exists() {
-        // Контроль: правка ветки None не должна была тронуть саму проверку срока.
-        let policy = from_first_open();
-        let mut remembered = ctx(3601);
-        remembered.first_open_at = Some(Timestamp(0));
-        assert_eq!(
-            evaluate(&policy, Some(&lease()), Action::View, &remembered),
+            evaluate(&policy, Some(&lease), Action::View, &ctx(3601)),
             Verdict::Deny(DenyReason::Expired)
         );
 
-        remembered.now = Timestamp(3600);
-        assert!(evaluate(&policy, Some(&lease()), Action::View, &remembered).is_allowed());
+        assert!(evaluate(&policy, Some(&lease), Action::View, &ctx(3600)).is_allowed());
     }
 
     #[test]

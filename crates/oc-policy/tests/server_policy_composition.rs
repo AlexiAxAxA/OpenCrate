@@ -17,7 +17,7 @@
 
 use oc_policy::{
     Action, Binding, Context, DenyReason, DeviceClock, DeviceFacts, LeaseFacts, Network, Policy,
-    Timestamp, TimeSource, Validity, Verdict, evaluate,
+    TimeSource, Timestamp, Validity, Verdict, evaluate,
 };
 
 fn device(binding: Binding) -> DeviceFacts {
@@ -64,6 +64,7 @@ fn lease(server_policy: Option<Policy>) -> LeaseFacts {
         tpm_clock: None,
         server_policy,
         attested: None,
+        first_open_at: None,
     }
 }
 
@@ -232,7 +233,9 @@ fn an_empty_profile_closes_everything() {
     for action in [Action::View, Action::Export] {
         match evaluate(&author(), Some(&facts), action, &ctx()) {
             // Оба действия автор давал — значит, отказ за сервером.
-            Verdict::Deny(DenyReason::ActionTightenedByServer(denied)) => assert_eq!(denied, action),
+            Verdict::Deny(DenyReason::ActionTightenedByServer(denied)) => {
+                assert_eq!(denied, action)
+            }
             other => panic!("пустой профиль пропустил {action:?}: {other:?}"),
         }
     }

@@ -14,7 +14,10 @@ use oc_crypto::sign::{Ed25519Signer, Signer};
 use oc_crypto::{Transcript, label};
 use oc_format::FormatError;
 use oc_format::tlv::CRIT_TAG_MAX;
-use oc_protocol::{access, activation, attestation, attribute_rule, control, directory, lease, order, replica, revocation, standing};
+use oc_protocol::{
+    access, activation, attestation, attribute_rule, control, directory, lease, order, replica,
+    revocation, standing,
+};
 
 /// Unknown tag in the OPTIONAL range.
 const OPTIONAL: u16 = 0x8ABC;
@@ -94,6 +97,7 @@ fn lease_body() -> Vec<u8> {
             tpm_clock: None,
             server_policy: None,
             attested: None,
+            first_open_at: None,
         },
     })
     .unwrap()
@@ -174,7 +178,11 @@ fn activate_req_body() -> Vec<u8> {
         device_fpr: [0x33; 32],
         device_kem: 1,
         device_public: vec![0x44; 32],
-        server_slot: activation::SlotBlob { enc: vec![0x55; 32], nonce: [0x66; 24], ct: vec![0x77; 48] },
+        server_slot: activation::SlotBlob {
+            enc: vec![0x55; 32],
+            nonce: [0x66; 24],
+            ct: vec![0x77; 48],
+        },
         lease_seconds: 8 * 3600,
         device_clock: None,
         operation_id: None,
@@ -194,7 +202,11 @@ fn hello_body() -> Vec<u8> {
 
 fn challenge_body() -> Vec<u8> {
     activation::encode_challenge(&activation::Challenge {
-        software: activation::SlotBlob { enc: vec![0x55; 32], nonce: [0x66; 24], ct: vec![0x77; 48] },
+        software: activation::SlotBlob {
+            enc: vec![0x55; 32],
+            nonce: [0x66; 24],
+            ct: vec![0x77; 48],
+        },
         hardware: None,
         hybrid: None,
     })
@@ -431,14 +443,23 @@ fn table() -> Vec<Doc> {
         }),
         sig_doc(
             "отзывная",
-            revocation::encode(&revocation::Revocation { file_id: [0x5a; 16], epoch: 2, at: 1_756_000_000 }).unwrap(),
+            revocation::encode(&revocation::Revocation {
+                file_id: [0x5a; 16],
+                epoch: 2,
+                at: 1_756_000_000,
+            })
+            .unwrap(),
             SERVER,
             revocation::signing_transcript,
             |doc, key| revocation::verify_signed(doc, key).map(|v| format!("{v:?}")),
         ),
-        sig_doc("распоряжение автора", order_body(), AUTHOR, order::signing_transcript, |doc, key| {
-            order::verify_signed(doc, key).map(|v| format!("{v:?}"))
-        }),
+        sig_doc(
+            "распоряжение автора",
+            order_body(),
+            AUTHOR,
+            order::signing_transcript,
+            |doc, key| order::verify_signed(doc, key).map(|v| format!("{v:?}")),
+        ),
         sig_doc(
             "привязка сервера",
             binding(&anchor).sign(&anchor).unwrap()[64..].to_vec(),
@@ -446,15 +467,27 @@ fn table() -> Vec<Doc> {
             binding_transcript,
             |doc, key| control::Binding::open(doc, key).map(|v| format!("{v:?}")),
         ),
-        sig_doc("квитанция операции", receipt_body(&anchor), ANCHOR, receipt_transcript, |doc, key| {
-            control::Receipt::open(doc, key).map(|v| format!("{v:?}"))
-        }),
-        sig_doc("толчок реплики", push_body(&replica_key), REPLICA, push_transcript, |doc, key| {
-            replica::Push::open(doc, key).map(|v| format!("{v:?}"))
-        }),
-        sig_doc("подтверждение реплики", ack_body(&replica_key), REPLICA, ack_transcript, |doc, key| {
-            replica::Ack::open(doc, key).map(|v| format!("{v:?}"))
-        }),
+        sig_doc(
+            "квитанция операции",
+            receipt_body(&anchor),
+            ANCHOR,
+            receipt_transcript,
+            |doc, key| control::Receipt::open(doc, key).map(|v| format!("{v:?}")),
+        ),
+        sig_doc(
+            "толчок реплики",
+            push_body(&replica_key),
+            REPLICA,
+            push_transcript,
+            |doc, key| replica::Push::open(doc, key).map(|v| format!("{v:?}")),
+        ),
+        sig_doc(
+            "подтверждение реплики",
+            ack_body(&replica_key),
+            REPLICA,
+            ack_transcript,
+            |doc, key| replica::Ack::open(doc, key).map(|v| format!("{v:?}")),
+        ),
         // Печатается РАЗОБРАННОЕ намерение и подписанты, но НЕ `body_hash`, и это
         // не подгонка под зелёный: отпечаток считается по СЫРЫМ байтам тела
         // (`control.rs`, `open_request`), и у тела с дописанным необязательным
@@ -464,9 +497,13 @@ fn table() -> Vec<Doc> {
         // полем под тем же тождеством, получит `IdConflict`, а не прежнюю
         // квитанцию. Сверять здесь отпечаток значило бы требовать от него
         // независимости от байтов — то есть ровно того, чего он не обещает.
-        multisig_doc("намерение управляющих", request_body(&controller), CONTROLLER, request_transcript, |doc| {
-            control::open_request(doc).map(|v| format!("{:?} {:?}", v.request, v.signers))
-        }),
+        multisig_doc(
+            "намерение управляющих",
+            request_body(&controller),
+            CONTROLLER,
+            request_transcript,
+            |doc| control::open_request(doc).map(|v| format!("{:?} {:?}", v.request, v.signers)),
+        ),
         multisig_doc(
             "сертификат передачи",
             transfer_body(&anchor, &controller),
@@ -478,13 +515,34 @@ fn table() -> Vec<Doc> {
 
     // --- незаверенные ---
     for (name, body, door) in [
-        ("положение файла", standing_body(), Box::new(|b: &[u8]| standing::decode(b).map(|v| format!("{v:?}"))) as Door),
-        ("просьба о доступе", ask_body(), Box::new(|b: &[u8]| access::decode_ask(b).map(|v| format!("{v:?}")))),
-        ("запись очереди", pending_body(), Box::new(|b: &[u8]| access::decode_pending(b).map(|v| format!("{v:?}")))),
-        ("запрос активации", activate_req_body(), Box::new(|b: &[u8]| activation::decode_req(b).map(|v| format!("{v:?}")))),
+        (
+            "положение файла",
+            standing_body(),
+            Box::new(|b: &[u8]| standing::decode(b).map(|v| format!("{v:?}"))) as Door,
+        ),
+        (
+            "просьба о доступе",
+            ask_body(),
+            Box::new(|b: &[u8]| access::decode_ask(b).map(|v| format!("{v:?}"))),
+        ),
+        (
+            "запись очереди",
+            pending_body(),
+            Box::new(|b: &[u8]| access::decode_pending(b).map(|v| format!("{v:?}"))),
+        ),
+        (
+            "запрос активации",
+            activate_req_body(),
+            Box::new(|b: &[u8]| activation::decode_req(b).map(|v| format!("{v:?}"))),
+        ),
         (
             "выдача",
-            activation::encode_grant(&activation::Grant { share: vec![1; 40], lease: vec![2; 120], operation_id: None }).unwrap(),
+            activation::encode_grant(&activation::Grant {
+                share: vec![1; 40],
+                lease: vec![2; 120],
+                operation_id: None,
+            })
+            .unwrap(),
             Box::new(|b: &[u8]| activation::decode_grant(b).map(|v| format!("{v:?}"))),
         ),
         (
@@ -492,16 +550,36 @@ fn table() -> Vec<Doc> {
             activation::encode_deny(&activation::Deny::text("нет".to_string())).unwrap(),
             Box::new(|b: &[u8]| activation::decode_deny(b).map(|v| format!("{v:?}"))),
         ),
-        ("приветствие", hello_body(), Box::new(|b: &[u8]| activation::decode_hello(b).map(|v| format!("{v:?}")))),
-        ("вызов", challenge_body(), Box::new(|b: &[u8]| activation::decode_challenge(b).map(|v| format!("{v:?}")))),
+        (
+            "приветствие",
+            hello_body(),
+            Box::new(|b: &[u8]| activation::decode_hello(b).map(|v| format!("{v:?}"))),
+        ),
+        (
+            "вызов",
+            challenge_body(),
+            Box::new(|b: &[u8]| activation::decode_challenge(b).map(|v| format!("{v:?}"))),
+        ),
         (
             "доказательство владения",
             activation::encode_proof(&activation::Proof { echo: vec![0x9a; 32] }).unwrap(),
             Box::new(|b: &[u8]| activation::decode_proof(b).map(|v| format!("{v:?}"))),
         ),
-        ("доказательство аттестации", evidence_body(), Box::new(|b: &[u8]| attestation::decode_evidence(b).map(|v| format!("{v:?}")))),
-        ("правило по атрибутам", rule_body(), Box::new(|b: &[u8]| attribute_rule::decode(b).map(|v| format!("{v:?}")))),
-        ("запись каталога", record_body(), Box::new(|b: &[u8]| directory::Record::decode(b).map(|v| format!("{v:?}")))),
+        (
+            "доказательство аттестации",
+            evidence_body(),
+            Box::new(|b: &[u8]| attestation::decode_evidence(b).map(|v| format!("{v:?}"))),
+        ),
+        (
+            "правило по атрибутам",
+            rule_body(),
+            Box::new(|b: &[u8]| attribute_rule::decode(b).map(|v| format!("{v:?}"))),
+        ),
+        (
+            "запись каталога",
+            record_body(),
+            Box::new(|b: &[u8]| directory::Record::decode(b).map(|v| format!("{v:?}"))),
+        ),
     ] {
         docs.push(Doc { name, body, open: door, forge: None, strict: false });
     }
@@ -591,18 +669,20 @@ fn optional_tags_must_ascend_and_must_not_repeat() {
         // первый же незнакомый. Отказ обязан быть, но назвать он вправе ровно
         // то, обо что споткнулся, — и требовать от него `FieldsOutOfOrder`
         // значило бы требовать разобрать то, что он разбирать отказался.
-        let ordering = |got: Result<String, FormatError>, previous: u16, found: u16, what: &str| match (got, doc.strict)
-        {
-            (Err(FormatError::FieldsOutOfOrder { previous: p, found: f }), false) => {
-                assert_eq!((p, f), (previous, found), "{}: {what}", doc.name);
-            }
-            // `previous` — тот тег, что лежит в теле ПЕРВЫМ; о него строгий и
-            // спотыкается.
-            (Err(FormatError::UnknownCriticalField { tag }), true) => {
-                assert_eq!(tag, previous, "{}: {what}", doc.name);
-            }
-            (other, _) => panic!("{}: {what} дало {other:?}", doc.name),
-        };
+        let ordering =
+            |got: Result<String, FormatError>, previous: u16, found: u16, what: &str| match (
+                got, doc.strict,
+            ) {
+                (Err(FormatError::FieldsOutOfOrder { previous: p, found: f }), false) => {
+                    assert_eq!((p, f), (previous, found), "{}: {what}", doc.name);
+                }
+                // `previous` — тот тег, что лежит в теле ПЕРВЫМ; о него строгий и
+                // спотыкается.
+                (Err(FormatError::UnknownCriticalField { tag }), true) => {
+                    assert_eq!(tag, previous, "{}: {what}", doc.name);
+                }
+                (other, _) => panic!("{}: {what} дало {other:?}", doc.name),
+            };
 
         let twice = with_tag(&with_tag(&doc.body, OPTIONAL, b"a"), OPTIONAL, b"b");
         ordering((doc.open)(&twice), OPTIONAL, OPTIONAL, "дубликат необязательного тега");
@@ -649,11 +729,15 @@ fn a_tag_smuggled_into_the_unauthenticated_hello_parts_the_handshake_transcript(
     });
     let sent = activation::encode_request(&hello).unwrap();
     let challenge = activation::encode_response(&activation::Response::Challenge(activation::Challenge {
-        software: activation::SlotBlob { enc: vec![0x55; 32], nonce: [0x66; 24], ct: vec![0x77; 48] },
-        hardware: None,
-        hybrid: None,
-    }))
-    .unwrap();
+            software: activation::SlotBlob {
+                enc: vec![0x55; 32],
+                nonce: [0x66; 24],
+                ct: vec![0x77; 48],
+            },
+            hardware: None,
+            hybrid: None,
+        }))
+        .unwrap();
 
     // Посредник дописывает необязательный тег в ТЕЛО кадра (вид ‖ TLV).
     let received = with_tag(&sent, OPTIONAL, b"\xde\xad");

@@ -99,7 +99,7 @@ TLV, strictly increasing tags, criticality by range — the same rules as format
 
 | Tag | Field | Type |
 |---|---|---|
-| 1 | `version` | u16le: 1 — without server profile, 2 — with profile, 3 — with attestation indicator |
+| 1 | `version` | u16le: 1 — without server profile, 2 — with profile, 3 — with attestation indicator, 4 — with first issuance time |
 | 2 | `file_id` | bytes[16] |
 | 3 | `device_fpr` | bytes[32] |
 | 4 | `policy_hash` | bytes[32] |
@@ -110,8 +110,13 @@ TLV, strictly increasing tags, criticality by range — the same rules as format
 | 9 | `status` | u8: 1 active, 2 revoked. **Always** written |
 | 10 | `opens_remaining` | u32le or **empty value** = “no limit imposed.” **Always** written |
 | 11 | `tpm_clock` | u32le `reset_count` ‖ u64le `clock_ms`; optional |
-| 12 | `server_policy` | policy codec (format §4); **required in version 2, optional in version 3, forbidden in version 1** |
-| 13 | `attested` | u8: basis of device-key attestation — 1 vendor certificate, 2 pinned EK; **version 3 only, and required there** (§9.11.1) |
+| 12 | `server_policy` | policy codec (format §4); **required in version 2, optional in versions 3 and 4, forbidden in version 1** |
+| 13 | `attested` | u8: basis of device-key attestation — 1 vendor certificate, 2 pinned EK; **required in version 3, optional in version 4, forbidden in versions 1–2** (§9.11.1) |
+| 14 | `first_open_at` | i64le, Unix seconds; **required in version 4, forbidden in versions 1–3** |
+
+#### Version 4: first issuance time
+
+A `FromFirstOpen` lease carries the server-authenticated first successful issuance time for the file in tag 14. The author and server policies still intersect. The timestamp is no later than `issued_at`, and `expires_at` is capped at the inclusive first-issuance deadline. A lease lacking the timestamp cannot satisfy this policy and needs renewal from an updated authority. Local cache deletion, another door or restart with the same journal does not restart this deadline. Preserve the journal when transferring authority state.
 
 #### Version 3: attestation indicator
 
@@ -1242,7 +1247,7 @@ For the five state kinds—revocation, heir, limits, both memberships—equality
 
 **Why, if the client already checks the window.** Because before this decision, the author's “not before nine on Monday morning” was enforced by ONE evaluator on the recipient's machine—using a clock the recipient can change. The server, whose clock the recipient cannot access, knew nothing of the window and would issue a license with the second half of the key even a month early. Under the ideas collection's end-to-end principle, that made an embargo **client friction**, not a **server guarantee**; for a file distributed before a premiere, the difference is decisive: a patched client could open it whenever it wanted.
 
-**The server does not and cannot check `FromFirstOpen`.** Its period starts at an event on the recipient's machine that the server does not see: opening happens without it. The server cannot judge that event, and a precautionary ban would close the file forever. The client enforces this, a substantive distinction rather than unfinished work.
+**The authority records the first successful issuance for `FromFirstOpen`.** The file identifier owns one timestamp across devices. Issuance and renewal enforce the inclusive relative deadline, while incompatible relative and absolute validity rules deny access. The authority persists this fact in its journal before responding. Restarts and state transfers require the same journal. Actual plaintext consumption happens on the client, so this event measures first permission issuance.
 
 **What this still does not provide.** Already issued material cannot be recalled—a format property. A recipient who acquired the share within the window retains it after `not_after`; the client and the server's renewal refusal enforce closure. The refusal gives the timestamp in epoch seconds: the client presents it to the person, not the wire.
 
@@ -1565,6 +1570,7 @@ Message kinds:
 | 58 | `RequestAction`—request bytes (unsigned) | 62 `ActionGranted`—complete lease; 63 `ActionPending`—`u64le seq`; 64 `ActionRefused`—UTF-8 reason |
 | 59 | `ReportAction`—`u64le seq ‖ u8 ok ‖ digest(32)`, exactly 41 bytes | 14 `Accepted` |
 | 60 | `ActionRequests`—`grant name(16)` | 65 `ActionQueue`—queue window |
+| 66 | `FetchActionChain`—holder fingerprint(32), fresh nonce(32), authenticated by the K25 request MAC | 67 `SignedActionChain`—signature(64) followed by the exact encoded `Chain` or `NoChain` response |
 | 61 | `DecideAction`—complete owner-decision bytes | 14 `Accepted` |
 
 Five numbers instead of one “stage 2 document” with an inner kind, for the same reason as the three numbers in §14.1: the first byte selects parsing BEFORE it is known whose document arrived, and the verification keys for grant, request, report, and decision differ (author, none, none, author). Responses 54 and 14 are deliberately reused: `PutActionGrant`, `ReportAction`, and `DecideAction` make no new promises, while a new response kind would promise a second entity.
@@ -1614,3 +1620,9 @@ An owner's denial becomes `ActionRefused` with their note. The denial note is th
 A `ReportAction` report is accepted only under the proven identity of that lease's HOLDER: another party's report would log the outcome of someone else's action. Repeating the same report is idempotent; a report with a different outcome for the same number is rejected.
 
 Refusals (all have Russian `Display` text): `NoActionGrant`, `ActionNotGranted { why }`, `ActionUsesExhausted { limit }`, `ActionNonceSeen`, `ActionQueueFull { limit }`, `ActionDeclined { why }`, `NoSuchActionRequest`, and the existing `GrantRevoked`, `ChainRefused { why }`, `NotTheAuthor`, `NotServing`. Storage limits: at most 64 requests awaiting “yes” per grant (`MAX_PENDING_ACTIONS`), at most 256 remembered issued leases per grant (`MAX_ISSUED_ACTIONS`), remembered for one hour (`ACTION_REPORT_WINDOW_SECONDS`): the door reports AFTER execution, for which the lease's thirty-second lifetime is insufficient.
+
+### Action-chain response authentication
+
+The authority signs a transcript under `CC/v1/action-chain-reply`, with fields holder fingerprint, request nonce and SHA-256 of the encoded response. Verify under an authority key obtained through a trusted channel before parsing the inner response. The grant author key is also configured locally. Action mode requires this signed exchange and verifies the final holder. A response cannot supply its own trust keys.
+
+Authority succession verification can use `verify_chain_with_cutoffs` to retain the cutoff for every retired signing key. Earlier signers keep their own cutoff across later transfers.

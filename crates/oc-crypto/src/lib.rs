@@ -372,8 +372,9 @@ pub mod label {
     /// Separate from [`AGENT_GRANT`] and [`GRANT`]: permission to execute an action
     /// must not be accepted as permission to distribute file shares, or vice versa.
     pub const ACTION_GRANT: Label = Label::new(b"CC/v1/action-grant");
-    /// Server signature on a single-use action lease
-    /// (`oc_protocol::action::ActionLease`, Agent Protocol stage 2, §4.3).
+    /// Server signature on an action-chain reply bound to one holder and nonce.
+    pub const ACTION_CHAIN_REPLY: Label = Label::new(b"CC/v1/action-chain-reply");
+    /// Server signature on a single-use action lease.
     ///
     /// Uses the file lease-signing key with a distinct, prefix-free domain.
     /// A file lease authorizes opening; this document authorizes a specific action.
@@ -629,6 +630,7 @@ pub mod label {
         SERVER_FRESH, PACKAGE_MANIFEST,
         AGENT_GRANT, DELEGATION,
         ACTION_GRANT, ACTION_LEASE, ACTION_DECISION,
+        ACTION_CHAIN_REPLY,
     ];
 }
 

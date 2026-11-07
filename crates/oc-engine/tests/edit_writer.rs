@@ -13,11 +13,11 @@
     clippy::arithmetic_side_effects
 )]
 
+use oc_crypto::AeadAlg;
 use oc_crypto::aead::{NONCE_LEN, open_chunk};
 use oc_crypto::rsa_test_signer::TEST_KEY_A;
 use oc_crypto::secret::{MacKey, PayloadKey, SecretBuf};
 use oc_crypto::sign::Ed25519Signer;
-use oc_crypto::AeadAlg;
 use oc_engine::edit::{EditPlan, EditWriteError, Piece, finish, prepare};
 use oc_format::content::ContentDesc;
 use oc_format::edit::{EditorCert, editor_transcript};
@@ -32,8 +32,14 @@ fn key() -> PayloadKey {
 }
 
 fn cert() -> Vec<u8> {
-    EditorCert::issue(&Ed25519Signer::from_seed(&[1; 32]), FILE_ID, [0xde; 32], TEST_KEY_A.modulus(), i64::MAX)
-        .unwrap()
+    EditorCert::issue(
+        &Ed25519Signer::from_seed(&[1; 32]),
+        FILE_ID,
+        [0xde; 32],
+        TEST_KEY_A.modulus(),
+        i64::MAX,
+    )
+    .unwrap()
 }
 
 fn plan<'a>(pieces: Vec<Piece<'a>>, base_counter: u64) -> EditPlan<'a> {
@@ -66,8 +72,29 @@ fn frames(payload: &[u8], lens: &[usize]) -> Vec<Vec<u8>> {
 fn open(frame: &[u8], index: u32) -> Vec<u8> {
     let nonce: [u8; NONCE_LEN] = frame[..NONCE_LEN].try_into().unwrap();
     let mut out = SecretBuf::with_capacity(CHUNK as usize);
-    open_chunk(&key(), AeadAlg::XChaCha20Poly1305, &FILE_ID, index, &nonce, &frame[NONCE_LEN..], &mut out).unwrap();
+    open_chunk(
+        &key(),
+        AeadAlg::XChaCha20Poly1305,
+        &FILE_ID,
+        index,
+        &nonce,
+        &frame[NONCE_LEN..],
+        &mut out,
+    )
+    .unwrap();
     out.as_slice().to_vec()
+}
+
+#[test]
+fn an_invalid_chunk_size_is_refused_before_processing_frames() {
+    for size in [0, CHUNK + 1, oc_format::MAX_CHUNK_SIZE + 1] {
+        let mut invalid = plan(vec![Piece::Keep(&[])], 0);
+        invalid.chunk_size = size;
+        assert_eq!(
+            prepare(&key(), invalid).unwrap_err(),
+            EditWriteError::Format(oc_format::FormatError::BadChunkSize { got: size })
+        );
+    }
 }
 
 #[test]
@@ -94,7 +121,11 @@ fn unchanged_frames_are_carried_and_changed_ones_get_fresh_nonces() {
     let second = prepare(
         &key(),
         plan(
-            vec![Piece::Keep(&old[0]), Piece::Seal { plaintext: &b2, seed: [2; 24] }, Piece::Keep(&old[2])],
+            vec![
+                Piece::Keep(&old[0]),
+                Piece::Seal { plaintext: &b2, seed: [2; 24] },
+                Piece::Keep(&old[2]),
+            ],
             1,
         ),
     )
@@ -123,8 +154,12 @@ fn a_signed_edition_passes_the_reader_check() {
     let (desc, body, read) = ContentDesc::decode_verified_with_body(&area, &mac, &FILE_ID, CONTAINER_VERSION).unwrap();
     assert_eq!(read, area.len());
     let transcript = editor_transcript(&CORE, body).unwrap();
-    oc_crypto::rsa::verify_pss_sha256(&TEST_KEY_A.modulus(), transcript.as_bytes(), &desc.editor.unwrap().signature)
-        .unwrap();
+    oc_crypto::rsa::verify_pss_sha256(
+        &TEST_KEY_A.modulus(),
+        transcript.as_bytes(),
+        &desc.editor.unwrap().signature,
+    )
+    .unwrap();
     assert_eq!(oc_format::edit::edition_digest(&transcript), digest);
 }
 

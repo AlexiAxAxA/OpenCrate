@@ -1377,6 +1377,7 @@ Why K10 and K11 are separate: **NCrypt with Microsoft Platform Crypto Provider d
 "CC/v1/package-manifest"
 "CC/v1/agent-grant"      "CC/v1/delegation"
 "CC/v1/action-grant"     "CC/v1/action-lease"  "CC/v1/action-decision"
+"CC/v1/action-chain-reply"
 ```
 
 The list is complete and must match the code's set byte for byte: a label present in one place but missing in another is either an unseparated domain or a dead string, both discovered only by attack or byte comparison.
@@ -1412,6 +1413,7 @@ The list is complete and must match the code's set byte for byte: a label presen
 | `agent-grant`, `delegation` | in use: author's signature on an agent grant and parent-door signature on delegation to a descendant—Agent Protocol documents, `oc-protocol/src/agent.rs` (`docs/agent-protocol/stage-1-door.md` §3). **The container does not contain them**: format version unchanged, absent from the header, and not one byte of them is in `.cc`. They are in the registry because only here can prefix-freedom be proven (I-12). Separate from `grant`, which marks author approval of one request for one file, while an agent grant distributes shares for a whole tree; separate from each other because the author signs the grant and the door signs delegation with its ephemeral key, and neither signature must work as the other |
 | `action-grant`, `action-lease` | in use: author's signature on an ACTION grant and server signature on a one-time action lease—Agent Protocol stage 2 documents, `oc-protocol/src/action.rs` (`docs/agent-protocol/stage-2-actions.md` §4.1, §4.3). **The container does not contain them**, like the pair above: format version unchanged, absent from the header. Separate from `agent-grant`, which distributes shares B for READING a subtree, while an action grant distributes rights to act outside the cage; a reading grant signature must not work as a `git push` grant signature. Separate from `lease`: the server signing key is the same (`authority.lease_verify_key`), so only the label separates domains—otherwise permission to open a file would serve as permission to execute an action. The `ActionRequest` request carries no signature at all (the door key is for key agreement), and thus has no label |
 | `action-decision` | in use: author's signature on a decision about an execution request (`oc_protocol::action::ActionDecision`, `docs/agent-protocol/stage-2-actions.md` §5 step 3)—the owner's live “yes” to an action with `confirm`. **The container does not contain it**, like the three labels above. Separate from `grant`, which signs an ACCESS-request decision; both use the same key, the one in the file header. If domains matched, two distinct author statements would share one signature: “give this device share B” and “have this door execute `git push` to this branch.” Relying on different tag numbers to separate them is unacceptable: both bodies are TLV, and matching numbers are a matter of time, not construction |
+| `action-chain-reply` | Server signature over a complete action-chain response bound to the holder and fresh request nonce. Protocol document only. |
 | `operation-id` | in use: K28, operation identity in activation and renewal requests (`oc_crypto::kdf::operation_id`, `docs/protocol.md` §9.10); frozen by vector `operation_id.kat` (decision of 2026-09-15, “Operation identity”). Does not affect the container: format version unchanged, protocol changed |
 
 Reservation here is not decorative: a label added later is a new string in a prefix-free set that must be reconciled with all released labels; reserving it now is cheaper than proving prefix-freedom retrospectively.
@@ -1539,7 +1541,7 @@ The monotonic floor remains and cannot be removed: the TPM clock advances only w
 
 ### 4.2 What `online` means and what it does NOT mean
 
-`Context.online` feeds two rules: `Network::StrictOnline` (network on every opening) and `Validity::FromFirstOpen` without a first-opening record (until recorded, opening requires online access and the server records the time). Both reject for `online = false` and proceed for `online = true`. Thus `online` is neither a diagnostic nor a convenience: it is **decision input**, and whatever sets it is part of protection.
+`Context.online` enforces `Network::StrictOnline`. A `FromFirstOpen` policy requires the server-authenticated first issuance time in the lease. Local state and network availability cannot substitute for that field. The first-issuance deadline is inclusive.
 
 **Normatively, `online = true` means the client received a FRESH verified lease, and may mean nothing else.** Fresh means issued no more than `FRESH_LEASE_SECONDS = 60` ago. Verified means its signature matches `authority.lease_verify_key` from OUR container header, where the author pinned it under their signature.
 

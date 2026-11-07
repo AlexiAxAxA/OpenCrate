@@ -20,9 +20,9 @@
 )]
 
 use oc_crypto::sign::Signer as _;
-use oc_protocol::lease::{self, Lease, LEASE_VERSION, LEASE_VERSION_WITH_SERVER_POLICY, tag};
 use oc_format::FormatError;
 use oc_policy::{Action, Binding, LeaseFacts, Network, Policy, Timestamp, TpmClock};
+use oc_protocol::lease::{self, LEASE_VERSION, LEASE_VERSION_WITH_SERVER_POLICY, Lease, tag};
 
 /// Server profile: viewing allowed, export forbidden, binding at least hardware-backed.
 fn profile() -> Policy {
@@ -49,6 +49,7 @@ fn facts(server_policy: Option<Policy>) -> LeaseFacts {
         tpm_clock: Some(TpmClock { reset_count: 3, clock_ms: 123_456 }),
         server_policy,
         attested: None,
+        first_open_at: None,
     }
 }
 
@@ -142,11 +143,11 @@ fn version_two_without_a_profile_is_refused() {
 #[test]
 fn an_unknown_version_is_refused_by_its_number() {
     let mut body = lease::encode(&lease(Some(profile()))).unwrap();
-    set_version(&mut body, 4);
+    set_version(&mut body, 5);
 
     match lease::decode(&body) {
-        Err(FormatError::UnsupportedLeaseVersion { version }) => assert_eq!(version, 4),
-        other => panic!("версия 4 разобрана: {other:?}"),
+        Err(FormatError::UnsupportedLeaseVersion { version }) => assert_eq!(version, 5),
+        other => panic!("версия 5 разобрана: {other:?}"),
     }
 }
 

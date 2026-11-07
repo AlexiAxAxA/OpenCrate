@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         revoked: false,
         server_policy: None,
         attested: None,
+        first_open_at: None,
         tpm_clock: None,
     };
     let mut context = Context {

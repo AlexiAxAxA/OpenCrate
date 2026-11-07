@@ -79,6 +79,7 @@ fn lease() -> LeaseFacts {
         tpm_clock: None,
         server_policy: None,
         attested: None,
+        first_open_at: None,
     }
 }
 
@@ -170,14 +171,7 @@ impl AuthorIntent {
 }
 
 /// All six policy fields. The bit index is the position in this array.
-const FIELD_TAGS: [u16; 6] = [
-    tag::ACTIONS,
-    tag::VALIDITY,
-    tag::NETWORK,
-    tag::MIN_BINDING,
-    tag::MAX_OPENS,
-    tag::WATERMARK,
-];
+const FIELD_TAGS: [u16; 6] = [tag::ACTIONS, tag::VALIDITY, tag::NETWORK, tag::MIN_BINDING, tag::MAX_OPENS, tag::WATERMARK];
 
 fn field_body(tag_id: u16) -> Vec<u8> {
     match tag_id {

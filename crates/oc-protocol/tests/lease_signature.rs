@@ -25,8 +25,8 @@
 use oc_crypto::sign::Signer as _;
 use oc_format::FormatError;
 use oc_format::tlv::TlvWriter;
-use oc_protocol::lease::{self, Lease};
 use oc_policy::{LeaseFacts, Timestamp, TpmClock};
+use oc_protocol::lease::{self, Lease};
 
 fn sample() -> Lease {
     Lease {
@@ -43,6 +43,7 @@ fn sample() -> Lease {
             tpm_clock: Some(TpmClock { reset_count: 3, clock_ms: 123_456 }),
             server_policy: None,
             attested: None,
+            first_open_at: None,
         },
     }
 }

@@ -475,10 +475,7 @@ pub fn args_within(rule: &ActionRule, args: &Args) -> Result<(), ActionRefusal> 
         (Constraint::TreeRemove { prefix }, Args::TreeRemove { path }) => {
             under_tree_prefix(prefix, path, "prefix")
         }
-        (
-            Constraint::TreeRename { from_prefix, to_prefix },
-            Args::TreeRename { from, to },
-        ) => {
+        (Constraint::TreeRename { from_prefix, to_prefix }, Args::TreeRename { from, to }) => {
             under_tree_prefix(from_prefix, from, "from_prefix")?;
             under_tree_prefix(to_prefix, to, "to_prefix")
         }
@@ -520,11 +517,7 @@ pub fn args_within(rule: &ActionRule, args: &Args) -> Result<(), ActionRefusal> 
 ///
 /// Precisely this order: `"src/../../etc"` technically begins with component
 /// `src`, so it would pass the prefix check. Shape must come first.
-fn under_tree_prefix(
-    prefix: &str,
-    path: &str,
-    limiter: &'static str,
-) -> Result<(), ActionRefusal> {
+fn under_tree_prefix(prefix: &str, path: &str, limiter: &'static str) -> Result<(), ActionRefusal> {
     if check_tree_path(path, field_tag::PATH).is_err()
         || check_tree_path(prefix, field_tag::PATH).is_err()
     {
@@ -575,16 +568,12 @@ pub fn narrower(child: &ActionRule, parent: &ActionRule) -> Result<(), ActionRef
             }
             Ok(())
         }
-        (
-            Constraint::TreeRemove { prefix },
-            Constraint::TreeRemove { prefix: parent_prefix },
-        ) => narrower_prefix(parent_prefix, prefix, "prefix"),
+        (Constraint::TreeRemove { prefix }, Constraint::TreeRemove { prefix: parent_prefix }) => {
+            narrower_prefix(parent_prefix, prefix, "prefix")
+        }
         (
             Constraint::TreeRename { from_prefix, to_prefix },
-            Constraint::TreeRename {
-                from_prefix: parent_from,
-                to_prefix: parent_to,
-            },
+            Constraint::TreeRename { from_prefix: parent_from, to_prefix: parent_to },
         ) => {
             narrower_prefix(parent_from, from_prefix, "from_prefix")?;
             narrower_prefix(parent_to, to_prefix, "to_prefix")
@@ -632,16 +621,8 @@ const fn uses_within(child: u32, parent: u32) -> bool {
 }
 
 /// The child prefix lies under the parent prefix, by components.
-fn narrower_prefix(
-    parent: &str,
-    child: &str,
-    limiter: &'static str,
-) -> Result<(), ActionRefusal> {
-    if path_under(parent, child) {
-        Ok(())
-    } else {
-        Err(ActionRefusal::WiderLimiter { limiter })
-    }
+fn narrower_prefix(parent: &str, child: &str, limiter: &'static str) -> Result<(), ActionRefusal> {
+    if path_under(parent, child) { Ok(()) } else { Err(ActionRefusal::WiderLimiter { limiter }) }
 }
 
 // ----------------------------------------------------------------------------
@@ -761,7 +742,26 @@ fn check_http_path(text: &str, tag: u16) -> Result<(), FormatError> {
         // Ровно «/» — корень: под ним лежит всё, и компонентов у него нет.
         return Ok(());
     }
-    check_path_parts(rest, tag)
+
+    if !rest.contains('%') {
+        return check_path_parts(rest, tag);
+    }
+
+    // Сервер может декодировать путь перед маршрутизацией. Ни разделитель,
+    // ни знак следующего экранирования после декодирования появиться не могут.
+    let bad_escape = || FormatError::BadAddressByte { tag, byte: b'%' };
+    let mut parts = rest.split('%');
+    let mut decoded = parts.next().unwrap_or_default().to_owned();
+    for escaped in parts {
+        let (hex, suffix) = escaped.split_at_checked(2).ok_or_else(bad_escape)?;
+        let byte = u8::from_str_radix(hex, 16).map_err(|_| bad_escape())?;
+        if !(name_char_ok(byte) || matches!(byte, b'~' | b'@')) {
+            return Err(bad_escape());
+        }
+        decoded.push(char::from(byte));
+        decoded.push_str(suffix);
+    }
+    check_path_parts(&decoded, tag)
 }
 
 /// Shared component rule: nonempty, not `.`, not `..`.
@@ -1403,10 +1403,7 @@ pub fn encode_lease(lease: &ActionLease) -> Result<Vec<u8>, FormatError> {
 /// # Errors
 /// [`FormatError::BadHeaderSignature`] for a short document or failed
 /// signature; otherwise parsing and shape-validation errors.
-pub fn decode_lease(
-    bytes: &[u8],
-    lease_verify_key: &[u8; 32],
-) -> Result<ActionLease, FormatError> {
+pub fn decode_lease(bytes: &[u8], lease_verify_key: &[u8; 32]) -> Result<ActionLease, FormatError> {
     let (signature, body) = split_signature(bytes)?;
     oc_crypto::sign::verify(lease_verify_key, &lease_transcript(body), &signature)
         .map_err(|_| FormatError::BadHeaderSignature)?;
@@ -1729,10 +1726,7 @@ pub fn encode_decision(d: &ActionDecision) -> Result<Vec<u8>, FormatError> {
 /// # Errors
 /// [`FormatError::BadHeaderSignature`] for a short document or a
 /// failed signature; otherwise parsing errors.
-pub fn decode_decision(
-    bytes: &[u8],
-    author_key: &[u8; 32],
-) -> Result<ActionDecision, FormatError> {
+pub fn decode_decision(bytes: &[u8], author_key: &[u8; 32]) -> Result<ActionDecision, FormatError> {
     let (signature, body) = split_signature(bytes)?;
     oc_crypto::sign::verify(author_key, &decision_transcript(body), &signature)
         .map_err(|_| FormatError::BadHeaderSignature)?;
@@ -2000,6 +1994,19 @@ mod tests {
     #[test]
     fn the_grant_round_trips_with_every_kind_of_rule() {
         let g = grant();
+        let bytes = encode_grant(&g).unwrap();
+        assert_eq!(decode_grant(&bytes, &author().public_key()).unwrap(), g);
+    }
+
+    #[test]
+    fn a_signed_grant_keeps_a_prefix_with_an_escaped_at_sign() {
+        let mut g = grant();
+        for rule in &mut g.rules {
+            if let Constraint::HttpRequest { path_prefix, .. } = &mut rule.constraint {
+                *path_prefix = "/v1/issues/alice%40example.com".to_string();
+            }
+        }
+        sign_grant(&mut g, &author());
         let bytes = encode_grant(&g).unwrap();
         assert_eq!(decode_grant(&bytes, &author().public_key()).unwrap(), g);
     }
@@ -2295,8 +2302,16 @@ mod tests {
     /// PATH SHAPE: `..`, absolute paths and disallowed characters are rejected.
     #[test]
     fn a_path_that_escapes_the_tree_is_refused_by_the_codec() {
-        for bad in ["../etc/passwd", "/etc/passwd", "src/../../x", "C:/windows", "src\\x", "src//x", "src/./x", ""]
-        {
+        for bad in [
+            "../etc/passwd",
+            "/etc/passwd",
+            "src/../../x",
+            "C:/windows",
+            "src\\x",
+            "src//x",
+            "src/./x",
+            "",
+        ] {
             let mut rule = remove_rule();
             rule.constraint = Constraint::TreeRemove { prefix: bad.to_string() };
             assert!(encode_rule(&rule).is_err(), "путь {bad:?} принят писателем");
@@ -2533,6 +2548,38 @@ mod tests {
     // --------------------------------------------------------------------
 
     #[test]
+    fn http_scope_rejects_escaped_separators_and_dot_components() {
+        let rule = http_rule();
+        for path in [
+            "/v1/issues/%2e%2E/admin",
+            "/v1/issues/.%2e/admin",
+            "/v1/issues/%2e./admin",
+            "/v1/issues/%252e%252e/admin",
+            "/v1/issues/..%2fadmin",
+            "/v1/issues/..%5Cadmin",
+            "/v1/issues/..%3bparam/admin",
+            "/v1/issues/%00",
+            "/v1/issues/%2",
+        ] {
+            let mut args = http_args();
+            if let Args::HttpRequest { path: field, .. } = &mut args {
+                *field = path.to_string();
+            }
+            assert!(args_within(&rule, &args).is_err(), "{path}");
+        }
+
+        let mut args = http_args();
+        if let Args::HttpRequest { path, .. } = &mut args {
+            *path = "/v1/issues/alice%40example.com/%34%32/file%2etxt".to_string();
+        }
+        assert!(args_within(&rule, &args).is_ok());
+    }
+
+    // --------------------------------------------------------------------
+    // `narrower`.
+    // --------------------------------------------------------------------
+
+    #[test]
     fn a_narrowing_child_rule_passes() {
         let parent = remove_rule();
         let mut child = remove_rule();
@@ -2755,8 +2802,11 @@ mod tests {
     #[test]
     fn decoding_arbitrary_bytes_never_panics() {
         let key = author().public_key();
-        let documents =
-            [encode_grant(&grant()).unwrap(), encode_lease(&lease()).unwrap(), encode_request(&request()).unwrap()];
+        let documents = [
+            encode_grant(&grant()).unwrap(),
+            encode_lease(&lease()).unwrap(),
+            encode_request(&request()).unwrap(),
+        ];
         for bytes in &documents {
             for cut in 0..bytes.len() {
                 let _ = decode_grant(&bytes[..cut], &key);

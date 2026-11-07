@@ -18,8 +18,8 @@
 
 
 use oc_policy::{
-    Action, Binding, Context, DeviceClock, DeviceFacts, LeaseFacts, Network, Policy, Timestamp, TimeSource,
-    Validity, evaluate,
+    Action, Binding, Context, DeviceClock, DeviceFacts, LeaseFacts, Network, Policy, TimeSource,
+    Timestamp, Validity, evaluate,
 };
 
 fn device() -> DeviceFacts {
@@ -54,6 +54,7 @@ fn lease() -> LeaseFacts {
         tpm_clock: None,
         server_policy: None,
         attested: None,
+        first_open_at: None,
     }
 }
 

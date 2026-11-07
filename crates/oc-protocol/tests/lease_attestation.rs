@@ -16,9 +16,12 @@
 )]
 
 use oc_crypto::sign::Signer as _;
-use oc_protocol::lease::{self, Lease, LEASE_VERSION, LEASE_VERSION_WITH_ATTESTATION, LEASE_VERSION_WITH_SERVER_POLICY, tag};
 use oc_format::FormatError;
 use oc_policy::{Action, Attestation, LeaseFacts, Policy, Timestamp, TpmClock};
+use oc_protocol::lease::{
+    self, LEASE_VERSION, LEASE_VERSION_WITH_ATTESTATION, LEASE_VERSION_WITH_SERVER_POLICY, Lease,
+    tag,
+};
 
 fn facts(attested: Option<Attestation>, server_policy: Option<Policy>) -> LeaseFacts {
     LeaseFacts {
@@ -33,6 +36,7 @@ fn facts(attested: Option<Attestation>, server_policy: Option<Policy>) -> LeaseF
         tpm_clock: Some(TpmClock { reset_count: 3, clock_ms: 123_456 }),
         server_policy,
         attested,
+        first_open_at: None,
     }
 }
 

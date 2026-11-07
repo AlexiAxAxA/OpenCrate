@@ -24,16 +24,23 @@ decisions. It is the five-library core behind Close Crate.
 
 For a Rust project, add the `opencrate` facade to use all five libraries, or
 depend on the individual `oc-*` crates you need. The facade is version
-`0.0.5`; the five core libraries are also `0.0.5` on crates.io:
+`0.0.7`; the five core libraries are also `0.0.7` on crates.io:
 
 ```toml
 [dependencies]
-opencrate = "=0.0.5"
+opencrate = "=0.0.7"
 ```
 
 Your application supplies storage, transport, keys, secure randomness and time.
 The core handles the container rules, cryptography and policy evaluation.
 The default core remains buildable for WebAssembly.
+
+
+## Release 0.0.7
+
+The five core libraries, `opencrate` and `opencrate-sdk` use the coordinated 0.0.7 release. Lease v4 carries the authenticated first issuance time. `FromFirstOpen` requires this signed field, so a legacy lease needs renewal from an updated authority. Action-chain replies bind the complete response to a holder and fresh request nonce. Authority chains retain the cutoff for each retired signing key. Editing rejects unsupported chunk sizes before processing frames.
+
+The application-data feature uses `opencrate-sdk = "=0.0.7"` and the same `oc-crypto` package as the core.
 
 ## Quick Start
 
@@ -63,7 +70,7 @@ extension, or JSON and messages, for one recipient. It re-exports the separate
 
 ```toml
 [dependencies]
-opencrate = { version = "=0.0.5", features = ["app-data"] }
+opencrate = { version = "=0.0.7", features = ["app-data"] }
 ```
 
 ```sh

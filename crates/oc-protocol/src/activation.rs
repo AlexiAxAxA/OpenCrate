@@ -184,7 +184,9 @@ pub enum Request {
     /// author key lives in the header, not with the device. The queue is public anyway —
     /// requester fingerprints in it are not secret; a share is issued through
     /// a signature, not viewing the list.
-    Requests { file_id: [u8; 16] },
+    Requests {
+        file_id: [u8; 16],
+    },
     /// Collect the author's decision, if already made.
     Collect(CollectReq),
     /// Subscribe to file events on this connection.
@@ -195,7 +197,10 @@ pub enum Request {
     /// Notifications expose public queue/journal data and need no possession proof;
     /// decisions still require `Collect`. The conversation lasts until disconnect
     /// or subscription expiry.
-    Watch { files: Vec<[u8; 16]>, since: u64 },
+    Watch {
+        files: Vec<[u8; 16]>,
+        since: u64,
+    },
     /// Subscription to “all the author's files” (`docs/protocol.md` §9.9, B5).
     ///
     /// Unlike [`Request::Watch`], authority does not derive from knowing
@@ -203,14 +208,19 @@ pub enum Request {
     /// addressed to this server. The server computes scope itself from
     /// files recording this key as author, at every step, so new author files
     /// arrive without resubscription.
-    WatchAuthor { since: u64, proof: Vec<u8> },
+    WatchAuthor {
+        since: u64,
+        proof: Vec<u8>,
+    },
     /// File revocation notice: server-signed “file revoked” document.
     ///
     /// No proof of possession: no secret here — truth about a file,
     /// signed by the server; distributing it distributes
     /// truth. Clients accept it over the wire or as a file beside the container
     /// (`oc_protocol::revocation`).
-    Revocation { file_id: [u8; 16] },
+    Revocation {
+        file_id: [u8; 16],
+    },
     /// Renewal: same request as activation, for an already activated
     /// device, without journal writes or grant-limit consumption.
     ///
@@ -232,10 +242,15 @@ pub enum Request {
     /// `order` (`oc_protocol::order`) — learning the author's key from
     /// a document the recipient cannot alter, rather than from
     /// the requester's word. Response: `Accepted`.
-    Register { header: Vec<u8>, order: Vec<u8> },
+    Register {
+        header: Vec<u8>,
+        order: Vec<u8>,
+    },
     /// File revocation by author order; verified with the key remembered at
     /// registration. Response: `Accepted`.
-    Revoke { order: Vec<u8> },
+    Revoke {
+        order: Vec<u8>,
+    },
     /// The complete author decision, including signature.
     ///
     /// Opaque bytes rather than a parsed [`crate::access::Decision`],
@@ -254,12 +269,17 @@ pub enum Request {
     /// enumeration would make signature-check count depend on roster size,
     /// silently giving an intermediary a way to burden the server with sixteen
     /// checks per message.
-    Endorse { signer: [u8; 32], order: Vec<u8> },
+    Endorse {
+        signer: [u8; 32],
+        order: Vec<u8>,
+    },
     /// The file's current standing. Response: [`Response::Standing`].
     ///
     /// No proof of possession, like the request queue: the author supplied all of
     /// this to the server, and the recipient can see it in the queue and journal.
-    Standing { file_id: [u8; 16] },
+    Standing {
+        file_id: [u8; 16],
+    },
     /// Attestation, step 1: device requests a challenge (§9.11.1). No body.
     AttestOpen,
     /// Attestation, step 2: complete evidence about the device key.
@@ -275,16 +295,29 @@ pub enum Request {
     /// extends the head at length `since` (zero means no proof). Response:
     /// [`Response::LogView`] or refusal. No handshake: head and
     /// proof are public.
-    JournalView { since: u64, upto: u64 },
+    JournalView {
+        since: u64,
+        upto: u64,
+    },
     /// The same for the key-directory log (D4, §9.14).
-    DirectoryView { since: u64, upto: u64 },
+    DirectoryView {
+        since: u64,
+        upto: u64,
+    },
     /// Directory record for an organization member, at head length `size`
     /// (zero means current). Response: [`Response::DirectoryEntry`] or refusal
     /// (record absence is the server's assertion, §9.14).
-    DirectoryLookup { tenant: String, name: String, size: u64 },
+    DirectoryLookup {
+        tenant: String,
+        name: String,
+        size: u64,
+    },
     /// Directory-log page for a monitor: `count` records starting at
     /// `from`. Response: [`Response::DirectoryRecords`].
-    DirectoryRecords { from: u64, count: u32 },
+    DirectoryRecords {
+        from: u64,
+        count: u32,
+    },
     /// Controllers' intent (`crate::control`, §9.16). Opaque bytes for
     /// the same reason as author decisions: signatures cover the body,
     /// and reconstruction here would break them. Response: [`Response::Receipt`] or
@@ -322,7 +355,14 @@ pub enum Request {
     /// shares B sealed to its key.
     ///
     /// Response: [`Response::Chain`] or [`Response::NoChain`].
-    FetchChain { holder_fpr: [u8; 32] },
+    FetchChain {
+        holder_fpr: [u8; 32],
+    },
+    /// Fetch an authenticated action chain for the holder and a fresh request nonce.
+    FetchActionChain {
+        holder_fpr: [u8; 32],
+        nonce: [u8; 32],
+    },
     /// Author-issued ACTION grant (`crate::action::ActionGrant`), as bytes.
     /// Response: [`Response::ChainStored`] or refusal.
     ///
@@ -356,14 +396,20 @@ pub enum Request {
     ///
     /// A hash, not content: the server need not see WHAT the door executed;
     /// a hash sufficiently binds the report to execution. Response: `Accepted`.
-    ReportAction { seq: u64, ok: bool, digest: [u8; 32] },
+    ReportAction {
+        seq: u64,
+        ok: bool,
+        digest: [u8; 32],
+    },
     /// The owner asks which requests under this grant await their “yes.”
     ///
     /// No proof of possession, like [`Self::Requests`], for the same
     /// reason: the owner decides by SIGNING with the author key, which the device
     /// does not have; the queue contains what the door already told the server.
     /// Response: [`Response::ActionQueue`].
-    ActionRequests { grant_id: [u8; 16] },
+    ActionRequests {
+        grant_id: [u8; 16],
+    },
     /// Owner decision on a request (`crate::action::ActionDecision`), as bytes.
     ///
     /// Bytes rather than a parsed document for the same reason as
@@ -396,7 +442,9 @@ pub enum Response {
     Granted(Grant),
     Denied(Deny),
     /// Request accepted and queued under this number.
-    Asked { seq: u64 },
+    Asked {
+        seq: u64,
+    },
     /// Request queue: consecutive `u32le length ‖ document Pending`.
     ///
     /// An opaque body, not a parsed list: the party presenting it to the
@@ -432,13 +480,18 @@ pub enum Response {
     /// Separate from `Accepted`; the distinction is essential: `Accepted` means “done,”
     /// this means “accepted for consideration.” Combining them would make an author believe
     /// a file revoked while revocation still awaited a second signature.
-    Endorsed { have: u8, need: u8 },
+    Endorsed {
+        have: u8,
+        need: u8,
+    },
     /// Attestation challenge for this conversation.
     AttestNonce([u8; crate::attestation::SECRET_LEN]),
     /// Credentials for the attestation key: `TPM2B_ID_OBJECT ‖ TPM2B_ENCRYPTED_SECRET`.
     AttestCredential(Vec<u8>),
     /// Attestation accepted; basis: [`crate::attestation::basis`].
-    Attested { basis: u8 },
+    Attested {
+        basis: u8,
+    },
     /// Journal view: `crate::witness::View`, parsed on receipt.
     LogView(Box<crate::witness::View>),
     /// Directory record with inclusion proof (D4).
@@ -473,6 +526,9 @@ pub enum Response {
     /// “you were not issued a grant” is a legitimate state, not misconduct;
     /// the door tells the user “no grant issued,” not “server refused.”
     NoChain,
+    /// The server signature followed by the exact `Chain` or `NoChain` response frame.
+    /// Parse the inner frame only with [`verify_action_chain_reply`].
+    SignedActionChain(Vec<u8>),
     /// Complete action lease (`signature(64) ‖ body`): execute THIS.
     ActionGranted(Vec<u8>),
     /// Request queued under this number for the owner's live “yes.”
@@ -482,7 +538,9 @@ pub enum Response {
     /// The door retries the request with THE SAME `nonce` until receiving a lease or
     /// refusal; it must not wait for a response within the call itself — an agent call
     /// must not hang for minutes.
-    ActionPending { seq: u64 },
+    ActionPending {
+        seq: u64,
+    },
     /// Action not allowed, with a reason in words.
     ///
     /// Separate from [`Self::Denied`]; the distinction is essential: `Denied` concerns the
@@ -494,7 +552,9 @@ pub enum Response {
     /// Reason is REQUIRED and nonempty: without it, neither the user can understand
     /// what happened nor the agent correct its request. The codec itself rejects an
     /// empty string, so our side cannot produce one.
-    ActionRefused { why: String },
+    ActionRefused {
+        why: String,
+    },
     /// Queue of requests awaiting the owner's “yes”: consecutive `u32le length ‖ document
     /// PendingAction` (`crate::action::split_action_queue`).
     ///
@@ -698,6 +758,77 @@ const KIND_ACTION_PENDING: u8 = 63;
 const KIND_ACTION_REFUSED: u8 = 64;
 const KIND_ACTION_QUEUE: u8 = 65;
 
+pub const KIND_FETCH_ACTION_CHAIN: u8 = 66;
+const KIND_SIGNED_ACTION_CHAIN: u8 = 67;
+
+/// Two MiB frame limit excluding the kind byte.
+const MAX_SIGNED_ACTION_CHAIN: usize = 2 * 1024 * 1024 - 1;
+
+fn check_signed_action_chain_len(len: usize) -> Result<(), FormatError> {
+    if len <= oc_crypto::sign::SIGNATURE_LEN || len > MAX_SIGNED_ACTION_CHAIN {
+        return Err(FormatError::BadFieldLength { tag: 0, len });
+    }
+    Ok(())
+}
+
+fn action_chain_transcript(
+    holder_fpr: &[u8; 32],
+    nonce: &[u8; 32],
+    frame: &[u8],
+) -> oc_crypto::Transcript {
+    let mut transcript = oc_crypto::Transcript::new(oc_crypto::label::ACTION_CHAIN_REPLY);
+    transcript.field(holder_fpr).field(nonce).field(&oc_crypto::sha256(frame));
+    transcript
+}
+
+/// Sign the entire response for one holder request.
+///
+/// # Errors
+/// Unsupported response kind, encoding, size or signature failure.
+pub fn sign_action_chain_reply(
+    reply: &Response,
+    holder_fpr: &[u8; 32],
+    nonce: &[u8; 32],
+    signer: &dyn oc_crypto::sign::Signer,
+) -> Result<Response, FormatError> {
+    if !matches!(reply, Response::Chain { .. } | Response::NoChain) {
+        return Err(FormatError::UnknownCriticalField { tag: u16::from(KIND_SIGNED_ACTION_CHAIN) });
+    }
+    let frame = encode_response(reply)?;
+    check_signed_action_chain_len(frame.len().saturating_add(oc_crypto::sign::SIGNATURE_LEN))?;
+    let signature = signer
+        .sign(&action_chain_transcript(holder_fpr, nonce, &frame))
+        .map_err(|_| FormatError::BadHeaderSignature)?;
+    let mut signed = signature.to_vec();
+    signed.extend_from_slice(&frame);
+    Ok(Response::SignedActionChain(signed))
+}
+
+/// Verify with the pinned server key before parsing the inner frame.
+///
+/// # Errors
+/// Invalid size, signature, request binding or inner frame.
+pub fn verify_action_chain_reply(
+    signed: &[u8],
+    holder_fpr: &[u8; 32],
+    nonce: &[u8; 32],
+    lease_key: &[u8; 32],
+) -> Result<Response, FormatError> {
+    check_signed_action_chain_len(signed.len())?;
+    let (signature, frame) = signed
+        .split_first_chunk::<{ oc_crypto::sign::SIGNATURE_LEN }>()
+        .ok_or(FormatError::BadFieldLength { tag: 0, len: signed.len() })?;
+    oc_crypto::sign::verify(
+        lease_key,
+        &action_chain_transcript(holder_fpr, nonce, frame),
+        signature,
+    )
+    .map_err(|_| FormatError::BadHeaderSignature)?;
+    match decode_response(frame)? {
+        reply @ (Response::Chain { .. } | Response::NoChain) => Ok(reply),
+        _ => Err(FormatError::UnknownCriticalField { tag: u16::from(KIND_SIGNED_ACTION_CHAIN) }),
+    }
+}
 /// Body tags for [`Response::Chain`].
 ///
 /// Before stage 2, the body was a BARE document stream without framing. The stream
@@ -796,7 +927,10 @@ fn decode_view_request(body: &[u8]) -> Result<(u64, u64), FormatError> {
     let raw: &[u8; 16] = body.try_into().map_err(|_| FormatError::BadFieldLength { tag: 0, len: body.len() })?;
     let (since, upto) = raw.split_at(8);
     let bad = |_| FormatError::BadFieldLength { tag: 0, len: body.len() };
-    Ok((u64::from_le_bytes(since.try_into().map_err(bad)?), u64::from_le_bytes(upto.try_into().map_err(bad)?)))
+    Ok((
+        u64::from_le_bytes(since.try_into().map_err(bad)?),
+        u64::from_le_bytes(upto.try_into().map_err(bad)?),
+    ))
 }
 
 const NOTICE_HEARTBEAT: u8 = 0;
@@ -865,7 +999,10 @@ fn encode_watch(files: &[[u8; 16]], since: u64) -> Result<Vec<u8>, FormatError> 
     }
     let mut out = Vec::with_capacity(9usize.saturating_add(files.len().saturating_mul(16)));
     out.extend_from_slice(&since.to_le_bytes());
-    out.push(u8::try_from(files.len()).map_err(|_| FormatError::BadFieldLength { tag: 0, len: files.len() })?);
+    out.push(
+        u8::try_from(files.len())
+            .map_err(|_| FormatError::BadFieldLength { tag: 0, len: files.len() })?,
+    );
     for file in files {
         out.extend_from_slice(file);
     }
@@ -1026,7 +1163,10 @@ pub fn decode_req(bytes: &[u8]) -> Result<ActivateReq, FormatError> {
             req_tag::DEVICE_FPR => device_fpr = Some(exact32(field.tag, field.value)?),
             req_tag::DEVICE_KEM => {
                 let [byte] = field.value else {
-                    return Err(FormatError::BadFieldLength { tag: field.tag, len: field.value.len() });
+                    return Err(FormatError::BadFieldLength {
+                        tag: field.tag,
+                        len: field.value.len(),
+                    });
                 };
                 device_kem = Some(*byte);
             }
@@ -1037,33 +1177,49 @@ pub fn decode_req(bytes: &[u8]) -> Result<ActivateReq, FormatError> {
                 // разобранный документ, — там она уже есть для слотов, и второго
                 // места, где решается длина ключа, заводить нельзя.
                 if field.value.is_empty() {
-                    return Err(FormatError::BadFieldLength { tag: field.tag, len: field.value.len() });
+                    return Err(FormatError::BadFieldLength {
+                        tag: field.tag,
+                        len: field.value.len(),
+                    });
                 }
                 device_public = Some(field.value.to_vec());
             }
             req_tag::SERVER_SLOT => slot = Some(decode_slot(field.value)?),
             req_tag::LEASE_SECONDS => {
-                let value: [u8; 8] =
-                    field.value.try_into().map_err(|_| FormatError::BadFieldLength { tag: field.tag, len: field.value.len() })?;
+                let value: [u8; 8] = field.value.try_into().map_err(|_| {
+                    FormatError::BadFieldLength { tag: field.tag, len: field.value.len() }
+                })?;
                 lease_seconds = Some(i64::from_le_bytes(value));
             }
             req_tag::DEVICE_CLOCK => {
-                let reset = field.value.get(..4).ok_or(FormatError::BadFieldLength { tag: field.tag, len: field.value.len() })?;
-                let ms = field.value.get(4..12).ok_or(FormatError::BadFieldLength { tag: field.tag, len: field.value.len() })?;
-                let at = field.value.get(12..20).ok_or(FormatError::BadFieldLength { tag: field.tag, len: field.value.len() })?;
+                let reset = field.value.get(..4).ok_or(FormatError::BadFieldLength {
+                    tag: field.tag,
+                    len: field.value.len(),
+                })?;
+                let ms = field.value.get(4..12).ok_or(FormatError::BadFieldLength {
+                    tag: field.tag,
+                    len: field.value.len(),
+                })?;
+                let at = field.value.get(12..20).ok_or(FormatError::BadFieldLength {
+                    tag: field.tag,
+                    len: field.value.len(),
+                })?;
                 if field.value.len() != 20 {
-                    return Err(FormatError::BadFieldLength { tag: field.tag, len: field.value.len() });
+                    return Err(FormatError::BadFieldLength {
+                        tag: field.tag,
+                        len: field.value.len(),
+                    });
                 }
                 device_clock = Some(ClockReport {
-                    reset_count: u32::from_le_bytes(
-                        reset.try_into().map_err(|_| FormatError::BadFieldLength { tag: field.tag, len: field.value.len() })?,
-                    ),
-                    clock_ms: u64::from_le_bytes(
-                        ms.try_into().map_err(|_| FormatError::BadFieldLength { tag: field.tag, len: field.value.len() })?,
-                    ),
-                    read_at: i64::from_le_bytes(
-                        at.try_into().map_err(|_| FormatError::BadFieldLength { tag: field.tag, len: field.value.len() })?,
-                    ),
+                    reset_count: u32::from_le_bytes(reset.try_into().map_err(|_| {
+                        FormatError::BadFieldLength { tag: field.tag, len: field.value.len() }
+                    })?),
+                    clock_ms: u64::from_le_bytes(ms.try_into().map_err(|_| {
+                        FormatError::BadFieldLength { tag: field.tag, len: field.value.len() }
+                    })?),
+                    read_at: i64::from_le_bytes(at.try_into().map_err(|_| {
+                        FormatError::BadFieldLength { tag: field.tag, len: field.value.len() }
+                    })?),
                 });
             }
             // Длина точная (И-8): короткое тождество, дополненное нулями, совпало
@@ -1196,10 +1352,9 @@ pub fn decode_deny(bytes: &[u8]) -> Result<Deny, FormatError> {
     while let Some(field) = reader.next_field()? {
         match field.tag {
             deny_tag::TEXT => {
-                text = Some(
-                    String::from_utf8(field.value.to_vec())
-                        .map_err(|_| FormatError::BadFieldLength { tag: deny_tag::TEXT, len: field.value.len() })?,
-                );
+                text = Some(String::from_utf8(field.value.to_vec()).map_err(|_| {
+                    FormatError::BadFieldLength { tag: deny_tag::TEXT, len: field.value.len() }
+                })?);
             }
             deny_tag::OPERATION_ID => operation_id = Some(exact32(field.tag, field.value)?),
             other => crate::unknown::refuse_if_critical(other)?,
@@ -1382,7 +1537,10 @@ pub fn decode_proof(bytes: &[u8]) -> Result<Proof, FormatError> {
         match field.tag {
             proof_tag::ECHO => {
                 if field.value.len() != 32 {
-                    return Err(FormatError::BadFieldLength { tag: field.tag, len: field.value.len() });
+                    return Err(FormatError::BadFieldLength {
+                        tag: field.tag,
+                        len: field.value.len(),
+                    });
                 }
                 echo = Some(field.value.to_vec());
             }
@@ -1405,6 +1563,7 @@ pub const fn is_session_sealed(kind: u8) -> bool {
     matches!(
         kind,
         KIND_ACTIVATE | KIND_RENEW | KIND_ATTEST_OPEN | KIND_ATTEST_EVIDENCE | KIND_ATTEST_SECRET
+            | KIND_FETCH_ACTION_CHAIN
     )
 }
 
@@ -1450,14 +1609,21 @@ pub fn encode_request(request: &Request) -> Result<Vec<u8>, FormatError> {
         Request::Endorse { signer, order } => (KIND_ENDORSE, encode_endorse(signer, order)?),
         Request::Standing { file_id } => (KIND_STANDING_REQ, file_id.to_vec()),
         Request::AttestOpen => (KIND_ATTEST_OPEN, Vec::new()),
-        Request::AttestEvidence(e) => (KIND_ATTEST_EVIDENCE, crate::attestation::encode_evidence(e)?),
+        Request::AttestEvidence(e) => {
+            (KIND_ATTEST_EVIDENCE, crate::attestation::encode_evidence(e)?)
+        }
         Request::AttestSecret(secret) => (KIND_ATTEST_SECRET, secret.to_vec()),
         Request::RegisterEdition(claim) => (KIND_REGISTER_EDITION, opaque(claim)?),
-        Request::JournalView { since, upto } => (KIND_JOURNAL_VIEW_REQ, view_request(*since, *upto)),
-        Request::DirectoryView { since, upto } => (KIND_DIRECTORY_VIEW_REQ, view_request(*since, *upto)),
-        Request::DirectoryLookup { tenant, name, size } => {
-            (KIND_DIRECTORY_LOOKUP_REQ, crate::directory::encode_lookup_request(tenant, name, *size)?)
+        Request::JournalView { since, upto } => {
+            (KIND_JOURNAL_VIEW_REQ, view_request(*since, *upto))
         }
+        Request::DirectoryView { since, upto } => {
+            (KIND_DIRECTORY_VIEW_REQ, view_request(*since, *upto))
+        }
+        Request::DirectoryLookup { tenant, name, size } => (
+            KIND_DIRECTORY_LOOKUP_REQ,
+            crate::directory::encode_lookup_request(tenant, name, *size)?,
+        ),
         Request::DirectoryRecords { from, count } => {
             let mut body = Vec::with_capacity(12);
             body.extend_from_slice(&from.to_le_bytes());
@@ -1470,6 +1636,9 @@ pub fn encode_request(request: &Request) -> Result<Vec<u8>, FormatError> {
         Request::PutGrant(grant) => (KIND_PUT_GRANT, opaque(grant)?),
         Request::PutDelegation(link) => (KIND_PUT_DELEGATION, opaque(link)?),
         Request::FetchChain { holder_fpr } => (KIND_FETCH_CHAIN, holder_fpr.to_vec()),
+        Request::FetchActionChain { holder_fpr, nonce } => {
+            (KIND_FETCH_ACTION_CHAIN, [holder_fpr.as_slice(), nonce.as_slice()].concat())
+        }
         Request::PutActionGrant(grant) => (KIND_PUT_ACTION_GRANT, opaque(grant)?),
         Request::RequestAction(ask) => (KIND_REQUEST_ACTION, opaque(ask)?),
         Request::ReportAction { seq, ok, digest } => {
@@ -1526,7 +1695,10 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, FormatError> {
             if count == 0 || count > crate::directory::MAX_PAGE {
                 return Err(FormatError::BadFieldLength { tag: 0, len: body.len() });
             }
-            Ok(Request::DirectoryRecords { from: u64::from_le_bytes(from.try_into().map_err(bad)?), count })
+            Ok(Request::DirectoryRecords {
+                from: u64::from_le_bytes(from.try_into().map_err(bad)?),
+                count,
+            })
         }
         KIND_ENDORSE => {
             let (signer, order) = decode_endorse(body)?;
@@ -1583,6 +1755,15 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, FormatError> {
                 .try_into()
                 .map_err(|_| FormatError::BadFieldLength { tag: 0, len: body.len() })?,
         }),
+
+        KIND_FETCH_ACTION_CHAIN => {
+            let bad_length = || FormatError::BadFieldLength { tag: 0, len: body.len() };
+            let (holder_fpr, nonce) = body.split_first_chunk::<32>().ok_or_else(bad_length)?;
+            Ok(Request::FetchActionChain {
+                holder_fpr: *holder_fpr,
+                nonce: nonce.try_into().map_err(|_| bad_length())?,
+            })
+        }
         KIND_PUT_ACTION_GRANT => Ok(Request::PutActionGrant(opaque(body)?)),
         KIND_REQUEST_ACTION => Ok(Request::RequestAction(opaque(body)?)),
         KIND_REPORT_ACTION => decode_report(body),
@@ -1666,14 +1847,9 @@ fn encode_register(header: &[u8], order: &[u8]) -> Result<Vec<u8>, FormatError> 
 }
 
 fn decode_register(body: &[u8]) -> Result<(Vec<u8>, Vec<u8>), FormatError> {
-    let (len, rest) = body.split_at_checked(4).ok_or(FormatError::Truncated {
-        need: 4,
-        have: body.len() as u64,
-    })?;
-    let len = u32::from_le_bytes(len.try_into().map_err(|_| FormatError::Truncated {
-        need: 4,
-        have: body.len() as u64,
-    })?);
+    let (len, rest) = body.split_at_checked(4).ok_or(FormatError::Truncated { need: 4, have: body.len() as u64 })?;
+    let len = u32::from_le_bytes(len.try_into().map_err(|_| FormatError::Truncated { need: 4, have: body.len() as u64 })?,
+    );
     let len = usize::try_from(len).map_err(|_| FormatError::BadFieldLength { tag: 0, len: 0 })?;
     if len == 0 || len > MAX_DOCUMENT {
         return Err(FormatError::BadFieldLength { tag: 0, len });
@@ -1801,11 +1977,7 @@ fn decode_chain_reply(
             other => crate::unknown::refuse_if_critical(other)?,
         }
     }
-    Ok((
-        documents.ok_or(FormatError::MissingField { tag: chain_tag::DOCUMENTS })?,
-        key,
-        actions,
-    ))
+    Ok((documents.ok_or(FormatError::MissingField { tag: chain_tag::DOCUMENTS })?, key, actions))
 }
 
 /// For a contentless kind, trailing bytes mean layout disagreement, not “extra data.”
@@ -1845,7 +2017,9 @@ pub fn encode_response(response: &Response) -> Result<Vec<u8>, FormatError> {
         Response::Attested { basis } => (KIND_ATTESTED, vec![*basis]),
         Response::LogView(view) => (KIND_LOG_VIEW, view.encode()?),
         Response::DirectoryEntry(lookup) => (KIND_DIRECTORY_ENTRY, lookup.encode()?),
-        Response::DirectoryRecords(records) => (KIND_DIRECTORY_RECORDS, crate::directory::encode_page(records)?),
+        Response::DirectoryRecords(records) => {
+            (KIND_DIRECTORY_RECORDS, crate::directory::encode_page(records)?)
+        }
         Response::Receipt(bytes) => (KIND_RECEIPT, opaque(bytes)?),
         Response::Binding(bytes) => (KIND_BINDING, opaque(bytes)?),
         Response::ReplicaAck(bytes) => (KIND_REPLICA_ACK, opaque(bytes)?),
@@ -1855,13 +2029,13 @@ pub fn encode_response(response: &Response) -> Result<Vec<u8>, FormatError> {
         // обнаружилось бы это у двери, как «сервер прислал мусор».
         Response::Chain { documents, lease_verify_key, action_grant } => (
             KIND_CHAIN,
-            encode_chain_reply(
-                documents,
-                lease_verify_key.as_ref(),
-                action_grant.as_deref(),
-            )?,
+            encode_chain_reply(documents, lease_verify_key.as_ref(), action_grant.as_deref())?,
         ),
         Response::NoChain => (KIND_NO_CHAIN, Vec::new()),
+        Response::SignedActionChain(signed) => {
+            check_signed_action_chain_len(signed.len())?;
+            (KIND_SIGNED_ACTION_CHAIN, signed.clone())
+        }
         Response::ActionGranted(lease) => (KIND_ACTION_GRANTED, opaque(lease)?),
         Response::ActionPending { seq } => (KIND_ACTION_PENDING, seq.to_le_bytes().to_vec()),
         // Причина проверяется НА ОТПРАВКЕ: пустой отказ наш писатель произвести
@@ -1906,8 +2080,12 @@ pub fn decode_response(bytes: &[u8]) -> Result<Response, FormatError> {
         KIND_NOT_REVOKED => no_body(body).map(|()| Response::NotRevoked),
         KIND_STANDING => Ok(Response::Standing(opaque(body)?)),
         KIND_LOG_VIEW => Ok(Response::LogView(Box::new(crate::witness::View::decode(body)?))),
-        KIND_DIRECTORY_ENTRY => Ok(Response::DirectoryEntry(Box::new(crate::directory::Lookup::decode(body)?))),
-        KIND_DIRECTORY_RECORDS => Ok(Response::DirectoryRecords(crate::directory::decode_page(body)?)),
+        KIND_DIRECTORY_ENTRY => {
+            Ok(Response::DirectoryEntry(Box::new(crate::directory::Lookup::decode(body)?)))
+        }
+        KIND_DIRECTORY_RECORDS => {
+            Ok(Response::DirectoryRecords(crate::directory::decode_page(body)?))
+        }
         KIND_RECEIPT => Ok(Response::Receipt(opaque(body)?)),
         KIND_BINDING => Ok(Response::Binding(opaque(body)?)),
         KIND_REPLICA_ACK => Ok(Response::ReplicaAck(opaque(body)?)),
@@ -1920,6 +2098,11 @@ pub fn decode_response(bytes: &[u8]) -> Result<Response, FormatError> {
             Ok(Response::Chain { documents, lease_verify_key, action_grant })
         }
         KIND_NO_CHAIN => no_body(body).map(|()| Response::NoChain),
+
+        KIND_SIGNED_ACTION_CHAIN => {
+            check_signed_action_chain_len(body.len())?;
+            Ok(Response::SignedActionChain(body.to_vec()))
+        }
         KIND_ACTION_GRANTED => Ok(Response::ActionGranted(opaque(body)?)),
         KIND_ACTION_PENDING => {
             let raw: [u8; 8] = body
@@ -1941,9 +2124,10 @@ pub fn decode_response(bytes: &[u8]) -> Result<Response, FormatError> {
             Ok(Response::AttestCredential(body.to_vec()))
         }
         KIND_ATTESTED => match body {
-            [basis @ (crate::attestation::basis::VENDOR_CERTIFICATE | crate::attestation::basis::ENROLLED_EK)] => {
-                Ok(Response::Attested { basis: *basis })
-            }
+            [
+                basis @ (crate::attestation::basis::VENDOR_CERTIFICATE
+                | crate::attestation::basis::ENROLLED_EK),
+            ] => Ok(Response::Attested { basis: *basis }),
             other => Err(FormatError::BadFieldLength { tag: 0, len: other.len() }),
         },
         KIND_ENDORSED => match body {
@@ -2161,8 +2345,18 @@ mod tests {
         assert_eq!(decode_request(&encode_request(&watch).unwrap()).unwrap(), watch);
         for notice in [
             Notice::Heartbeat,
-            Notice::Event { seq: 9, event: journal_event::ACCESS_DECIDED, file_id: [1; 16], device_fpr: Some([0x33; 32]) },
-            Notice::Event { seq: 10, event: journal_event::REVOKED, file_id: [1; 16], device_fpr: None },
+            Notice::Event {
+                seq: 9,
+                event: journal_event::ACCESS_DECIDED,
+                file_id: [1; 16],
+                device_fpr: Some([0x33; 32]),
+            },
+            Notice::Event {
+                seq: 10,
+                event: journal_event::REVOKED,
+                file_id: [1; 16],
+                device_fpr: None,
+            },
         ] {
             let bytes = encode_response(&Response::Notice(notice.clone())).unwrap();
             assert_eq!(decode_response(&bytes).unwrap(), Response::Notice(notice));
@@ -2557,6 +2751,44 @@ mod tests {
     /// Positive control alongside: a chain exactly at the limit is ACCEPTED;
     /// an unconditional refusal looks the same with a broken check and with broken
     /// assembly.
+    #[test]
+    fn a_signed_action_chain_is_bound_to_key_holder_nonce_and_frame() {
+        use oc_crypto::sign::{Ed25519Signer, Signer as _};
+
+        let server = Ed25519Signer::from_seed(&[0x52; 32]);
+        let key = server.public_key();
+        let holder_fpr = [0x53; 32];
+        let nonce = [0x54; 32];
+        let request = Request::FetchActionChain { holder_fpr, nonce };
+        let mut wire = encode_request(&request).unwrap();
+        assert!(is_session_sealed(KIND_FETCH_ACTION_CHAIN));
+        assert_eq!(decode_request(&wire).unwrap(), request);
+        wire.push(0);
+        assert!(decode_request(&wire).is_err());
+
+        let reply = Response::Chain {
+            documents: join_chain(&[&[0x55; 20]]).unwrap(),
+            lease_verify_key: Some(key),
+            action_grant: Some(vec![0x56; 20]),
+        };
+        let signed = sign_action_chain_reply(&reply, &holder_fpr, &nonce, &server).unwrap();
+        let wire = encode_response(&signed).unwrap();
+        let Response::SignedActionChain(mut signed) = decode_response(&wire).unwrap() else {
+            panic!("ответ цепочки разобран как другой вид");
+        };
+        assert_eq!(verify_action_chain_reply(&signed, &holder_fpr, &nonce, &key).unwrap(), reply);
+        let other_key = Ed25519Signer::from_seed(&[0x57; 32]).public_key();
+        for (holder, value, expected_key) in [
+            ([0x58; 32], nonce, key),
+            (holder_fpr, [0x59; 32], key),
+            (holder_fpr, nonce, other_key),
+        ] {
+            assert!(verify_action_chain_reply(&signed, &holder, &value, &expected_key).is_err());
+        }
+        *signed.last_mut().unwrap() ^= 1;
+        assert!(verify_action_chain_reply(&signed, &holder_fpr, &nonce, &key).is_err());
+    }
+
     #[test]
     fn a_chain_body_is_refused_above_the_ceiling_and_when_it_does_not_add_up() {
         let full: Vec<Vec<u8>> = (0..MAX_CHAIN_DOCUMENTS).map(|n| vec![n as u8; 40]).collect();

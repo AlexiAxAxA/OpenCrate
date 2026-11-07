@@ -13,11 +13,11 @@
 //! `CC/v1/authority-binding`, `CC/v1/control-request`, and
 //! `CC/v1/operation-receipt` over the body.
 
-use oc_format::FormatError;
-use oc_format::tlv::{TlvReader, TlvWriter};
 use oc_crypto::sign::Signer;
 use oc_crypto::transcript::Transcript;
 use oc_crypto::{label, sha256};
+use oc_format::FormatError;
+use oc_format::tlv::{TlvReader, TlvWriter};
 
 /// Layout version of all three documents.
 pub const VERSION: u8 = 1;
@@ -127,7 +127,9 @@ impl Status {
 fn check_tenant(tenant: &str, tag: u16) -> Result<(), FormatError> {
     let ok = !tenant.is_empty()
         && tenant.len() <= crate::directory::MAX_TENANT
-        && tenant.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-' || b == b'_');
+        && tenant.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-' || b == b'_'
+        });
     if ok { Ok(()) } else { Err(bad(tag, tenant.len())) }
 }
 
@@ -427,8 +429,12 @@ impl Binding {
                 t::DURABILITY => {
                     durability = Some(Durability::from_u8(u8_field(v, f.tag)?).ok_or(bad(f.tag, 1))?);
                 }
-                t::RECOVERY => recovery = Some(Recovery::from_u8(u8_field(v, f.tag)?).ok_or(bad(f.tag, 1))?),
-                t::STATUS => status = Some(Status::from_u8(u8_field(v, f.tag)?).ok_or(bad(f.tag, 1))?),
+                t::RECOVERY => {
+                    recovery = Some(Recovery::from_u8(u8_field(v, f.tag)?).ok_or(bad(f.tag, 1))?)
+                }
+                t::STATUS => {
+                    status = Some(Status::from_u8(u8_field(v, f.tag)?).ok_or(bad(f.tag, 1))?)
+                }
                 t::ROSTER => roster = Some(decode_keys(v, MAX_ROSTER, f.tag)?),
                 t::THRESHOLD => threshold = Some(u8_field(v, f.tag)?),
                 t::OPERATION_ID => operation_id = Some(array(v, f.tag)?),
@@ -501,7 +507,12 @@ pub enum Continuity {
 
 /// Compare a binding with a previously seen one.
 #[must_use]
-pub fn continuity(seen: &Binding, seen_bytes: &[u8], new: &Binding, new_bytes: &[u8]) -> Continuity {
+pub fn continuity(
+    seen: &Binding,
+    seen_bytes: &[u8],
+    new: &Binding,
+    new_bytes: &[u8],
+) -> Continuity {
     if seen.authority_id != new.authority_id || seen.tenant != new.tenant || seen.epoch != new.epoch {
         return Continuity::Unrelated;
     }
@@ -624,11 +635,17 @@ impl Payload {
         let [first, second] = fields;
         let one = first.ok_or(FormatError::MissingField { tag: 1 })?;
         let payload = match (kind, second) {
-            (1, Some(pins)) => Self::SetEndpoints { urls: decode_urls(one, 1)?, pins: decode_keys(pins, MAX_PINS, 2)? },
-            (2, None) => Self::SetDurability(Durability::from_u8(u8_field(one, 1)?).ok_or(bad(1, 1))?),
-            (3, Some(threshold)) => {
-                Self::SetRoster { keys: decode_keys(one, MAX_ROSTER, 1)?, threshold: u8_field(threshold, 2)? }
+            (1, Some(pins)) => Self::SetEndpoints {
+                urls: decode_urls(one, 1)?,
+                pins: decode_keys(pins, MAX_PINS, 2)?,
+            },
+            (2, None) => {
+                Self::SetDurability(Durability::from_u8(u8_field(one, 1)?).ok_or(bad(1, 1))?)
             }
+            (3, Some(threshold)) => Self::SetRoster {
+                keys: decode_keys(one, MAX_ROSTER, 1)?,
+                threshold: u8_field(threshold, 2)?,
+            },
             (4, None) => Self::SetRecovery(Recovery::from_u8(u8_field(one, 1)?).ok_or(bad(1, 1))?),
             (5, Some(reason)) => {
                 let status = Status::from_u8(u8_field(one, 1)?).ok_or(bad(1, 1))?;
@@ -744,7 +761,10 @@ impl ControlRequest {
             expected_revision: expected.ok_or(FormatError::MissingField { tag: t::EXPECTED_REVISION })?,
             issued_at: issued_at.ok_or(FormatError::MissingField { tag: t::ISSUED_AT })?,
             expires_at: expires_at.ok_or(FormatError::MissingField { tag: t::EXPIRES_AT })?,
-            payload: Payload::decode(kind, payload.ok_or(FormatError::MissingField { tag: t::PAYLOAD })?)?,
+            payload: Payload::decode(
+                kind,
+                payload.ok_or(FormatError::MissingField { tag: t::PAYLOAD })?,
+            )?,
         };
         // Без пропущенных необязательных записей — см. довод у `Binding::peek`.
         if request.body()? != skipped.strip(body) {
@@ -826,7 +846,11 @@ pub fn open_request(bytes: &[u8]) -> Result<SignedRequest, FormatError> {
         oc_crypto::sign::verify(key, &t, sig).map_err(|_| FormatError::BadHeaderSignature)?;
     }
     let request = ControlRequest::decode_body(body)?;
-    Ok(SignedRequest { request, body_hash: sha256(body), signers: signatures.into_iter().map(|(k, _)| k).collect() })
+    Ok(SignedRequest {
+        request,
+        body_hash: sha256(body),
+        signers: signatures.into_iter().map(|(k, _)| k).collect(),
+    })
 }
 
 /// Append another controller's signature over the same body.
@@ -962,7 +986,9 @@ impl Receipt {
                 t::VERSION => version = Some(u8_field(v, f.tag)?),
                 t::REQUEST_HASH => hash = Some(array(v, f.tag)?),
                 t::OPERATION_ID => op = Some(array(v, f.tag)?),
-                t::OUTCOME => outcome = Some(Outcome::from_u8(u8_field(v, f.tag)?).ok_or(bad(f.tag, 1))?),
+                t::OUTCOME => {
+                    outcome = Some(Outcome::from_u8(u8_field(v, f.tag)?).ok_or(bad(f.tag, 1))?)
+                }
                 t::REVISION => revision = Some(u64_field(v, f.tag)?),
                 t::COMMIT => commit = Some(array(v, f.tag)?),
                 t::EPOCH => epoch = Some(u64_field(v, f.tag)?),
@@ -1115,7 +1141,9 @@ impl Transfer {
                 t::TO_EPOCH => to = Some(u64_field(v, f.tag)?),
                 t::FROM_LEASE => key = Some(array(v, f.tag)?),
                 t::TRANSITION_AT => at = Some(i64_field(v, f.tag)?),
-                t::OLD_LEASES => old = Some(OldLeases::from_u8(u8_field(v, f.tag)?).ok_or(bad(f.tag, 1))?),
+                t::OLD_LEASES => {
+                    old = Some(OldLeases::from_u8(u8_field(v, f.tag)?).ok_or(bad(f.tag, 1))?)
+                }
                 t::ISSUED_AT => issued = Some(i64_field(v, f.tag)?),
                 t::EXPIRES_AT => expires = Some(i64_field(v, f.tag)?),
                 t::BINDING => binding = Some(v.to_vec()),
@@ -1193,6 +1221,31 @@ pub struct Effective {
     pub previous_keys: Vec<[u8; KEY]>,
 }
 
+/// A verified chain with the cutoff for each retired lease-signing key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedChain {
+    effective: Effective,
+    cutoffs: Vec<([u8; KEY], i64)>,
+}
+
+impl VerifiedChain {
+    #[must_use]
+    pub const fn effective(&self) -> &Effective {
+        &self.effective
+    }
+
+    #[must_use]
+    pub fn into_effective(self) -> Effective {
+        self.effective
+    }
+
+    /// Cutoff at which leases from this signer cease to be accepted.
+    #[must_use]
+    pub fn lease_cutoff(&self, key: &[u8; KEY]) -> Option<i64> {
+        self.cutoffs.iter().filter_map(|(retired, at)| (retired == key).then_some(*at)).min()
+    }
+}
+
 /// Why the chain was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainError {
@@ -1243,12 +1296,26 @@ pub fn verify_chain(
     anchor: &[u8; KEY],
     now: i64,
 ) -> Result<Effective, ChainError> {
+    verify_chain_with_cutoffs(first, transfers, anchor, now).map(VerifiedChain::into_effective)
+}
+
+/// Verify the chain and retain the issuance cutoff for each restricted key.
+///
+/// # Errors
+/// The same errors as [`verify_chain`].
+pub fn verify_chain_with_cutoffs(
+    first: &[u8],
+    transfers: &[Vec<u8>],
+    anchor: &[u8; KEY],
+    now: i64,
+) -> Result<VerifiedChain, ChainError> {
     let mut binding = Binding::open(first, anchor).map_err(|e| match e {
         FormatError::BadHeaderSignature => ChainError::NotAnchored,
         other => ChainError::Malformed(other.to_string()),
     })?;
     let mut bytes = first.to_vec();
     let mut previous_keys = Vec::new();
+    let mut cutoffs = Vec::new();
     let mut transition_at = None;
     let mut old_leases = None;
     for signed in transfers {
@@ -1284,12 +1351,21 @@ pub fn verify_chain(
             return Err(ChainError::Broken("привязка новой эпохи не та, что названа сертификатом"));
         }
         previous_keys.push(binding.lease_public);
+
+        if transfer.old_leases == OldLeases::RejectAfterTransition
+            && !oc_crypto::public_key_eq(&binding.lease_public, &next.lease_public)
+        {
+            cutoffs.push((binding.lease_public, transfer.transition_at));
+        }
         transition_at = Some(transfer.transition_at);
         old_leases = Some(transfer.old_leases);
         bytes = transfer.binding.clone();
         binding = next;
     }
-    Ok(Effective { binding, bytes, transition_at, old_leases, previous_keys })
+    Ok(VerifiedChain {
+        effective: Effective { binding, bytes, transition_at, old_leases, previous_keys },
+        cutoffs,
+    })
 }
 
 #[cfg(test)]
@@ -1385,7 +1461,10 @@ mod tests {
             expected_revision: 3,
             issued_at: 1_800_000_000,
             expires_at: 1_800_000_600,
-            payload: Payload::SetEndpoints { urls: vec!["a:1".into(), "b:2".into()], pins: vec![[5; 32]] },
+            payload: Payload::SetEndpoints {
+                urls: vec!["a:1".into(), "b:2".into()],
+                pins: vec![[5; 32]],
+            },
         }
     }
 
