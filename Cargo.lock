@@ -503,6 +503,8 @@ dependencies = [
 [[package]]
 name = "opencrate-sdk"
 version = "0.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e69e532f96042aeffed941bb9e89ba6ac449f9747f1897f7c47955719ff052"
 dependencies = [
  "getrandom",
  "oc-crypto",
